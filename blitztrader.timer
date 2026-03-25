@@ -1,0 +1,10 @@
+[Unit]
+Description=Start BlitzTrader at 9:00 AM IST
+Requires=blitztrader.service
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:00:00 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target

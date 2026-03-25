@@ -1,0 +1,20 @@
+# BlitzTrader Dependencies
+
+# Shoonya Broker API
+NorenRestApiPy>=0.0.22
+websocket-client>=1.7.0
+
+# Authentication
+pyotp>=2.9.0
+
+# AI Agent
+anthropic>=0.45.0
+
+# Telegram (uses raw requests — python-telegram-bot not needed)
+
+# Utilities
+python-dotenv>=1.0.0
+pytz>=2024.1
+
+# Logging / misc
+requests>=2.31.0

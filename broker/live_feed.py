@@ -1,0 +1,310 @@
+"""
+broker/live_feed.py — WebSocket live feed manager for BlitzTrader.
+Ported from SpreadTrader's websocket_worker.py (QThread → threading.Thread).
+
+Runs in a daemon thread, maintains a real-time price cache with:
+  LTP, best bid, best ask, bid qty, ask qty, timestamp.
+
+All reads from the cache are thread-safe (via threading.Lock).
+"""
+import json
+import logging
+import threading
+import time
+from typing import Optional, Callable
+
+logger = logging.getLogger("BlitzTrader.LiveFeed")
+
+
+class LiveFeedManager:
+    """
+    Manages Shoonya WebSocket connection in a background thread.
+    Maintains a real-time, thread-safe price cache.
+
+    Usage:
+        feed = LiveFeedManager(shoonya_client)
+        feed.start()
+        feed.subscribe([("NSE", "26000"), ("NSE", "26009")])
+        ...
+        bid, ask = feed.get_best_bid_ask("26000")
+        quote = feed.get_live_quote("26000")
+        ...
+        feed.stop()
+    """
+
+    # Stale threshold — fall back to REST if data is older than this (seconds)
+    STALE_THRESHOLD = 30.0
+
+    def __init__(self, shoonya_client, on_tick_callback: Optional[Callable] = None):
+        """
+        :param shoonya_client: Authenticated ShoonyaClient instance
+        :param on_tick_callback: Optional callback(token, quote_dict) on each tick
+        """
+        self._client = shoonya_client
+        self._on_tick_callback = on_tick_callback
+
+        # Thread-safe price cache: {token: {ltp, best_bid, best_ask, ...}}
+        self._cache: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+        # WebSocket thread
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+        self._connected = False
+
+        # Pending subscriptions (accumulated before WS opens)
+        self._pending_subs: list[tuple[str, str]] = []
+        self._active_subs: list[tuple[str, str]] = []
+
+        # Reconnect control
+        self._reconnect_delay = 5.0
+        self._max_reconnect_delay = 60.0
+
+    # ──────────────────────────────────────────────────────────
+    #   LIFECYCLE
+    # ──────────────────────────────────────────────────────────
+
+    def start(self):
+        """Start the WebSocket connection in a daemon thread."""
+        if self._running:
+            logger.warning("LiveFeedManager already running")
+            return
+
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._ws_loop,
+            name="BlitzTrader-LiveFeed",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("LiveFeedManager started")
+
+    def stop(self):
+        """Stop the WebSocket and background thread."""
+        self._running = False
+        self._connected = False
+        try:
+            self._client.close_websocket()
+        except Exception:
+            pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=10)
+        logger.info("LiveFeedManager stopped")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    # ──────────────────────────────────────────────────────────
+    #   SUBSCRIPTIONS
+    # ──────────────────────────────────────────────────────────
+
+    def subscribe(self, exchange_token_pairs: list[tuple[str, str]]):
+        """
+        Subscribe to touchline feed for given (exchange, token) pairs.
+        Can be called before or after WebSocket connects.
+        """
+        new_pairs = [
+            p for p in exchange_token_pairs
+            if p not in self._active_subs and p not in self._pending_subs
+        ]
+        if not new_pairs:
+            return
+
+        if self._connected:
+            self._client.subscribe(new_pairs)
+            self._active_subs.extend(new_pairs)
+        else:
+            self._pending_subs.extend(new_pairs)
+
+    def unsubscribe(self, exchange_token_pairs: list[tuple[str, str]]):
+        """Unsubscribe from given tokens."""
+        if self._connected:
+            self._client.unsubscribe(exchange_token_pairs)
+        self._active_subs = [
+            p for p in self._active_subs if p not in exchange_token_pairs
+        ]
+        self._pending_subs = [
+            p for p in self._pending_subs if p not in exchange_token_pairs
+        ]
+        # Clean cache
+        with self._lock:
+            for _, token in exchange_token_pairs:
+                self._cache.pop(token, None)
+
+    # ──────────────────────────────────────────────────────────
+    #   CACHE READS (Thread-Safe)
+    # ──────────────────────────────────────────────────────────
+
+    def get_live_quote(self, token: str) -> Optional[dict]:
+        """
+        Get cached live quote for a token.
+        Returns dict: {ltp, best_bid, best_ask, bid_qty, ask_qty, timestamp}
+        Returns None if no data for this token.
+        """
+        with self._lock:
+            return self._cache.get(token, None)
+
+    def get_best_bid_ask(self, token: str) -> Optional[tuple[float, float]]:
+        """
+        Get best (bid, ask) from cache.
+        Returns None if no data or data is stale.
+        """
+        with self._lock:
+            entry = self._cache.get(token)
+            if not entry:
+                return None
+            # Check staleness
+            age = time.time() - entry.get("timestamp", 0)
+            if age > self.STALE_THRESHOLD:
+                logger.warning(
+                    f"Stale data for token {token} (age={age:.1f}s), "
+                    "caller should use REST fallback"
+                )
+                return None
+            bid = entry.get("best_bid")
+            ask = entry.get("best_ask")
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                return bid, ask
+        return None
+
+    def get_ltp(self, token: str) -> Optional[float]:
+        """Get cached LTP for a token."""
+        with self._lock:
+            entry = self._cache.get(token)
+            if entry:
+                age = time.time() - entry.get("timestamp", 0)
+                if age <= self.STALE_THRESHOLD:
+                    return entry.get("ltp")
+        return None
+
+    def get_all_quotes(self) -> dict[str, dict]:
+        """Get a snapshot of all cached quotes."""
+        with self._lock:
+            return dict(self._cache)
+
+    # ──────────────────────────────────────────────────────────
+    #   WEBSOCKET LOOP (runs in thread)
+    # ──────────────────────────────────────────────────────────
+
+    def _ws_loop(self):
+        """Main loop: connect → process → reconnect on failure."""
+        delay = self._reconnect_delay
+
+        while self._running:
+            try:
+                logger.info("Connecting WebSocket...")
+                self._client.start_websocket(
+                    on_open=self._on_open,
+                    on_tick=self._on_tick,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+            except Exception:
+                logger.exception("WebSocket connection failed")
+
+            self._connected = False
+
+            if not self._running:
+                break
+
+            # Reconnect with backoff
+            logger.info(f"Reconnecting in {delay:.0f}s...")
+            time.sleep(delay)
+            delay = min(delay * 1.5, self._max_reconnect_delay)
+
+        logger.info("WebSocket loop exited")
+
+    # ──────────────────────────────────────────────────────────
+    #   WEBSOCKET CALLBACKS
+    # ──────────────────────────────────────────────────────────
+
+    def _on_open(self, ws):
+        """Called when WebSocket connects successfully."""
+        self._connected = True
+        self._reconnect_delay = 5.0  # Reset backoff
+        logger.info("WebSocket connected")
+
+        # Subscribe pending tokens
+        all_subs = self._pending_subs + self._active_subs
+        if all_subs:
+            self._client.subscribe(all_subs)
+            self._active_subs = list(set(all_subs))
+            self._pending_subs = []
+            logger.info(f"Subscribed to {len(self._active_subs)} tokens")
+
+    def _on_tick(self, ws, message):
+        """Parse touchline message and update cache."""
+        try:
+            if isinstance(message, str):
+                data = json.loads(message)
+            elif isinstance(message, dict):
+                data = message
+            else:
+                return
+
+            msg_type = data.get("t", "")
+            if msg_type not in ("tf", "tk"):
+                return
+
+            token = data.get("tk", "")
+            if not token:
+                return
+
+            # Build quote update — Shoonya sends partial updates,
+            # so we merge with existing cache
+            now = time.time()
+
+            with self._lock:
+                existing = self._cache.get(token, {})
+
+                # Update only fields that are present in this tick
+                if "lp" in data:
+                    existing["ltp"] = float(data["lp"])
+                if "bp1" in data:
+                    existing["best_bid"] = float(data["bp1"])
+                if "sp1" in data:
+                    existing["best_ask"] = float(data["sp1"])
+                if "bq1" in data:
+                    existing["bid_qty"] = int(data["bq1"])
+                if "sq1" in data:
+                    existing["ask_qty"] = int(data["sq1"])
+                if "oi" in data:
+                    existing["oi"] = int(data["oi"])
+                if "v" in data:
+                    existing["volume"] = int(data["v"])
+                if "h" in data:
+                    existing["high"] = float(data["h"])
+                if "l" in data:
+                    existing["low"] = float(data["l"])
+                if "o" in data:
+                    existing["open"] = float(data["o"])
+                if "c" in data:
+                    existing["prev_close"] = float(data["c"])
+
+                existing["timestamp"] = now
+                existing["token"] = token
+
+                self._cache[token] = existing
+
+            # External callback
+            if self._on_tick_callback:
+                try:
+                    self._on_tick_callback(token, existing)
+                except Exception:
+                    logger.exception("Error in on_tick_callback")
+
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+        except Exception:
+            logger.exception("Unexpected error parsing WebSocket message")
+
+    def _on_error(self, ws, error):
+        """Called on WebSocket error."""
+        logger.error(f"WebSocket error: {error}")
+        self._connected = False
+
+    def _on_close(self, ws, code, msg):
+        """Called when WebSocket closes."""
+        self._connected = False
+        logger.warning(f"WebSocket closed: code={code} msg={msg}")

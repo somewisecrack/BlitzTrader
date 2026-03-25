@@ -1,0 +1,25 @@
+# Credentials — never commit
+.env
+
+# Runtime data
+logs/
+journals/
+live_state.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Backups
+strategies/*.bak
+
+# macOS
+.DS_Store

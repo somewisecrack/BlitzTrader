@@ -1,0 +1,28 @@
+[Unit]
+Description=BlitzTrader Autonomous Trading Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blitztrader
+Group=blitztrader
+WorkingDirectory=/opt/blitztrader
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/blitztrader/.env
+
+ExecStart=/opt/blitztrader/venv/bin/python main.py
+
+# Graceful shutdown
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart only on unexpected failures (not normal exit)
+Restart=no
+
+# Logging
+StandardOutput=append:/opt/blitztrader/logs/systemd.log
+StandardError=append:/opt/blitztrader/logs/systemd.log
+
+[Install]
+WantedBy=multi-user.target
