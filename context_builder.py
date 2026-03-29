@@ -249,7 +249,9 @@ Open positions: {pos_summary}
 The trader has sent you a message on Telegram:
 {messages_text}
 
-Respond directly and conversationally via send_telegram(). Use your tools if you need
+Respond directly and conversationally via send_telegram().
+You can answer ANY natural question: "whats happening?", "how am I doing?", "should I close positions?", etc.
+Use your tools to get market data or position info if needed to answer the question accurately.
 live data to answer accurately. Be concise and helpful. Do not run a full market
 analysis unless specifically asked — this is a chat response, not a scheduled iteration."""
 
