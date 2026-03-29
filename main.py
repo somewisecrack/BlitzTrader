@@ -7,7 +7,7 @@ This is the entry point. It manages the full trading day:
   3:15 PM  → Force EOD sequence, update memory
   3:25 PM  → Cleanup and exit
 
-The LLM (Claude) is the brain. This script is the skeleton.
+The LLM (Mixtral via Groq) is the brain. This script is the skeleton.
 Two types of agent iterations:
   - Scheduled: every 60 seconds for market analysis
   - Chat:      immediately on any Telegram message
@@ -25,8 +25,8 @@ import pytz
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
-    ANTHROPIC_API_KEY,
-    ANTHROPIC_MODEL,
+    GROQ_API_KEY,
+    GROQ_MODEL,
     JOURNALS_DIR,
     LOGS_DIR,
     LOOP_INTERVAL_SECONDS,
@@ -176,8 +176,12 @@ class BlitzTrader:
         logger.info("✓ Shoonya login successful")
         self._telegram.send_telegram("✅ Shoonya login successful! Initializing agent...")
 
-        # 2. Live feed (WebSocket)
-        self._feed = LiveFeedManager(self._shoonya)
+        # 2. Live feed (WebSocket) with health alerts
+        def on_feed_health_alert(msg: str):
+            logger.warning(msg)
+            self._telegram.send_telegram(msg)
+
+        self._feed = LiveFeedManager(self._shoonya, on_health_alert=on_feed_health_alert)
         self._feed.start()
 
         index_tokens = [
@@ -242,8 +246,8 @@ class BlitzTrader:
 
         # 12. Agent loop
         self._agent = AgentLoop(
-            api_key=ANTHROPIC_API_KEY,
-            model=ANTHROPIC_MODEL,
+            api_key=GROQ_API_KEY,
+            model=GROQ_MODEL,
             tool_registry=registry,
             system_prompt=SYSTEM_PROMPT,
         )
@@ -257,10 +261,10 @@ class BlitzTrader:
     def _startup_phase(self):
         """
         Pre-market startup:
-        - Claude reads memory and past journals
-        - Claude reads today's strategies
-        - Claude sets session goals
-        - Claude sends Telegram summary
+        - Mixtral reads memory and past journals
+        - Mixtral reads today's strategies
+        - Mixtral sets session goals
+        - Mixtral sends Telegram summary
         """
         logger.info("=== STARTUP PHASE ===")
 
@@ -290,6 +294,8 @@ class BlitzTrader:
         iteration = 0
         consecutive_errors = 0
         last_scheduled_at = None  # time of last full 60-second iteration
+        last_feed_health_alert = None  # avoid spam
+        feed_disconnect_start = None  # track how long feed is disconnected
 
         while self._running:
             now = datetime.now(IST)
@@ -302,6 +308,26 @@ class BlitzTrader:
                 self._agent.run_iteration(eod_context)
                 self._running = False
                 return
+
+            # ── Monitor feed health ──
+            if not self._feed.is_connected:
+                if feed_disconnect_start is None:
+                    feed_disconnect_start = now
+                disconnect_duration = (now - feed_disconnect_start).total_seconds()
+
+                # Alert if disconnected > 30 seconds (but don't spam)
+                if disconnect_duration > 30:
+                    if last_feed_health_alert is None or (now - last_feed_health_alert).total_seconds() > 60:
+                        msg = f"⚠️ WebSocket feed disconnected for {disconnect_duration:.0f}s. Checking recovery..."
+                        logger.warning(msg)
+                        self._telegram.send_telegram(msg)
+                        last_feed_health_alert = now
+            else:
+                if feed_disconnect_start is not None:
+                    logger.info("✓ WebSocket feed reconnected")
+                    self._telegram.send_telegram("✅ WebSocket feed recovered and reconnected")
+                feed_disconnect_start = None
+                last_feed_health_alert = None
 
             # ── Drain Telegram queue (ALWAYS — even pre-market) ──
             commands = self._telegram.get_pending_commands()

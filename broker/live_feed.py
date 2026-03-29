@@ -35,13 +35,15 @@ class LiveFeedManager:
     # Stale threshold — fall back to REST if data is older than this (seconds)
     STALE_THRESHOLD = 30.0
 
-    def __init__(self, shoonya_client, on_tick_callback: Optional[Callable] = None):
+    def __init__(self, shoonya_client, on_tick_callback: Optional[Callable] = None, on_health_alert: Optional[Callable] = None):
         """
         :param shoonya_client: Authenticated ShoonyaClient instance
         :param on_tick_callback: Optional callback(token, quote_dict) on each tick
+        :param on_health_alert: Optional callback(message) for health alerts
         """
         self._client = shoonya_client
         self._on_tick_callback = on_tick_callback
+        self._on_health_alert = on_health_alert
 
         # Thread-safe price cache: {token: {ltp, best_bid, best_ask, ...}}
         self._cache: dict[str, dict] = {}
@@ -59,6 +61,9 @@ class LiveFeedManager:
         # Reconnect control
         self._reconnect_delay = 5.0
         self._max_reconnect_delay = 60.0
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 5
+        self._last_successful_connection = time.time()
 
     # ──────────────────────────────────────────────────────────
     #   LIFECYCLE
@@ -194,14 +199,26 @@ class LiveFeedManager:
         while self._running:
             try:
                 logger.info("Connecting WebSocket...")
+                self._reconnect_attempts += 1
                 self._client.start_websocket(
                     on_open=self._on_open,
                     on_tick=self._on_tick,
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-            except Exception:
+            except Exception as e:
                 logger.exception("WebSocket connection failed")
+                self._reconnect_attempts += 1
+
+                # Check if stuck in reconnection loop
+                if self._reconnect_attempts > self._max_reconnect_attempts:
+                    msg = f"⚠️ WebSocket stuck in reconnection loop ({self._reconnect_attempts} attempts). Resetting..."
+                    logger.error(msg)
+                    if self._on_health_alert:
+                        self._on_health_alert(msg)
+                    # Force reset
+                    self._reconnect_attempts = 0
+                    delay = self._reconnect_delay
 
             self._connected = False
 
@@ -209,7 +226,7 @@ class LiveFeedManager:
                 break
 
             # Reconnect with backoff
-            logger.info(f"Reconnecting in {delay:.0f}s...")
+            logger.info(f"Reconnecting in {delay:.0f}s... (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts})")
             time.sleep(delay)
             delay = min(delay * 1.5, self._max_reconnect_delay)
 
@@ -223,7 +240,9 @@ class LiveFeedManager:
         """Called when WebSocket connects successfully."""
         self._connected = True
         self._reconnect_delay = 5.0  # Reset backoff
-        logger.info("WebSocket connected")
+        self._reconnect_attempts = 0  # Reset attempt counter
+        self._last_successful_connection = time.time()
+        logger.info("WebSocket connected successfully")
 
         # Subscribe pending tokens
         all_subs = self._pending_subs + self._active_subs

@@ -73,11 +73,11 @@ TELEGRAM_BOT_TOKEN = _optional_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_AUTHORIZED_USER_ID = _optional_env("TELEGRAM_AUTHORIZED_USER_ID")
 
 # ──────────────────────────────────────────────────────────────
-#   AI / ANTHROPIC
+#   AI / GROQ
 # ──────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = _optional_env("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = _optional_env("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+GROQ_API_KEY = _optional_env("GROQ_API_KEY")
+GROQ_MODEL = _optional_env("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # ──────────────────────────────────────────────────────────────
 #   TRADING PARAMETERS
