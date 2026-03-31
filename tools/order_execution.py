@@ -29,7 +29,7 @@ class OrderExecutionTools:
         live_feed,
         shoonya_client,
         max_positions: int = 2,
-        max_risk_amount: float = 6000,  # 2% of 3L
+        max_risk_amount: float = 15000,  # 5% of 3L
         max_daily_loss: float = 15000,  # 5% of 3L
         no_entry_after: str = "15:05",
     ):

@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — 3-EMA Trend Following pullback. Best on NIFTY 2m (50% WR, PF 1.84).
+description: 3-EMA Trend Following pullback. Best on NIFTY 2m (50% WR, PF 1.84).
 ---
 
 # VP-05: 3-EMA Trend Following ⭐
-**Source**: Vikram Prabhu — 1-Minute Scalping PDF  
+**Source**: 1-Minute Scalping PDF  
 **Instruments**: NIFTY (primary) | BANKNIFTY 5m  
 **Timeframes**: 2m ✅✅ | 5m ✅ (BNF) | 15m ⚠️  
 **Direction**: Both Long & Short  

@@ -28,9 +28,10 @@ class MemoryReader:
     Claude reads at session start, writes lessons at EOD.
     """
 
-    def __init__(self, journals_dir: Path, memory_file: Path):
+    def __init__(self, journals_dir: Path, memory_file: Path, state_manager=None):
         self._journals_dir = journals_dir
         self._memory_file = memory_file
+        self._state_manager = state_manager
         memory_file.parent.mkdir(exist_ok=True)
 
     # ──────────────────────────────────────────────────────────
@@ -79,10 +80,27 @@ class MemoryReader:
         tmp_path = self._memory_file.with_suffix(".md.tmp")
         now = datetime.now(IST)
 
+        # Build ground truth footer from state_manager (immutable, LLM cannot override)
+        ground_truth = ""
+        if self._state_manager:
+            state = self._state_manager.get_state()
+            trades = state.get("trades", [])
+            pnl = state.get("daily_pnl", 0)
+            trade_count = state.get("trade_count", 0)
+            ground_truth = (
+                f"\n\n---\n"
+                f"## VERIFIED SESSION DATA (auto-generated, not editable by agent)\n"
+                f"- Date: {now.strftime('%Y-%m-%d')}\n"
+                f"- Actual trades executed: {trade_count}\n"
+                f"- Actual P&L: ₹{pnl:+,.2f}\n"
+                f"- Trade details: {[{k: t[k] for k in ('symbol', 'direction', 'pnl') if k in t} for t in trades] if trades else 'None'}\n"
+            )
+
         full_content = (
             f"# BlitzTrader Persistent Memory\n"
             f"Last updated: {now.strftime('%Y-%m-%d %H:%M IST')}\n\n"
             f"{content}"
+            f"{ground_truth}"
         )
 
         try:

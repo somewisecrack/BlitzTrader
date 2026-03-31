@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — RCR (Red Candle Retracement). 50% pullback short re-entry. NIFTY 2m/5m only.
+description: RCR (Red Candle Retracement). 50% pullback short re-entry. NIFTY 2m/5m only.
 ---
 
 # VP-17: RCR — Red Candle Retracement
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY (primary)  
 **Timeframes**: 2m ⚠️ | 5m ⚠️ | 15m ⚠️  
 **Direction**: Short only  

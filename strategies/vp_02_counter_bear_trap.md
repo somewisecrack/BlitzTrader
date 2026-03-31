@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu intraday — Counter Bear Trap long setup for Nifty & Bank Nifty.
+description: Counter Bear Trap long setup for Nifty & Bank Nifty.
 ---
 
 # VP-02: Counter Bear Trap (Long)
-**Source**: Vikram Prabhu — Day-Trading Stocks PDF  
+**Source**: Day-Trading Stocks PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ✅ | 5m ⚠️ | 15m ⚠️  
 **Direction**: Long only  

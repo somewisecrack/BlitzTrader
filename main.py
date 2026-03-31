@@ -25,8 +25,8 @@ import pytz
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
-    GROQ_API_KEY,
-    GROQ_MODEL,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
     JOURNALS_DIR,
     LOGS_DIR,
     LOOP_INTERVAL_SECONDS,
@@ -106,7 +106,11 @@ class BlitzTrader:
 
         try:
             self._initialize()
-            self._startup_phase()
+            try:
+                self._startup_phase()
+            except Exception:
+                logger.exception("Startup phase failed — continuing to trading loop anyway")
+                self._telegram.send_telegram("⚠️ Startup incomplete due to API error. Entering trading loop anyway.")
             self._trading_loop()
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
@@ -219,12 +223,15 @@ class BlitzTrader:
 
         self._feed._on_tick_callback = on_tick
 
-        # 7. Journal
-        journal = JournalWriter(JOURNALS_DIR, VIRTUAL_CAPITAL)
+        # 7. Journal (with state_manager for ground-truth injection)
+        journal = JournalWriter(JOURNALS_DIR, VIRTUAL_CAPITAL, state_manager=self._state)
         self._journal = journal
 
-        # 8. Memory reader
-        memory = MemoryReader(JOURNALS_DIR, MEMORY_FILE)
+        # 8. Memory reader (with state_manager for ground-truth injection)
+        memory = MemoryReader(JOURNALS_DIR, MEMORY_FILE, state_manager=self._state)
+
+        # Inject state_manager into Telegram for ground-truth footers
+        self._telegram._state_manager = self._state
         logger.info("✓ Memory reader initialized")
 
         # 9. Goal manager
@@ -246,8 +253,8 @@ class BlitzTrader:
 
         # 12. Agent loop
         self._agent = AgentLoop(
-            api_key=GROQ_API_KEY,
-            model=GROQ_MODEL,
+            api_key=GEMINI_API_KEY,
+            model=GEMINI_MODEL,
             tool_registry=registry,
             system_prompt=SYSTEM_PROMPT,
         )
@@ -270,7 +277,7 @@ class BlitzTrader:
 
         startup_context = build_startup_context()
         response = self._agent.run_iteration(startup_context)
-        logger.info(f"Startup response: {response[:200]}...")
+        logger.info(f"Startup response: {(response or '')[:200]}...")
 
         self._telegram.send_telegram("🚀 Startup complete. Moving to autonomous trading loop.")
         logger.info("✓ Startup complete — trading will begin")
@@ -309,23 +316,18 @@ class BlitzTrader:
                 self._running = False
                 return
 
-            # ── Monitor feed health ──
+            # ── Monitor feed health (log only, never send to Telegram) ──
             if not self._feed.is_connected:
                 if feed_disconnect_start is None:
                     feed_disconnect_start = now
                 disconnect_duration = (now - feed_disconnect_start).total_seconds()
-
-                # Alert if disconnected > 30 seconds (but don't spam)
                 if disconnect_duration > 30:
-                    if last_feed_health_alert is None or (now - last_feed_health_alert).total_seconds() > 60:
-                        msg = f"⚠️ WebSocket feed disconnected for {disconnect_duration:.0f}s. Checking recovery..."
-                        logger.warning(msg)
-                        self._telegram.send_telegram(msg)
+                    if last_feed_health_alert is None or (now - last_feed_health_alert).total_seconds() > 300:
+                        logger.warning(f"WebSocket feed disconnected for {disconnect_duration:.0f}s")
                         last_feed_health_alert = now
             else:
                 if feed_disconnect_start is not None:
                     logger.info("✓ WebSocket feed reconnected")
-                    self._telegram.send_telegram("✅ WebSocket feed recovered and reconnected")
                 feed_disconnect_start = None
                 last_feed_health_alert = None
 
@@ -373,6 +375,15 @@ class BlitzTrader:
                 time.sleep(min(wait_secs, TELEGRAM_POLL_INTERVAL_SECONDS))
                 continue
 
+            # ── Notify once when market opens ──
+            if not getattr(self, '_market_open_notified', False):
+                self._telegram.send_telegram(
+                    "Market is now open. BlitzTrader is active and scanning for setups. "
+                    "All systems ready."
+                )
+                logger.info("Market open — Telegram notified")
+                self._market_open_notified = True
+
             # ── Scheduled iteration: full market analysis every 60 seconds ──
             elif (
                 last_scheduled_at is None
@@ -389,7 +400,7 @@ class BlitzTrader:
                         goal_manager=self._goals,
                     )
                     response = self._agent.run_iteration(context)
-                    logger.info(f"Iteration {iteration} response: {response[:200]}...")
+                    logger.info(f"Iteration {iteration} response: {(response or '')[:200]}...")
 
                     if iteration % 10 == 0:
                         usage = self._agent.get_token_usage()

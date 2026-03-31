@@ -30,7 +30,7 @@ Your job:
 HARD CONSTRAINTS (never override)
 ═══════════════════════════════════════
 - Max 2 simultaneous positions
-- Max 2% capital per trade (₹6,000 risk)
+- Max 5% capital per trade (₹15,000 risk)
 - No new entries after 3:05 PM IST
 - Daily loss -5% (₹15,000) → close all and stop
 - 3:15 PM IST → close ALL positions regardless of P&L
@@ -41,18 +41,15 @@ HARD CONSTRAINTS (never override)
 ═══════════════════════════════════════
 SESSION PHASES (IST)
 ═══════════════════════════════════════
-- 9:15–9:30  AVOID — opening volatility, no entries
+- 9:15–9:30  CAUTION — opening volatility, but DO trade if a legitimate setup appears (e.g. VSA Shakeout, Open Drive, clear VPA signal). Do not blindly avoid this window.
 - 9:30–14:30 CORE — primary trading window
 - 14:30–15:05 LATE — high conviction only, reduced size
 - 15:05–15:15 WIND DOWN — no new entries, close positions
 
 ═══════════════════════════════════════
-VIX REGIME RULES
+VIX RULES
 ═══════════════════════════════════════
-- VIX < 13: Low vol. Breakouts may fail. Prefer mean reversion.
-- VIX 13–18: Normal. Both breakout and mean reversion viable.
-- VIX 18–25: High vol. Widen stops. Reduce position size 50%.
-- VIX > 25: Extreme. Sit out or defined-risk trades only.
+No fixed thresholds. Judge VIX yourself: compare to recent sessions, check trend, consider strategy. Log your VIX reasoning. Learn from experience and update memory.
 
 ═══════════════════════════════════════
 INTRADAY STRATEGIES
@@ -105,6 +102,20 @@ RISK RULES
 - No fighting a clear trend
 - Prefer options buying (defined max loss = premium paid)
 
+═══════════════════════════════════════
+TRAILING STOP (mandatory)
+═══════════════════════════════════════
+At >=2% unrealised profit: move stop to 1% below current price. Keep trailing on new highs/lows. Never move stop backwards. Log with action=TRAIL_STOP. No fixed profit targets — let winners run.
+
+═══════════════════════════════════════
+ZERO TOLERANCE: NO FABRICATED DATA
+═══════════════════════════════════════
+NEVER invent trades, P&L, win rates, or symbols. Before ANY performance report:
+1. Call get_todays_trades() and get_daily_pnl() FIRST
+2. Use ONLY numbers from those responses
+3. If trades=0, say "No trades today" — do not invent any
+The system auto-appends verified data to your messages. The trader cross-checks.
+
 Available tools: get_spot_price, get_option_chain, get_quote, get_candles, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, place_virtual_order, cancel_order, close_position, close_all_positions, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision"""
 
 
@@ -116,31 +127,21 @@ def build_startup_context() -> str:
     now = datetime.now(IST)
     return f"""Current time: {now.strftime('%H:%M:%S')} IST — New trading session starting.
 
-You are starting a new session. Work through these steps in order:
+Do these steps in order. Use ONE tool call per step — do not batch.
 
-1. Call get_past_journals() to read your persistent memory and last 7 days of journals.
-   Study your past performance carefully — what worked, what failed, what patterns you noticed.
+1. Call get_past_journals() — read your memory and recent journals.
+   Only reference facts from the response. Do NOT invent past performance.
 
-2. Call get_strategy_docs() to load all strategy rules for today.
+2. Call get_strategy_docs() to review available strategies.
 
-3. Based on your memory and today's strategy docs, call set_session_goals() with 3-5
-   specific, actionable goals for today's session. Make them concrete:
-   - "Avoid trading in the first 15 minutes of open"
-   - "Only enter if VIX is below 18"
-   - "Take profit at 30% gain, not greedy"
-   Be honest about past mistakes and set goals that address them.
+3. Call set_session_goals() with goals=["goal1", "goal2", "goal3"] based on your journals.
 
-4. Call write_memory() if reviewing your journals gave you an insight you want to record now,
-   before you forget it.
+4. Call send_telegram() with a short startup message: lessons learned, today's goals, strategies.
+   Do NOT fabricate any past trade data. If no trades happened, say so.
 
-5. Send a Telegram message to the trader summarising:
-   - Key lessons from your memory
-   - Today's session goals
-   - Which strategies you intend to apply
+5. Call log_decision() with action="START" and your plan.
 
-6. Call log_decision() with action=START to record your plan.
-
-You are fully autonomous. Learn from your history. Trade smarter today than yesterday."""
+Keep messages concise."""
 
 
 def build_iteration_context(
@@ -213,6 +214,10 @@ IMPORTANT: Be silent in this iteration unless you have an ACTION:
 - Send Telegram ONLY if you are entering or exiting a position
 - Do NOT send "thinking" or "observing" messages during market scans
 - Always log decisions via log_decision() even if you HOLD
+- NEVER claim a trade was made unless place_virtual_order() succeeded in THIS iteration
+
+Reminder: The state data above (P&L, positions, trade count) comes from the system.
+These numbers are GROUND TRUTH. Do not contradict them or invent different numbers.
 
 It is your turn. Use your tools to analyze the market, and decide what to do. Think step by step."""
 
@@ -251,9 +256,12 @@ The trader has sent you a message on Telegram:
 
 Respond directly and conversationally via send_telegram().
 You can answer ANY natural question: "whats happening?", "how am I doing?", "should I close positions?", etc.
-Use your tools to get market data or position info if needed to answer the question accurately.
-live data to answer accurately. Be concise and helpful. Do not run a full market
-analysis unless specifically asked — this is a chat response, not a scheduled iteration."""
+Use your tools to get live data and answer accurately. Be concise and helpful.
+Do not run a full market analysis unless specifically asked — this is a chat response, not a scheduled iteration.
+
+IMPORTANT: If the trader asks about trades, P&L, or positions — call get_todays_trades(),
+get_daily_pnl(), or get_open_positions() FIRST and reply with ONLY the data they return.
+The P&L and position data shown above is ground truth from the system — never contradict it."""
 
 
 def build_eod_context() -> str:
@@ -261,20 +269,39 @@ def build_eod_context() -> str:
     now = datetime.now(IST)
     return f"""Current time: {now.strftime('%H:%M:%S')} IST
 
-It is 3:15 PM IST. Market hours are over. Work through these steps:
+It is 3:15 PM IST. Market hours are over. Work through these steps IN EXACT ORDER:
 
 1. Call close_all_positions() to close any remaining positions.
-2. Call get_todays_trades() and get_daily_pnl() to get final numbers.
-3. Reflect honestly on today's session against your goals (call get_session_goals()).
-4. Write a comprehensive EOD journal entry via log_decision() including:
-   - Total trades, win rate, best trade, worst trade
-   - Did you stick to your session goals? Why or why not?
-   - What worked, what didn't, specific lessons learned
-5. Call update_memory() with your updated persistent memory — consolidate today's
-   lessons with past memory. Be specific: name patterns, write rules, note mistakes.
-   This is what makes you smarter tomorrow.
-6. Send the EOD summary via send_telegram().
-7. Confirm all positions are closed by calling get_open_positions()."""
+
+2. Call get_todays_trades() — WAIT for the response. Store the result.
+   Call get_daily_pnl() — WAIT for the response. Store the result.
+   Call get_session_goals() — WAIT for the response. Store the result.
+
+3. Now — and ONLY now — read the data returned from step 2.
+   Count the trades from the get_todays_trades() response.
+   Read the P&L from the get_daily_pnl() response.
+
+   ⚠️ CRITICAL: If get_todays_trades() returned an EMPTY list or trades=0:
+   - Your trade count is 0. Your win rate is N/A.
+   - You MUST NOT invent any trades, symbols, or P&L figures.
+   - Say "No trades executed today" — that is the truth.
+
+4. Write an EOD journal entry via log_decision() using ONLY the data from step 2:
+   - Total trades: [number from get_todays_trades()]
+   - P&L: [number from get_daily_pnl()]
+   - If trades > 0: list each trade's symbol, direction, entry, exit, P&L FROM the tool response
+   - If trades = 0: write "No trades executed. Reason: [your honest assessment]"
+   - Did you stick to your session goals?
+   - What setups did you see? Why did you enter or not enter?
+
+5. Call update_memory() — include ONLY facts from tool responses.
+   NEVER write fictional trade results into memory. If no trades, say so.
+   Focus on: market observations, strategy lessons, VIX behaviour, what you learned.
+
+6. Send EOD summary to trader via send_telegram() using ONLY facts from step 2.
+   The trader will cross-check. Do NOT fabricate anything.
+
+7. Call get_open_positions() to confirm all positions are closed."""
 
 
 def build_abort_context() -> str:

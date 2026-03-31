@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Morning Star 3-candle bullish reversal. Use as confluence only.
+description: Morning Star 3-candle bullish reversal. Use as confluence only.
 ---
 
 # VP-14: Morning Star (Bullish Reversal)
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: All timeframes ⚠️  
 **Direction**: Long only  

@@ -77,8 +77,24 @@ class ToolRegistry:
             return {"error": f"Unknown tool: {tool_name}"}
 
         try:
+            tool_input = tool_input or {}  # Handle None from LLM
+
+            # Try calling with given args first
             logger.info(f"Executing tool: {tool_name}({tool_input})")
-            result = func(**tool_input)
+            try:
+                result = func(**tool_input)
+            except TypeError:
+                # LLM likely sent extra/wrong kwargs — retry with only valid params
+                import inspect
+                sig = inspect.signature(func)
+                valid_params = set(sig.parameters.keys()) - {"self"}
+                filtered = {k: v for k, v in tool_input.items() if k in valid_params}
+                # If func accepts **kwargs, pass everything
+                if any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+                    filtered = tool_input
+                logger.warning(f"Tool {tool_name}: filtered args {set(tool_input) - set(filtered)}, retrying with {set(filtered)}")
+                result = func(**filtered) if filtered else func()
+
             logger.info(f"Tool {tool_name} returned: {type(result).__name__}")
             return result
         except TypeError as e:
@@ -335,9 +351,11 @@ class ToolRegistry:
                 "name": "update_memory",
                 "description": (
                     "Overwrite your persistent memory file with new insights and lessons. "
-                    "Call this at EOD after reflecting on today's session. You own this "
-                    "file entirely — rewrite, consolidate, and refine as you see fit. "
-                    "Include: what worked, what didn't, rules to follow, patterns observed."
+                    "Call this at EOD after reflecting on today's session. "
+                    "CRITICAL: You MUST call get_todays_trades() and get_daily_pnl() BEFORE "
+                    "calling this tool. The system will auto-append verified trade data. "
+                    "NEVER write trade counts, P&L numbers, or win rates that you did not "
+                    "get from a tool response. If no trades occurred, write 'No trades today'."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -404,7 +422,9 @@ class ToolRegistry:
                 "description": (
                     "Send a message to the trader via Telegram. Use for: "
                     "session start/end, trade entries/exits, status updates, "
-                    "warnings, EOD summary."
+                    "warnings, EOD summary. The system will auto-append verified "
+                    "trade/P&L data to performance messages. NEVER include trade "
+                    "counts or P&L figures you did not get from a tool response."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -423,7 +443,9 @@ class ToolRegistry:
                 "description": (
                     "Log a trading decision to today's journal. You MUST call this "
                     "after EVERY decision — including holds and skips. Always explain "
-                    "your reasoning clearly."
+                    "your reasoning clearly. For EOD entries, the system will auto-append "
+                    "verified trade data from the state manager — do NOT fabricate trade "
+                    "counts or P&L numbers in your reasoning text."
                 ),
                 "input_schema": {
                     "type": "object",

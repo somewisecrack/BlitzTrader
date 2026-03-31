@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Pivot Point Bounce. Outstanding on BANKNIFTY 2m (PF 2.14, 54% WR).
+description: Pivot Point Bounce. Outstanding on BANKNIFTY 2m (PF 2.14, 54% WR).
 ---
 
 # VP-24: Pivot Point Bounce ⭐ TOP PERFORMER
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: BANKNIFTY (primary) | NIFTY ❌  
 **Timeframes**: 2m ✅✅ | 5m ✅ | 15m ⚠️  
 **Direction**: Both Long & Short  

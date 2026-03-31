@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — M Pattern (Double Top). Consistent performer across all TFs for NIFTY & BANKNIFTY.
+description: M Pattern (Double Top). Consistent performer across all TFs for NIFTY & BANKNIFTY.
 ---
 
 # VP-18: M Pattern (Double Top) ⭐
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ✅ | 5m ✅✅ | 15m ✅✅  
 **Direction**: Short only  

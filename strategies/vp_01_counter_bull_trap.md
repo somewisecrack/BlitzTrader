@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu intraday scalping — Counter Bull Trap short setup for Nifty & Bank Nifty.
+description: Counter Bull Trap short setup for Nifty & Bank Nifty.
 ---
 
 # VP-01: Counter Bull Trap (Short)
-**Source**: Vikram Prabhu — Day-Trading Stocks PDF  
+**Source**: Day-Trading Stocks PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ✅ | 5m ✅ | 15m ✅  
 **Direction**: Short only  

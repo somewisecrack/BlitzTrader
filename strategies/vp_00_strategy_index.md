@@ -1,8 +1,8 @@
 ---
-description: Vikram Prabhu — VP Strategy Index. Master reference for all 21 backtested intraday strategies.
+description: VP Strategy Index. Master reference for all 21 backtested intraday strategies.
 ---
 
-# Vikram Prabhu Intraday Strategy Index
+# VP Strategy Index
 **Source PDFs**: 1-Minute Scalping in Nifty & Bank Nifty | 25 Day Trading Strategies | Day-Trading Stocks  
 **Backtested**: 60 days | NIFTY & BANKNIFTY | 2m, 5m, 15m | 1:2 Risk:Reward
 

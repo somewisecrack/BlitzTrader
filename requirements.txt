@@ -7,8 +7,8 @@ websocket-client>=1.7.0
 # Authentication
 pyotp>=2.9.0
 
-# AI Agent (Groq)
-groq>=0.4.0
+# AI Agent (Google Gemini)
+google-genai>=1.0.0
 
 # Telegram (uses raw requests — python-telegram-bot not needed)
 

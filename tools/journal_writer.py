@@ -22,10 +22,11 @@ class JournalWriter:
     One file per trading day: journals/YYYYMMDD.md
     """
 
-    def __init__(self, journals_dir: Path, virtual_capital: float = 300_000):
+    def __init__(self, journals_dir: Path, virtual_capital: float = 300_000, state_manager=None):
         self._dir = journals_dir
         self._dir.mkdir(exist_ok=True)
         self._capital = virtual_capital
+        self._state_manager = state_manager
         self._current_file: Path = None
         self._initialized = False
 
@@ -102,6 +103,23 @@ class JournalWriter:
 
         if reason:
             entry += f"**Reasoning:** {reason}\n"
+
+        # Auto-append ground truth for EOD/STOP/summary entries
+        if action.upper() in ("EOD", "STOP", "ABORT", "END") and self._state_manager:
+            state = self._state_manager.get_state()
+            trades = state.get("trades", [])
+            pnl = state.get("daily_pnl", 0)
+            trade_count = state.get("trade_count", 0)
+            entry += (
+                f"\n**[SYSTEM VERIFIED DATA — auto-injected, not from agent]**\n"
+                f"- Actual trades executed: {trade_count}\n"
+                f"- Actual P&L: ₹{pnl:+,.2f}\n"
+            )
+            if trades:
+                for t in trades:
+                    entry += f"- Trade: {t.get('direction', '?')} {t.get('symbol', '?')} | Entry: ₹{t.get('entry_price', 0):.2f} | Exit: ₹{t.get('exit_price', 0):.2f} | P&L: ₹{t.get('pnl', 0):+,.2f}\n"
+            else:
+                entry += f"- No trades were executed this session.\n"
 
         entry += "\n"
 

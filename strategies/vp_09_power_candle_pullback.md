@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Power Candle Pullback. Retest of a large momentum candle's base. Best NIFTY 15m.
+description: Power Candle Pullback. Retest of a large momentum candle's base. Best NIFTY 15m.
 ---
 
 # VP-09: Power Candle Pullback
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY (15m) | BANKNIFTY (2m)  
 **Timeframes**: 2m ⚠️ | 5m ⚠️ | 15m ✅  
 **Direction**: Both Long & Short  

@@ -27,7 +27,7 @@ class GoalManager:
     #   TOOLS (callable by Claude)
     # ──────────────────────────────────────────────────────────
 
-    def set_session_goals(self, goals: list) -> dict:
+    def set_session_goals(self, goals=None, session_goals=None, **kwargs) -> dict:
         """
         Set your goals for this trading session.
         Call this during startup after reading memory and strategy docs.
@@ -37,10 +37,22 @@ class GoalManager:
         :param goals: List of 2-5 specific, actionable session goals
         :returns: {status, goals_set}
         """
-        if not goals or not isinstance(goals, list):
+        # Accept both 'goals' and 'session_goals' (LLM sometimes uses wrong name)
+        raw = goals or session_goals or kwargs.get("goal") or kwargs.get("session_goal")
+        if not raw:
             return {"error": "Provide a list of at least one goal."}
 
-        self._goals = [str(g).strip() for g in goals if str(g).strip()]
+        # Accept string input — split into list
+        if isinstance(raw, str):
+            # Split on numbered patterns like "1." or "- " or newlines
+            import re
+            parts = re.split(r'\d+\.\s*|\n[-•*]\s*|\n', raw)
+            raw = [p.strip() for p in parts if p.strip()]
+
+        if not isinstance(raw, list):
+            raw = [str(raw)]
+
+        self._goals = [str(g).strip() for g in raw if str(g).strip()]
 
         logger.info(f"Session goals set: {self._goals}")
         return {

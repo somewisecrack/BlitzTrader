@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Wicks Pullback. Best performer overall — BANKNIFTY 2m PF 1.96, +5171 pts.
+description: Wicks Pullback. Best performer overall — BANKNIFTY 2m PF 1.96, +5171 pts.
 ---
 
 # VP-07: Wicks Pullback ⭐ TOP PERFORMER
-**Source**: Vikram Prabhu — 1-Minute Scalping PDF  
+**Source**: 1-Minute Scalping PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ✅✅ | 5m ✅ | 15m ✅  
 **Direction**: Both Long & Short  

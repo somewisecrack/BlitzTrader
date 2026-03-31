@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — GCR (Green Candle Retracement). 50% pullback re-entry. 2m only.
+description: GCR (Green Candle Retracement). 50% pullback re-entry. 2m only.
 ---
 
 # VP-16: GCR — Green Candle Retracement
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ⚠️ | 5m ❌ | 15m ⚠️  
 **Direction**: Long only  

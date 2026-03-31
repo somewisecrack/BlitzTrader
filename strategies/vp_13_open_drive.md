@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Open Drive (OD). Highest PF strategy. Elite accuracy, very low frequency.
+description: Open Drive (OD). Highest PF strategy. Elite accuracy, very low frequency.
 ---
 
 # VP-13: Open Drive (OD) Pattern ⭐ ELITE
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ❌ | 5m ✅✅ | 15m ✅✅  
 **Direction**: Both Long & Short  

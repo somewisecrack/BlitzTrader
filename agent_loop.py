@@ -1,30 +1,79 @@
 """
 agent_loop.py — Core ReAct agent loop for BlitzTrader.
 
-Uses the Groq Python SDK to run Mixtral in a tool-calling loop.
-Mixtral reasons, calls tools, observes results, and acts.
-This is a proper autonomous agent — not a scripted pipeline.
+Uses the Google Gemini SDK to run Gemini 2.5 Flash in a tool-calling loop.
+The model reasons, calls tools, observes results, and acts.
 """
 import json
 import logging
 import time
-from typing import Optional
 
-from groq import Groq
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger("BlitzTrader.AgentLoop")
 
 
+def _build_gemini_tools(tool_definitions: list[dict]) -> list[types.Tool]:
+    """Convert our tool definitions to Gemini format."""
+    declarations = []
+    for tool_def in tool_definitions:
+        schema = tool_def.get("input_schema", {})
+        properties = {}
+        for prop_name, prop_schema in schema.get("properties", {}).items():
+            prop_type = prop_schema.get("type", "STRING").upper()
+            # Map JSON schema types to Gemini types
+            type_map = {
+                "STRING": "STRING",
+                "INTEGER": "INTEGER",
+                "NUMBER": "NUMBER",
+                "BOOLEAN": "BOOLEAN",
+                "ARRAY": "ARRAY",
+                "OBJECT": "OBJECT",
+            }
+            gemini_type = type_map.get(prop_type, "STRING")
+
+            prop_kwargs = {
+                "type": gemini_type,
+                "description": prop_schema.get("description", ""),
+            }
+
+            # Handle enum
+            if "enum" in prop_schema:
+                prop_kwargs["enum"] = prop_schema["enum"]
+
+            # Handle array items
+            if gemini_type == "ARRAY" and "items" in prop_schema:
+                item_type = prop_schema["items"].get("type", "STRING").upper()
+                prop_kwargs["items"] = types.Schema(type=item_type)
+
+            properties[prop_name] = types.Schema(**prop_kwargs)
+
+        params = types.Schema(
+            type="OBJECT",
+            properties=properties,
+            required=schema.get("required", []),
+        ) if properties else None
+
+        declarations.append(types.FunctionDeclaration(
+            name=tool_def["name"],
+            description=tool_def["description"],
+            parameters=params,
+        ))
+
+    return [types.Tool(function_declarations=declarations)]
+
+
 class AgentLoop:
     """
-    The core agentic loop. Mixtral (via Groq) is the brain.
+    The core agentic loop. Gemini 2.5 Flash is the brain.
 
     Each iteration:
       1. Assemble context (done by caller)
-      2. Send to Mixtral with tool definitions
-      3. Mixtral reasons and calls tools (0 to N tool calls)
-      4. Execute tool calls, return results to Mixtral
-      5. Repeat until Mixtral produces a final text response
+      2. Send to Gemini with tool definitions
+      3. Gemini reasons and calls tools (0 to N tool calls)
+      4. Execute tool calls, return results to Gemini
+      5. Repeat until Gemini produces a final text response
     """
 
     def __init__(
@@ -34,17 +83,17 @@ class AgentLoop:
         tool_registry,
         system_prompt: str,
         max_tool_rounds: int = 10,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ):
-        self._client = Groq(api_key=api_key)
+        self._client = genai.Client(api_key=api_key)
         self._model = model
         self._registry = tool_registry
         self._system_prompt = system_prompt
         self._max_tool_rounds = max_tool_rounds
         self._max_tokens = max_tokens
 
-        # Conversation history — persists across iterations within a session
-        self._messages: list[dict] = []
+        # Gemini conversation history
+        self._history: list[types.Content] = []
 
         # Token tracking
         self._total_input_tokens = 0
@@ -53,157 +102,145 @@ class AgentLoop:
     def run_iteration(self, user_message: str) -> str:
         """
         Run one complete agent iteration.
-        Claude receives the context, reasons, calls tools, and returns.
-
-        :param user_message: The context packet for this iteration
-        :returns: Claude's final text response for this iteration
+        Each iteration starts fresh to keep context clean.
         """
-        # Add the user message to conversation
-        self._messages.append({
-            "role": "user",
-            "content": user_message,
-        })
+        # Start fresh each iteration
+        self._history = []
 
-        tools = self._registry.get_tool_definitions()
+        tool_defs = self._registry.get_tool_definitions()
+        gemini_tools = _build_gemini_tools(tool_defs)
         final_text = ""
 
+        # Add user message
+        self._history.append(types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=user_message)],
+        ))
+
         for round_num in range(self._max_tool_rounds):
-            response = self._call_with_retry(tools)
+            response = self._call_with_retry(gemini_tools)
             if response is None:
-                raise RuntimeError("Claude API call failed after all retries")
+                logger.warning("API call returned None — ending iteration gracefully")
+                break
 
-            # Track token usage
-            if response.usage:
-                self._total_input_tokens += response.usage.prompt_tokens
-                self._total_output_tokens += response.usage.completion_tokens
+            # Track tokens
+            if response.usage_metadata:
+                self._total_input_tokens += response.usage_metadata.prompt_token_count or 0
+                self._total_output_tokens += response.usage_metadata.candidates_token_count or 0
 
-            content_msg = response.choices[0].message
-            content_len = len(content_msg.content) if content_msg.content else 0
+            if not response.candidates:
+                logger.warning("API returned empty candidates — ending iteration gracefully")
+                break
+            candidate = response.candidates[0]
+            parts = candidate.content.parts if candidate.content and candidate.content.parts else []
+
+            # Log round info
+            input_t = response.usage_metadata.prompt_token_count if response.usage_metadata else 0
+            output_t = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
             logger.info(
                 f"Round {round_num + 1}: "
-                f"finish_reason={response.choices[0].finish_reason}, "
-                f"content_blocks={content_len}, "
-                f"tokens={response.usage.prompt_tokens if response.usage else 0}in/{response.usage.completion_tokens if response.usage else 0}out"
+                f"parts={len(parts)}, "
+                f"tokens={input_t}in/{output_t}out"
             )
 
-            # Process response content blocks (Groq format)
-            tool_calls = []
+            # If empty response, skip this round
+            if not parts:
+                logger.warning(f"Round {round_num + 1}: empty response from model, skipping")
+                break
+
+            # Separate text and function calls
+            function_calls = []
             text_parts = []
-            message_content = response.choices[0].message
 
-            if message_content.tool_calls:
-                tool_calls = message_content.tool_calls
+            for part in parts:
+                if part.function_call:
+                    function_calls.append(part.function_call)
+                elif part.text:
+                    text_parts.append(part.text)
 
-            if message_content.content:
-                text_parts.append(message_content.content)
-
-            # If there are text parts, accumulate them
             if text_parts:
                 final_text = "\n".join(text_parts)
 
-            # If no tool calls, Mixtral is done reasoning
-            if not tool_calls:
-                # Add assistant response to history
-                self._messages.append({
-                    "role": "assistant",
-                    "content": message_content.content or "",
-                })
+            # If no function calls, model is done
+            if not function_calls:
+                # Add model response to history
+                self._history.append(candidate.content)
                 break
 
-            # Execute tool calls
-            # First, add the assistant message
-            self._messages.append({
-                "role": "assistant",
-                "content": message_content.content or "",
-                "tool_calls": tool_calls if tool_calls else None,
-            })
+            # Add model response to history (includes function calls)
+            self._history.append(candidate.content)
 
-            # Then add tool results
-            tool_results = []
-            for tool_call in tool_calls:
+            # Execute function calls and build responses
+            function_responses = []
+            for fc in function_calls:
+                tool_input = dict(fc.args) if fc.args else {}
                 result = self._registry.execute(
-                    tool_name=tool_call.function.name,
-                    tool_input=json.loads(tool_call.function.arguments),
+                    tool_name=fc.name,
+                    tool_input=tool_input,
                 )
 
-                # Convert result to string for Mixtral
                 result_str = json.dumps(result, default=str, ensure_ascii=False)
+                logger.info(f"  Tool {fc.name}: {result_str[:200]}...")
 
-                tool_results.append({
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "content": result_str,
-                })
+                function_responses.append(types.Part.from_function_response(
+                    name=fc.name,
+                    response=result,
+                ))
 
-                logger.info(f"  Tool {tool_call.function.name}: {result_str[:200]}...")
-
-            # Add tool results as user message
-            for tool_result in tool_results:
-                self._messages.append(tool_result)
+            # Add tool results to history
+            self._history.append(types.Content(
+                role="user",
+                parts=function_responses,
+            ))
         else:
             logger.warning(
-                f"Agent hit max tool rounds ({self._max_tool_rounds}), "
-                "forcing stop"
+                f"Agent hit max tool rounds ({self._max_tool_rounds}), forcing stop"
             )
-
-        # Manage context window — trim if too long
-        self._trim_history()
 
         return final_text
 
-    def _call_with_retry(self, tools, max_retries: int = 4) -> object:
-        """
-        Call the Groq API with exponential backoff on rate limits.
-        Waits up to 4 minutes total (65s → 130s → ... ) before giving up.
-        """
-        delay = 65
+    def _call_with_retry(self, gemini_tools, max_retries: int = 3) -> object:
+        """Call Gemini API with retry on transient errors."""
+        delay = 5
         for attempt in range(max_retries):
             try:
-                # Convert tool definitions to Groq format
-                groq_tools = []
-                for tool in tools:
-                    groq_tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": tool["name"],
-                            "description": tool["description"],
-                            "parameters": tool["input_schema"],
-                        }
-                    })
-
-                # Build messages list with system prompt
-                messages = [{"role": "system", "content": self._system_prompt}] + self._messages
-
-                return self._client.chat.completions.create(
+                return self._client.models.generate_content(
                     model=self._model,
-                    max_tokens=self._max_tokens,
-                    messages=messages,
-                    tools=groq_tools if groq_tools else None,
-                    tool_choice="auto" if groq_tools else None,
+                    contents=self._history,
+                    config=types.GenerateContentConfig(
+                        system_instruction=self._system_prompt,
+                        tools=gemini_tools,
+                        max_output_tokens=self._max_tokens,
+                        temperature=0.3,
+                    ),
                 )
             except Exception as e:
-                if "rate_limit" in str(e).lower() or "429" in str(e):
+                err_str = str(e).lower()
+                if "429" in str(e) or "resource" in err_str or "quota" in err_str:
                     if attempt < max_retries - 1:
                         logger.warning(
-                            f"Rate limit hit (attempt {attempt + 1}/{max_retries}). "
-                            f"Waiting {delay}s before retry..."
+                            f"Rate limit (attempt {attempt + 1}/{max_retries}). "
+                            f"Waiting {delay}s..."
                         )
                         time.sleep(delay)
-                        delay = min(delay * 2, 300)
+                        delay = min(delay * 2, 60)
                     else:
-                        logger.error(f"Rate limit persists after {max_retries} retries: {e}")
-                        raise
+                        logger.error(f"Rate limit persists: {e}")
+                        return None
                 else:
-                    logger.error(f"Groq API error: {e}")
-                    raise
+                    logger.error(f"Gemini API error: {e}")
+                    if attempt >= max_retries - 1:
+                        return None
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
         return None
 
     def inject_message(self, role: str, content: str):
-        """
-        Inject a message into the conversation history.
-        Used for Telegram commands that arrive between iterations.
-        """
-        self._messages.append({"role": role, "content": content})
+        """Inject a message into conversation history."""
+        self._history.append(types.Content(
+            role=role,
+            parts=[types.Part.from_text(text=content)],
+        ))
 
     def get_token_usage(self) -> dict:
         """Get cumulative token usage for the session."""
@@ -211,51 +248,11 @@ class AgentLoop:
             "total_input_tokens": self._total_input_tokens,
             "total_output_tokens": self._total_output_tokens,
             "total_tokens": self._total_input_tokens + self._total_output_tokens,
-            "conversation_length": len(self._messages),
+            "conversation_length": len(self._history),
         }
 
     def reset(self):
         """Reset conversation history for a new session."""
-        self._messages = []
+        self._history = []
         self._total_input_tokens = 0
         self._total_output_tokens = 0
-
-    def _trim_history(self):
-        """
-        Trim conversation history if it gets too long.
-        Ensure we never sever a tool_use from its tool_result.
-        """
-        if len(self._messages) <= 30:
-            return
-
-        # The startup sequence involves roughly 5 messages to fully execute 
-        # get_strategy_docs and the first Telegram ping and return their results.
-        # We must keep up to an even index (e.g. index 4) which is a "user" message (tool_result)
-        # so that the head ends cleanly.
-        head_end = 5
-        while head_end < len(self._messages) and self._messages[head_end - 1]["role"] != "assistant":
-            head_end += 1
-            
-        head = self._messages[:head_end]
-
-        # Ensure the tail starts with an "assistant" message so it perfectly alternates
-        # with the "user" summary message we are injecting
-        tail_start = len(self._messages) - 20
-        while tail_start < len(self._messages) and self._messages[tail_start]["role"] != "assistant":
-            tail_start += 1
-            
-        tail = self._messages[tail_start:]
-
-        trimmed_count = len(self._messages) - len(head) - len(tail)
-
-        # Insert a summary marker as a user message
-        summary = {
-            "role": "user",
-            "content": (
-                f"[Context trimmed: {trimmed_count} messages removed to fit context window. "
-                f"Refer to your earlier decisions via get_todays_trades() if needed.]"
-            ),
-        }
-
-        self._messages = head + [summary] + tail
-        logger.info(f"Trimmed conversation: removed {trimmed_count} messages safely.")

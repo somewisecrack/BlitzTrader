@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — V Reversal (capitulation bottom). Best on BANKNIFTY 2m and 15m.
+description: V Reversal (capitulation bottom). Best on BANKNIFTY 2m and 15m.
 ---
 
 # VP-08: V Reversal
-**Source**: Vikram Prabhu — 1-Minute Scalping PDF  
+**Source**: 1-Minute Scalping PDF  
 **Instruments**: BANKNIFTY (primary) | NIFTY marginal  
 **Timeframes**: 2m ✅✅ | 15m ✅ | 5m ⚠️  
 **Direction**: Long only  

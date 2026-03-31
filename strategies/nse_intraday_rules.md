@@ -46,7 +46,7 @@
 - Target: VWAP retest
 
 ## Risk Rules
-- Max 2% capital per trade (₹6,000)
+- Max 5% capital per trade (₹15,000)
 - Max 2 simultaneous positions
 - If daily loss hits 5% (₹15,000), stop all trading
 - Always define stop loss BEFORE entry

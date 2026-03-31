@@ -73,11 +73,11 @@ TELEGRAM_BOT_TOKEN = _optional_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_AUTHORIZED_USER_ID = _optional_env("TELEGRAM_AUTHORIZED_USER_ID")
 
 # ──────────────────────────────────────────────────────────────
-#   AI / GROQ
+#   AI / GEMINI
 # ──────────────────────────────────────────────────────────────
 
-GROQ_API_KEY = _optional_env("GROQ_API_KEY")
-GROQ_MODEL = _optional_env("GROQ_MODEL", "llama-3.1-8b-instant")
+GEMINI_API_KEY = _optional_env("GEMINI_API_KEY")
+GEMINI_MODEL = _optional_env("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ──────────────────────────────────────────────────────────────
 #   TRADING PARAMETERS
@@ -85,7 +85,7 @@ GROQ_MODEL = _optional_env("GROQ_MODEL", "llama-3.1-8b-instant")
 
 VIRTUAL_CAPITAL = 300_000  # ₹3,00,000
 MAX_POSITIONS = 2
-MAX_RISK_PCT = 0.02  # 2% of capital per trade
+MAX_RISK_PCT = 0.05  # 5% of capital per trade
 MAX_DAILY_LOSS_PCT = 0.05  # 5% daily loss limit
 MAX_DAILY_LOSS_AMOUNT = VIRTUAL_CAPITAL * MAX_DAILY_LOSS_PCT  # ₹15,000
 

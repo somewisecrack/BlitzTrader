@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Evening Star 3-candle bearish reversal. Top performer on BANKNIFTY 2m (PF 1.89).
+description: Evening Star 3-candle bearish reversal. Top performer on BANKNIFTY 2m (PF 1.89).
 ---
 
 # VP-15: Evening Star (Bearish Reversal) ⭐
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ✅✅ | 5m ⚠️ | 15m ✅  
 **Direction**: Short only  

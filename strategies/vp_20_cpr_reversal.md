@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — CPR (Central Pivot Range) Reversal. Works best on BANKNIFTY 2m (PF 1.75).
+description: CPR (Central Pivot Range) Reversal. Works best on BANKNIFTY 2m (PF 1.75).
 ---
 
 # VP-20: CPR Reversal
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: BANKNIFTY (primary)  
 **Timeframes**: 2m ✅✅ | 5m ⚠️ | 15m ⚠️  
 **Direction**: Both Long & Short  

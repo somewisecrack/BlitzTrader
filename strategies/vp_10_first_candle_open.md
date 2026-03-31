@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — First Candle Open Breakout. Best on BANKNIFTY 15m (PF 1.57).
+description: First Candle Open Breakout. Best on BANKNIFTY 15m (PF 1.57).
 ---
 
 # VP-10: First Candle Open Breakout
-**Source**: Vikram Prabhu — 1-Minute Scalping PDF  
+**Source**: 1-Minute Scalping PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ✅ | 5m ✅ | 15m ✅✅ (BANKNIFTY)  
 **Direction**: Both Long & Short  

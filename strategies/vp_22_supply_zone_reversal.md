@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Supply Zone Reversal. Best on NIFTY only (BANKNIFTY underperforms).
+description: Supply Zone Reversal. Best on NIFTY only (BANKNIFTY underperforms).
 ---
 
 # VP-22: Supply Zone Reversal
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY only (avoid BANKNIFTY)  
 **Timeframes**: 2m ✅ | 5m ⚠️ | 15m ✅✅  
 **Direction**: Short only  

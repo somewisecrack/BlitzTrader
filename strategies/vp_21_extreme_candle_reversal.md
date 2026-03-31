@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — Extreme Candle Reversal. High PF on BANKNIFTY 15m (PF 3.08, 52.9% WR).
+description: Extreme Candle Reversal. High PF on BANKNIFTY 15m (PF 3.08, 52.9% WR).
 ---
 
 # VP-21: Extreme Candle Reversal ⭐
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: BANKNIFTY (15m primary)  
 **Timeframes**: 2m ❌ | 5m ⚠️ | 15m ✅✅  
 **Direction**: Both Long & Short  

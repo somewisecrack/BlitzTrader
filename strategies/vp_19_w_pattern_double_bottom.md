@@ -1,9 +1,9 @@
 ---
-description: Vikram Prabhu — W Pattern (Double Bottom). Strong on NIFTY 5m (52% WR, PF 1.52).
+description: W Pattern (Double Bottom). Strong on NIFTY 5m (52% WR, PF 1.52).
 ---
 
 # VP-19: W Pattern (Double Bottom) ⭐
-**Source**: Vikram Prabhu — 25 Day Trading Strategies PDF  
+**Source**: 25 Day Trading Strategies PDF  
 **Instruments**: NIFTY, BANKNIFTY  
 **Timeframes**: 2m ⚠️ | 5m ✅✅ | 15m ✅  
 **Direction**: Long only  
