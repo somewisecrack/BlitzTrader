@@ -1,25 +1,40 @@
 """
 broker/shoonya_client.py — Shoonya API client for BlitzTrader.
-Ported from SpreadTrader's auth.py + shoonya_client.py.
+Standard session-based authentication via NorenApi.login().
 
-Handles: authentication (TOTP), REST quotes, historical data,
+Handles: login, REST quotes, historical data,
 scrip search, option chain, and WebSocket lifecycle.
+
+Auth flow:
+  1. SHA256 hash the password
+  2. Generate TOTP code
+  3. Build app_key checksum: SHA256(user_id + "|" + api_key)
+  4. POST to /NorenWClientAPI/QuickAuth with jData form field
+  5. Store susertoken for all subsequent calls
 """
+import base64
+import hashlib
 import logging
 import time
 from typing import Optional
 
 import pyotp
+import requests
 
 logger = logging.getLogger("BlitzTrader.ShoonyaClient")
 
 # NFO exchange constant (avoid circular import from config)
 NFO_EXCHANGE = "NFO"
 
+API_BASE = "https://trade.shoonya.com"
+API_PATH = "/NorenWClientAPI"
+WS_URL = "wss://trade.shoonya.com/NorenWSTP/"
+
 
 class ShoonyaClient:
     """
     Thin wrapper around the authenticated NorenApi object.
+    Uses the standard NorenApi session login (jData POST).
     Provides REST market data + WebSocket lifecycle management.
     """
 
@@ -28,7 +43,7 @@ class ShoonyaClient:
         self._logged_in = False
 
     # ──────────────────────────────────────────────────────────
-    #   AUTHENTICATION
+    #   LOGIN
     # ──────────────────────────────────────────────────────────
 
     def login(
@@ -39,9 +54,23 @@ class ShoonyaClient:
         api_key: str,
         vendor_code: str,
         imei: str,
+        secret_code: str = "",   # Base64-encoded K array for appkey computation
     ) -> tuple[bool, str]:
         """
-        Log in to Shoonya API with TOTP.
+        Log in to Shoonya using the standard NorenApi session login.
+
+        Appkey computation (April 2026 OAuth migration):
+          1. Decode secret_code from base64 → K array (48 bytes)
+          2. Build string: user_id + "|" + sum of chr(K[p]+p) for all p
+          3. Appkey = SHA256(that string)
+
+        Auth flow:
+          1. SHA256 hash the password
+          2. Generate TOTP code
+          3. Compute appkey from secret_code
+          4. POST to /NorenWClientAPI/QuickAuth with jData form field
+          5. Store susertoken for all subsequent calls
+
         Returns (success: bool, message: str).
         """
         try:
@@ -50,40 +79,53 @@ class ShoonyaClient:
             class _ShoonyaApi(NorenApi):
                 def __init__(self):
                     super().__init__(
-                        host="https://api.shoonya.com/NorenWClientTP/",
-                        websocket="wss://api.shoonya.com/NorenWSTP/",
+                        host=f"{API_BASE}{API_PATH}/",
+                        websocket=WS_URL,
                     )
 
-            totp = pyotp.TOTP(totp_secret)
-            totp_code = totp.now()
-
             self._api = _ShoonyaApi()
+
+            pwd_hash = hashlib.sha256(password.encode()).hexdigest()
+            totp_code = pyotp.TOTP(totp_secret).now()
+
+            # Compute appkey using secret_code (K array)
+            if secret_code:
+                try:
+                    K = base64.b64decode(secret_code)
+                    d = user_id + "|"
+                    for p in range(len(K)):
+                        d += chr(K[p] + p)
+                    app_key = hashlib.sha256(d.encode()).hexdigest()
+                    logger.info(f"Computed appkey from secret_code (K len={len(K)})")
+                except Exception as e:
+                    logger.error(f"Failed to decode secret_code: {e}")
+                    return False, f"Invalid secret_code: {e}"
+            else:
+                # Fallback to old method (for compatibility)
+                app_key = hashlib.sha256(f"{user_id}|{api_key}".encode()).hexdigest()
+                logger.warning("No secret_code provided, using fallback appkey computation")
+
             ret = self._api.login(
                 userid=user_id,
-                password=password,
+                password=pwd_hash,
                 twoFA=totp_code,
                 vendor_code=vendor_code,
-                api_secret=api_key,
+                api_secret=app_key,
                 imei=imei,
             )
 
-            if ret is None or (isinstance(ret, dict) and ret.get("stat") == "Not_Ok"):
-                msg = (
-                    ret.get("emsg", "Unknown login error")
-                    if isinstance(ret, dict)
-                    else "Login returned None"
-                )
-                logger.error(f"Shoonya login failed: {msg}")
-                return False, msg
+            if ret is None:
+                return False, "Login returned None — check credentials/IP whitelist"
 
-            self._logged_in = True
-            logger.info(f"Shoonya login SUCCESS for user: {user_id}")
-            return True, "Login successful"
+            if ret.get("stat") == "Ok":
+                self._logged_in = True
+                logger.info(f"Shoonya login SUCCESS for user: {user_id}")
+                return True, "Login successful"
 
-        except ImportError:
-            msg = "NorenRestApiPy not installed. Run: pip install NorenRestApiPy"
-            logger.error(msg)
-            return False, msg
+            err = ret.get("emsg", str(ret))
+            logger.error(f"Shoonya login FAILED: {err}")
+            return False, err
+
         except Exception as e:
             logger.exception("Unexpected error during Shoonya login")
             return False, str(e)
@@ -294,12 +336,12 @@ class ShoonyaClient:
         import ssl
         import websocket as _ws
         _ws.enableTrace(False)
-        
+
         try:
             ssl._create_default_https_context = ssl._create_unverified_context
         except AttributeError:
             pass
-            
+
         _orig_run_forever = _ws.WebSocketApp.run_forever
         def _patched_run_forever(self, **kwargs):
             if "sslopt" not in kwargs:

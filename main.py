@@ -40,6 +40,7 @@ from config import (
     SHOONYA_API_KEY,
     SHOONYA_IMEI,
     SHOONYA_PASSWORD,
+    SHOONYA_SECRET_CODE,
     SHOONYA_TOTP_SECRET,
     SHOONYA_USER_ID,
     SHOONYA_VENDOR_CODE,
@@ -149,6 +150,7 @@ class BlitzTrader:
                 api_key=SHOONYA_API_KEY,
                 vendor_code=SHOONYA_VENDOR_CODE,
                 imei=SHOONYA_IMEI,
+                secret_code=SHOONYA_SECRET_CODE,
             )
             if success:
                 break
