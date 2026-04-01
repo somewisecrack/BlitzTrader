@@ -1,49 +1,53 @@
 """
 broker/shoonya_client.py — Shoonya API client for BlitzTrader.
-Standard session-based authentication via NorenApi.login().
-
-Handles: login, REST quotes, historical data,
-scrip search, option chain, and WebSocket lifecycle.
+OAuth-based authentication (April 2026 migration).
 
 Auth flow:
-  1. SHA256 hash the password
-  2. Generate TOTP code
-  3. Build app_key checksum: SHA256(user_id + "|" + api_key)
-  4. POST to /NorenWClientAPI/QuickAuth with jData form field
-  5. Store susertoken for all subsequent calls
+  1. User logs in manually: https://trade.shoonya.com/OAuthlogin?client_id={USER_ID}
+  2. Copy authorization code from redirect URL
+  3. Store code in .env as SHOONYA_AUTH_CODE
+  4. BlitzTrader exchanges code for access_token via GenAcsTok
+  5. Inject token into NorenApi for all subsequent calls
 """
-import base64
 import hashlib
+import json
 import logging
 import time
 from typing import Optional
 
-import pyotp
 import requests
 
 logger = logging.getLogger("BlitzTrader.ShoonyaClient")
 
-# NFO exchange constant (avoid circular import from config)
-NFO_EXCHANGE = "NFO"
-
+# Shoonya API endpoints (April 2026)
 API_BASE = "https://trade.shoonya.com"
 API_PATH = "/NorenWClientAPI"
 WS_URL = "wss://trade.shoonya.com/NorenWSTP/"
 
+# NFO exchange constant (avoid circular import from config)
+NFO_EXCHANGE = "NFO"
+
 
 class ShoonyaClient:
     """
-    Thin wrapper around the authenticated NorenApi object.
-    Uses the standard NorenApi session login (jData POST).
-    Provides REST market data + WebSocket lifecycle management.
+    Shoonya API client with OAuth authentication.
+
+    Requires one-time manual login:
+      1. Visit: https://trade.shoonya.com/OAuthlogin?client_id={USER_ID}
+      2. Log in with credentials + TOTP
+      3. Copy authorization code from redirect URL
+      4. Set SHOONYA_AUTH_CODE={code} in .env
+      5. BlitzTrader handles token exchange automatically
     """
 
     def __init__(self):
         self._api = None
         self._logged_in = False
+        self._access_token = None
+        self._token_expires_at = 0
 
     # ──────────────────────────────────────────────────────────
-    #   LOGIN
+    #   LOGIN VIA OAUTH
     # ──────────────────────────────────────────────────────────
 
     def login(
@@ -54,25 +58,123 @@ class ShoonyaClient:
         api_key: str,
         vendor_code: str,
         imei: str,
-        secret_code: str = "",   # Base64-encoded K array for appkey computation
+        secret_code: str = "",
+        auth_code: str = "",
     ) -> tuple[bool, str]:
         """
-        Log in to Shoonya using the standard NorenApi session login.
+        Log in to Shoonya using OAuth (April 2026 migration).
 
-        Appkey computation (April 2026 OAuth migration):
-          1. Decode secret_code from base64 → K array (48 bytes)
-          2. Build string: user_id + "|" + sum of chr(K[p]+p) for all p
-          3. Appkey = SHA256(that string)
+        Requires SHOONYA_AUTH_CODE environment variable:
+          1. User logs in manually at: https://trade.shoonya.com/OAuthlogin?client_id={USER_ID}
+          2. Copy the authorization code from redirect URL
+          3. Set it in .env as SHOONYA_AUTH_CODE={code}
+          4. This method exchanges code for access_token
 
-        Auth flow:
-          1. SHA256 hash the password
-          2. Generate TOTP code
-          3. Compute appkey from secret_code
-          4. POST to /NorenWClientAPI/QuickAuth with jData form field
-          5. Store susertoken for all subsequent calls
+        Args:
+            user_id: Shoonya user ID (e.g., "FA125387")
+            password: Not used in OAuth flow (kept for compatibility)
+            totp_secret: Not used in OAuth flow (kept for compatibility)
+            api_key: Not used in OAuth flow (kept for compatibility)
+            vendor_code: Not used in OAuth flow (kept for compatibility)
+            imei: Not used in OAuth flow (kept for compatibility)
+            secret_code: Not used in OAuth flow (kept for compatibility)
+            auth_code: OAuth authorization code (from manual login redirect URL)
 
-        Returns (success: bool, message: str).
+        Returns:
+            (success: bool, message: str)
         """
+        if not auth_code:
+            msg = (
+                "OAuth code required. Manual login needed:\n"
+                f"1. Visit: https://trade.shoonya.com/OAuthlogin?client_id={user_id}\n"
+                "2. Log in with credentials + TOTP\n"
+                "3. Copy code from redirect URL\n"
+                "4. Set SHOONYA_AUTH_CODE={code} in .env\n"
+                "5. Restart BlitzTrader"
+            )
+            logger.error(msg)
+            return False, msg
+
+        try:
+            # Exchange authorization code for access token
+            success, token = self._exchange_code_for_token(user_id, auth_code, secret_code)
+            if not success:
+                return False, token
+
+            self._access_token = token
+            self._logged_in = True
+            logger.info(f"Shoonya OAuth login SUCCESS for user: {user_id}")
+            return True, "Login successful"
+
+        except Exception as e:
+            logger.exception("Unexpected error during Shoonya OAuth login")
+            return False, str(e)
+
+    def _exchange_code_for_token(self, user_id: str, auth_code: str, secret_code: str) -> tuple[bool, str]:
+        """
+        Exchange OAuth authorization code for access token.
+
+        Calls GenAcsTok API:
+          POST /NorenWClientAPI/GenAcsTok
+          jData: { "code": auth_code, "checksum": SHA256(user_id + secret_code + auth_code) }
+
+        Returns:
+            (success: bool, access_token_or_error: str)
+        """
+        try:
+            # Compute checksum
+            checksum_input = f"{user_id}{secret_code}{auth_code}"
+            checksum = hashlib.sha256(checksum_input.encode()).hexdigest()
+
+            # Build request
+            jdata = json.dumps({"code": auth_code, "checksum": checksum})
+
+            url = f"{API_BASE}{API_PATH}/GenAcsTok"
+            logger.info(f"Exchanging OAuth code for token at {url}")
+
+            resp = requests.post(
+                url,
+                data={"jData": jdata},
+                timeout=10,
+                verify=True
+            )
+
+            if resp.status_code != 200:
+                err = f"GenAcsTok returned {resp.status_code}: {resp.text[:200]}"
+                logger.error(err)
+                return False, err
+
+            result = resp.json()
+
+            if result.get("stat") != "Ok":
+                err = result.get("emsg", f"GenAcsTok failed: {result}")
+                logger.error(err)
+                return False, err
+
+            access_token = result.get("access_token")
+            if not access_token:
+                err = f"No access_token in response: {result}"
+                logger.error(err)
+                return False, err
+
+            logger.info(f"Successfully obtained access_token (expires in {result.get('expires_in', '?')}s)")
+            return True, access_token
+
+        except requests.exceptions.RequestException as e:
+            err = f"Network error exchanging code: {e}"
+            logger.error(err)
+            return False, err
+        except json.JSONDecodeError as e:
+            err = f"Invalid JSON response from GenAcsTok: {e}"
+            logger.error(err)
+            return False, err
+        except Exception as e:
+            err = f"Unexpected error in _exchange_code_for_token: {e}"
+            logger.error(err)
+            return False, err
+
+    def _init_noren_api(self):
+        """Initialize NorenApi with OAuth token injected."""
         try:
             from NorenRestApiPy.NorenApi import NorenApi
 
@@ -84,59 +186,25 @@ class ShoonyaClient:
                     )
 
             self._api = _ShoonyaApi()
-
-            pwd_hash = hashlib.sha256(password.encode()).hexdigest()
-            totp_code = pyotp.TOTP(totp_secret).now()
-
-            # Compute appkey using secret_code (K array)
-            if secret_code:
-                try:
-                    K = base64.b64decode(secret_code)
-                    d = user_id + "|"
-                    for p in range(len(K)):
-                        d += chr(K[p] + p)
-                    app_key = hashlib.sha256(d.encode()).hexdigest()
-                    logger.info(f"Computed appkey from secret_code (K len={len(K)})")
-                except Exception as e:
-                    logger.error(f"Failed to decode secret_code: {e}")
-                    return False, f"Invalid secret_code: {e}"
-            else:
-                # Fallback to old method (for compatibility)
-                app_key = hashlib.sha256(f"{user_id}|{api_key}".encode()).hexdigest()
-                logger.warning("No secret_code provided, using fallback appkey computation")
-
-            ret = self._api.login(
-                userid=user_id,
-                password=pwd_hash,
-                twoFA=totp_code,
-                vendor_code=vendor_code,
-                api_secret=app_key,
-                imei=imei,
-            )
-
-            if ret is None:
-                return False, "Login returned None — check credentials/IP whitelist"
-
-            if ret.get("stat") == "Ok":
-                self._logged_in = True
-                logger.info(f"Shoonya login SUCCESS for user: {user_id}")
-                return True, "Login successful"
-
-            err = ret.get("emsg", str(ret))
-            logger.error(f"Shoonya login FAILED: {err}")
-            return False, err
+            # Inject OAuth token as session token
+            self._api._NorenApi__susertoken = self._access_token
+            logger.info("NorenApi initialized with OAuth token")
 
         except Exception as e:
-            logger.exception("Unexpected error during Shoonya login")
-            return False, str(e)
+            logger.error(f"Failed to initialize NorenApi: {e}")
+            return False
+
+        return True
 
     @property
     def is_logged_in(self) -> bool:
-        return self._logged_in
+        return self._logged_in and self._access_token is not None
 
     @property
     def api(self):
         """Direct access to the underlying NorenApi for advanced use."""
+        if not self._api and self._access_token:
+            self._init_noren_api()
         return self._api
 
     # ──────────────────────────────────────────────────────────
@@ -155,7 +223,7 @@ class ShoonyaClient:
           o   = open, h = high, l = low, c = close
           v   = volume, oi = open interest
         """
-        if not self._api:
+        if not self.api:
             logger.error("Cannot get_quotes: not logged in")
             return None
         try:
@@ -198,207 +266,75 @@ class ShoonyaClient:
         exchange: str,
         token: str,
         starttime: float,
-        interval: str = "5",
-        endtime: Optional[float] = None,
+        endtime: float = None,
+        interval: str = "1",
     ) -> Optional[list[dict]]:
         """
-        Fetch OHLCV candles.
-
-        :param exchange:  e.g. 'NSE', 'NFO'
-        :param token:     Shoonya numeric scrip token
-        :param starttime: Unix timestamp for start
-        :param interval:  '1', '3', '5', '10', '15', '30', '60', '120', '240'
-        :param endtime:   Unix timestamp for end (optional)
-        :returns: list of candle dicts with 'into', 'inth', 'intl', 'intc', 'intv', 'ssboe'
+        Fetch OHLC data.
+        interval: 1/5/15/60 (minutes)
+        Returns list of [timestamp, open, high, low, close, volume, oi]
         """
-        if not self._api:
+        if not self.api:
+            logger.error("Cannot get_time_price_series: not logged in")
             return None
         try:
-            kwargs = {
-                "exchange": exchange,
-                "token": token,
-                "starttime": starttime,
-                "interval": interval,
-            }
-            if endtime:
-                kwargs["endtime"] = endtime
-
-            resp = self._api.get_time_price_series(**kwargs)
-            if resp and isinstance(resp, list):
-                return resp
-            logger.warning(f"get_time_price_series empty for {exchange}:{token}")
+            resp = self._api.get_time_price_series(
+                exchange=exchange,
+                token=token,
+                starttime=int(starttime),
+                endtime=int(endtime) if endtime else int(time.time()),
+                interval=interval,
+            )
+            if resp and resp.get("stat") == "Ok":
+                return resp.get("series", [])
+            err = resp.get("emsg", "Unknown") if resp else "None response"
+            logger.warning(f"get_time_price_series failed: {err}")
         except Exception:
-            logger.exception(f"Exception in get_time_price_series({exchange}, {token})")
+            logger.exception("Exception in get_time_price_series")
         return None
 
     # ──────────────────────────────────────────────────────────
-    #   SCRIP SEARCH
+    #   WEBSOCKET
     # ──────────────────────────────────────────────────────────
 
-    def search_scrip(self, exchange: str, searchtext: str) -> list[dict]:
+    def start_websocket(self, callback=None, exchange_tokens: list[str] = None) -> bool:
         """
-        Search for scrip by name/symbol.
-        Returns list of dicts with 'token', 'tsym' (trading symbol), 'cname'.
+        Start WebSocket subscription for market data.
+        callback(data): called on each tick
+        exchange_tokens: list of "NSE|26000" style tokens
         """
-        if not self._api:
-            return []
+        if not self.api:
+            logger.error("Cannot start_websocket: not logged in")
+            return False
+
         try:
-            resp = self._api.searchscrip(exchange=exchange, searchtext=searchtext)
-            if resp and resp.get("stat") == "Ok":
-                return resp.get("values", [])
-            logger.warning(f"searchscrip no results for '{searchtext}' on {exchange}")
+            # Subscribe to tokens if provided
+            if exchange_tokens:
+                for et in exchange_tokens:
+                    parts = et.split("|")
+                    if len(parts) == 2:
+                        exchange, token = parts
+                        self._api.subscribe(exchange=exchange, token=token)
+                        logger.info(f"Subscribed to {exchange}:{token}")
+
+            # Set websocket callback
+            if callback:
+                self._api.set_websocket_callback(callback)
+
+            logger.info("WebSocket started")
+            return True
+
         except Exception:
-            logger.exception(f"Exception in search_scrip({exchange}, {searchtext})")
-        return []
+            logger.exception("Failed to start WebSocket")
+            return False
 
-    # ──────────────────────────────────────────────────────────
-    #   OPTION CHAIN
-    # ──────────────────────────────────────────────────────────
-
-    def get_option_chain(
-        self,
-        index: str,
-        expiry_prefix: str,
-        strike_range: tuple[float, float] = None,
-    ) -> list[dict]:
-        """
-        Build option chain by searching NFO for CE/PE at nearby strikes.
-
-        :param index: 'NIFTY' or 'BANKNIFTY'
-        :param expiry_prefix: e.g. '27MAR' or '03APR' (Shoonya format)
-        :param strike_range: (low, high) to filter strikes
-        :returns: list of dicts with strike, type (CE/PE), and quote data
-        """
-        chain = []
-
-        for opt_type in ["CE", "PE"]:
-            search = f"{index} {expiry_prefix}"
-            results = self.search_scrip(NFO_EXCHANGE, search)
-
-            for scrip in results:
-                tsym = scrip.get("tsym", "")
-                if opt_type not in tsym:
-                    continue
-
-                # Extract strike from trading symbol
-                try:
-                    # Format: NIFTY27MAR24500CE
-                    strike_str = tsym.replace(index, "").replace(expiry_prefix, "")
-                    strike_str = strike_str.replace("CE", "").replace("PE", "")
-                    strike = float(strike_str)
-                except (ValueError, IndexError):
-                    continue
-
-                if strike_range and not (strike_range[0] <= strike <= strike_range[1]):
-                    continue
-
-                # Fetch quote for this strike
-                token = scrip.get("token", "")
-                quote = self.get_quotes(NFO_EXCHANGE, token)
-
-                chain.append({
-                    "symbol": tsym,
-                    "token": token,
-                    "strike": strike,
-                    "type": opt_type,
-                    "ltp": float(quote.get("lp", 0)) if quote else 0,
-                    "bid": float(quote.get("bp1", 0)) if quote else 0,
-                    "ask": float(quote.get("sp1", 0)) if quote else 0,
-                    "oi": int(quote.get("oi", 0)) if quote else 0,
-                    "volume": int(quote.get("v", 0)) if quote else 0,
-                })
-
-                # Rate limiting — Shoonya has API limits
-                time.sleep(0.1)
-
-        # Sort by strike
-        chain.sort(key=lambda x: (x["strike"], x["type"]))
-        return chain
-
-    # ──────────────────────────────────────────────────────────
-    #   WEBSOCKET LIFECYCLE
-    # ──────────────────────────────────────────────────────────
-
-    def start_websocket(self, on_open, on_tick, on_error, on_close):
-        """
-        Start the Shoonya WebSocket connection.
-        Callbacks:
-          on_open(ws)
-          on_tick(ws, message)  — receives raw message dict/str
-          on_error(ws, error)
-          on_close(ws, code, msg)
-        """
-        if not self._api:
-            logger.error("Cannot start WebSocket: not logged in")
-            return
-
-        # SSL fix for certain environments
-        import ssl
-        import websocket as _ws
-        _ws.enableTrace(False)
-
-        try:
-            ssl._create_default_https_context = ssl._create_unverified_context
-        except AttributeError:
-            pass
-
-        _orig_run_forever = _ws.WebSocketApp.run_forever
-        def _patched_run_forever(self, **kwargs):
-            if "sslopt" not in kwargs:
-                kwargs["sslopt"] = {"cert_reqs": ssl.CERT_NONE}
-            elif "cert_reqs" not in kwargs["sslopt"]:
-                kwargs["sslopt"]["cert_reqs"] = ssl.CERT_NONE
-            return _orig_run_forever(self, **kwargs)
-        _ws.WebSocketApp.run_forever = _patched_run_forever
-
-        def _on_open(*args):
-            logger.info("WebSocket connected")
-            on_open(args[0] if args else None)
-
-        def _on_message(*args):
-            msg = args[-1] if args else None
-            on_tick(args[0] if len(args) > 1 else None, msg)
-
-        def _on_error(*args):
-            err = args[-1] if args else "unknown error"
-            logger.error(f"WebSocket error: {err}")
-            on_error(args[0] if len(args) > 1 else None, err)
-
-        def _on_close(*args):
-            code = args[1] if len(args) > 1 else None
-            msg = args[2] if len(args) > 2 else None
-            logger.warning(f"WebSocket closed: {code} {msg}")
-            on_close(args[0] if args else None, code, msg)
-
-        self._api.start_websocket(
-            order_update_callback=lambda *a: None,
-            subscribe_callback=_on_message,
-            socket_open_callback=_on_open,
-            socket_error_callback=_on_error,
-            socket_close_callback=_on_close,
-        )
-
-    def subscribe(self, exchange_token_pairs: list[tuple[str, str]]):
-        """Subscribe to touchline feed for given (exchange, token) pairs."""
-        if not self._api or not exchange_token_pairs:
-            return
-        scrip_list = [f"{ex}|{tok}" for ex, tok in exchange_token_pairs]
-        self._api.subscribe(scrip_list)
-        logger.info(f"Subscribed: {scrip_list}")
-
-    def unsubscribe(self, exchange_token_pairs: list[tuple[str, str]]):
-        """Unsubscribe from touchline feed."""
-        if not self._api or not exchange_token_pairs:
-            return
-        scrip_list = [f"{ex}|{tok}" for ex, tok in exchange_token_pairs]
-        self._api.unsubscribe(scrip_list)
-        logger.info(f"Unsubscribed: {scrip_list}")
-
-    def close_websocket(self):
-        """Cleanly close WebSocket connection."""
+    def stop_websocket(self) -> bool:
+        """Stop WebSocket connection."""
         try:
             if self._api:
                 self._api.close_websocket()
-                logger.info("WebSocket closed cleanly")
+                logger.info("WebSocket stopped")
+            return True
         except Exception:
-            pass
+            logger.exception("Failed to stop WebSocket")
+            return False

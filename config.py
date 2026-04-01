@@ -65,6 +65,7 @@ SHOONYA_API_KEY = _optional_env("SHOONYA_API_KEY")
 SHOONYA_SECRET_CODE = _optional_env("SHOONYA_SECRET_CODE")
 SHOONYA_VENDOR_CODE = _optional_env("SHOONYA_VENDOR_CODE")
 SHOONYA_IMEI = _optional_env("SHOONYA_IMEI")
+SHOONYA_AUTH_CODE = _optional_env("SHOONYA_AUTH_CODE")  # OAuth authorization code (from manual login)
 
 # ──────────────────────────────────────────────────────────────
 #   TELEGRAM

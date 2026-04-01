@@ -38,6 +38,7 @@ from config import (
     NO_NEW_ENTRY_AFTER,
     NSE_TOKENS,
     SHOONYA_API_KEY,
+    SHOONYA_AUTH_CODE,
     SHOONYA_IMEI,
     SHOONYA_PASSWORD,
     SHOONYA_SECRET_CODE,
@@ -151,6 +152,7 @@ class BlitzTrader:
                 vendor_code=SHOONYA_VENDOR_CODE,
                 imei=SHOONYA_IMEI,
                 secret_code=SHOONYA_SECRET_CODE,
+                auth_code=SHOONYA_AUTH_CODE,
             )
             if success:
                 break
