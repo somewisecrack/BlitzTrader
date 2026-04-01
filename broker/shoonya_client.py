@@ -1,28 +1,32 @@
 """
 broker/shoonya_client.py — Shoonya API client for BlitzTrader.
-OAuth-based authentication (April 2026 migration).
+QuickAuth authentication with appkey from secret_code.
 
 Auth flow:
-  1. User logs in manually: https://trade.shoonya.com/OAuthlogin?client_id={USER_ID}
-  2. Copy authorization code from redirect URL
-  3. Store code in .env as SHOONYA_AUTH_CODE
-  4. BlitzTrader exchanges code for access_token via GenAcsTok
-  5. Inject token into NorenApi for all subsequent calls
+  1. Decode secret_code (base64) → K array
+  2. Compute appkey: SHA256(user_id + "|" + chr(K[p]+p) for all p)
+  3. SHA256 hash the password
+  4. Generate TOTP code
+  5. POST to /NorenWClientAPI/QuickAuth with jData
+  6. Store susertoken for all subsequent calls
+
+Endpoint: https://api.shoonya.com/NorenWClientAPI/ (working as of Apr 2026)
 """
+import base64
 import hashlib
-import json
 import logging
 import time
 from typing import Optional
 
+import pyotp
 import requests
 
 logger = logging.getLogger("BlitzTrader.ShoonyaClient")
 
-# Shoonya API endpoints (April 2026)
-API_BASE = "https://trade.shoonya.com"
+# Shoonya API endpoints (working April 2026)
+API_BASE = "https://api.shoonya.com"
 API_PATH = "/NorenWClientAPI"
-WS_URL = "wss://trade.shoonya.com/NorenWSTP/"
+WS_URL = "wss://api.shoonya.com/NorenWSTP/"
 
 # NFO exchange constant (avoid circular import from config)
 NFO_EXCHANGE = "NFO"
@@ -30,24 +34,16 @@ NFO_EXCHANGE = "NFO"
 
 class ShoonyaClient:
     """
-    Shoonya API client with OAuth authentication.
-
-    Requires one-time manual login:
-      1. Visit: https://trade.shoonya.com/OAuthlogin?client_id={USER_ID}
-      2. Log in with credentials + TOTP
-      3. Copy authorization code from redirect URL
-      4. Set SHOONYA_AUTH_CODE={code} in .env
-      5. BlitzTrader handles token exchange automatically
+    Shoonya API client with QuickAuth authentication.
+    Appkey computed from secret_code (base64-encoded K array).
     """
 
     def __init__(self):
         self._api = None
         self._logged_in = False
-        self._access_token = None
-        self._token_expires_at = 0
 
     # ──────────────────────────────────────────────────────────
-    #   LOGIN VIA OAUTH
+    #   LOGIN
     # ──────────────────────────────────────────────────────────
 
     def login(
@@ -59,122 +55,29 @@ class ShoonyaClient:
         vendor_code: str,
         imei: str,
         secret_code: str = "",
-        auth_code: str = "",
+        auth_code: str = "",  # Reserved for future OAuth support
     ) -> tuple[bool, str]:
         """
-        Log in to Shoonya using OAuth (April 2026 migration).
+        Log in to Shoonya using QuickAuth.
 
-        Requires SHOONYA_AUTH_CODE environment variable:
-          1. User logs in manually at: https://trade.shoonya.com/OAuthlogin?client_id={USER_ID}
-          2. Copy the authorization code from redirect URL
-          3. Set it in .env as SHOONYA_AUTH_CODE={code}
-          4. This method exchanges code for access_token
+        Appkey computation (April 2026):
+          1. Decode secret_code from base64 → K array (48 bytes)
+          2. Build string: user_id + "|" + chr(K[p]+p) for all p
+          3. Appkey = SHA256(that string)
 
         Args:
-            user_id: Shoonya user ID (e.g., "FA125387")
-            password: Not used in OAuth flow (kept for compatibility)
-            totp_secret: Not used in OAuth flow (kept for compatibility)
-            api_key: Not used in OAuth flow (kept for compatibility)
-            vendor_code: Not used in OAuth flow (kept for compatibility)
-            imei: Not used in OAuth flow (kept for compatibility)
-            secret_code: Not used in OAuth flow (kept for compatibility)
-            auth_code: OAuth authorization code (from manual login redirect URL)
+            user_id: Shoonya user ID
+            password: Login password (will be SHA256 hashed)
+            totp_secret: TOTP secret for 2FA
+            api_key: (Deprecated, not used)
+            vendor_code: Shoonya vendor code
+            imei: Device IMEI identifier
+            secret_code: Base64-encoded K array for appkey computation
+            auth_code: Reserved for future OAuth support
 
         Returns:
             (success: bool, message: str)
         """
-        if not auth_code:
-            msg = (
-                "OAuth code required. Manual login needed:\n"
-                f"1. Visit: https://trade.shoonya.com/OAuthlogin?client_id={user_id}\n"
-                "2. Log in with credentials + TOTP\n"
-                "3. Copy code from redirect URL\n"
-                "4. Set SHOONYA_AUTH_CODE={code} in .env\n"
-                "5. Restart BlitzTrader"
-            )
-            logger.error(msg)
-            return False, msg
-
-        try:
-            # Exchange authorization code for access token
-            success, token = self._exchange_code_for_token(user_id, auth_code, secret_code)
-            if not success:
-                return False, token
-
-            self._access_token = token
-            self._logged_in = True
-            logger.info(f"Shoonya OAuth login SUCCESS for user: {user_id}")
-            return True, "Login successful"
-
-        except Exception as e:
-            logger.exception("Unexpected error during Shoonya OAuth login")
-            return False, str(e)
-
-    def _exchange_code_for_token(self, user_id: str, auth_code: str, secret_code: str) -> tuple[bool, str]:
-        """
-        Exchange OAuth authorization code for access token.
-
-        Calls GenAcsTok API:
-          POST /NorenWClientAPI/GenAcsTok
-          jData: { "code": auth_code, "checksum": SHA256(user_id + secret_code + auth_code) }
-
-        Returns:
-            (success: bool, access_token_or_error: str)
-        """
-        try:
-            # Compute checksum
-            checksum_input = f"{user_id}{secret_code}{auth_code}"
-            checksum = hashlib.sha256(checksum_input.encode()).hexdigest()
-
-            # Build request
-            jdata = json.dumps({"code": auth_code, "checksum": checksum})
-
-            url = f"{API_BASE}{API_PATH}/GenAcsTok"
-            logger.info(f"Exchanging OAuth code for token at {url}")
-
-            resp = requests.post(
-                url,
-                data={"jData": jdata},
-                timeout=10,
-                verify=True
-            )
-
-            if resp.status_code != 200:
-                err = f"GenAcsTok returned {resp.status_code}: {resp.text[:200]}"
-                logger.error(err)
-                return False, err
-
-            result = resp.json()
-
-            if result.get("stat") != "Ok":
-                err = result.get("emsg", f"GenAcsTok failed: {result}")
-                logger.error(err)
-                return False, err
-
-            access_token = result.get("access_token")
-            if not access_token:
-                err = f"No access_token in response: {result}"
-                logger.error(err)
-                return False, err
-
-            logger.info(f"Successfully obtained access_token (expires in {result.get('expires_in', '?')}s)")
-            return True, access_token
-
-        except requests.exceptions.RequestException as e:
-            err = f"Network error exchanging code: {e}"
-            logger.error(err)
-            return False, err
-        except json.JSONDecodeError as e:
-            err = f"Invalid JSON response from GenAcsTok: {e}"
-            logger.error(err)
-            return False, err
-        except Exception as e:
-            err = f"Unexpected error in _exchange_code_for_token: {e}"
-            logger.error(err)
-            return False, err
-
-    def _init_noren_api(self):
-        """Initialize NorenApi with OAuth token injected."""
         try:
             from NorenRestApiPy.NorenApi import NorenApi
 
@@ -186,25 +89,59 @@ class ShoonyaClient:
                     )
 
             self._api = _ShoonyaApi()
-            # Inject OAuth token as session token
-            self._api._NorenApi__susertoken = self._access_token
-            logger.info("NorenApi initialized with OAuth token")
+
+            # Compute appkey from secret_code (K array)
+            if secret_code:
+                try:
+                    K = base64.b64decode(secret_code)
+                    d = user_id + "|"
+                    for p in range(len(K)):
+                        d += chr(K[p] + p)
+                    app_key = hashlib.sha256(d.encode()).hexdigest()
+                    logger.info(f"Computed appkey from secret_code (K len={len(K)})")
+                except Exception as e:
+                    logger.error(f"Failed to decode secret_code: {e}")
+                    return False, f"Invalid secret_code: {e}"
+            else:
+                # Fallback to old method (for compatibility)
+                app_key = hashlib.sha256(f"{user_id}|{api_key}".encode()).hexdigest()
+                logger.warning("No secret_code provided, using fallback appkey")
+
+            pwd_hash = hashlib.sha256(password.encode()).hexdigest()
+            totp_code = pyotp.TOTP(totp_secret).now()
+
+            ret = self._api.login(
+                userid=user_id,
+                password=pwd_hash,
+                twoFA=totp_code,
+                vendor_code=vendor_code,
+                api_secret=app_key,
+                imei=imei,
+            )
+
+            if ret is None:
+                return False, "Login returned None — check credentials/IP whitelist"
+
+            if ret.get("stat") == "Ok":
+                self._logged_in = True
+                logger.info(f"Shoonya login SUCCESS for user: {user_id}")
+                return True, "Login successful"
+
+            err = ret.get("emsg", str(ret))
+            logger.error(f"Shoonya login FAILED: {err}")
+            return False, err
 
         except Exception as e:
-            logger.error(f"Failed to initialize NorenApi: {e}")
-            return False
-
-        return True
+            logger.exception("Unexpected error during Shoonya login")
+            return False, str(e)
 
     @property
     def is_logged_in(self) -> bool:
-        return self._logged_in and self._access_token is not None
+        return self._logged_in
 
     @property
     def api(self):
         """Direct access to the underlying NorenApi for advanced use."""
-        if not self._api and self._access_token:
-            self._init_noren_api()
         return self._api
 
     # ──────────────────────────────────────────────────────────
@@ -223,7 +160,7 @@ class ShoonyaClient:
           o   = open, h = high, l = low, c = close
           v   = volume, oi = open interest
         """
-        if not self.api:
+        if not self._api:
             logger.error("Cannot get_quotes: not logged in")
             return None
         try:
@@ -274,7 +211,7 @@ class ShoonyaClient:
         interval: 1/5/15/60 (minutes)
         Returns list of [timestamp, open, high, low, close, volume, oi]
         """
-        if not self.api:
+        if not self._api:
             logger.error("Cannot get_time_price_series: not logged in")
             return None
         try:
@@ -303,7 +240,7 @@ class ShoonyaClient:
         callback(data): called on each tick
         exchange_tokens: list of "NSE|26000" style tokens
         """
-        if not self.api:
+        if not self._api:
             logger.error("Cannot start_websocket: not logged in")
             return False
 
