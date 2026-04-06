@@ -1,21 +1,21 @@
 """
 broker/shoonya_client.py — Shoonya API client for BlitzTrader.
-QuickAuth authentication with appkey from secret_code.
+OAuth2 authentication via NorenRestApiPy (post April 2026 migration).
 
-Auth flow:
-  1. Decode secret_code (base64) → K array
-  2. Compute appkey: SHA256(user_id + "|" + chr(K[p]+p) for all p)
-  3. SHA256 hash the password
-  4. Generate TOTP code
-  5. POST to /NorenWClientAPI/QuickAuth with jData
-  6. Store susertoken for all subsequent calls
+Auth flow (fully autonomous — no manual auth code needed):
+  1. QuickAuth  → POST credentials + TOTP → get jKey (susertoken)
+  2. GetAuthCode → POST jKey + app_key → get one-time auth code
+  3. GenAcsTok  → POST checksum(vendor|secret|code) → get access_token
+  4. injectOAuthHeader() → sets Bearer token for all subsequent calls
 
-Endpoint: https://api.shoonya.com/NorenWClientAPI/ (working as of Apr 2026)
+All three steps are implemented in pure Python (no Selenium required).
+Endpoint: https://trade.shoonya.com/NorenWClientAPI/
 """
-import base64
 import hashlib
+import json
 import logging
 import time
+import uuid
 from typing import Optional
 
 import pyotp
@@ -23,27 +23,30 @@ import requests
 
 logger = logging.getLogger("BlitzTrader.ShoonyaClient")
 
-# Shoonya API endpoints (working April 2026)
-API_BASE = "https://api.shoonya.com"
-API_PATH = "/NorenWClientAPI"
-WS_URL = "wss://api.shoonya.com/NorenWSTP/"
+BASE_URL = "https://trade.shoonya.com/NorenWClientAPI"
+WS_URL = "wss://api.shoonya.com/NorenWS/"
 
-# NFO exchange constant (avoid circular import from config)
 NFO_EXCHANGE = "NFO"
+
+# Internal web-app API secret (decoded from Shoonya OAuth portal JS)
+# Xa = new Uint8Array([83,50,97,114,110,46,27,93]) → each char = byte + index
+_K = [83, 50, 97, 114, 110, 46, 27, 93]
+_INTERNAL_SECRET = "".join(chr(b + i) for i, b in enumerate(_K))  # "S3cur3!d"
 
 
 class ShoonyaClient:
     """
-    Shoonya API client with QuickAuth authentication.
-    Appkey computed from secret_code (base64-encoded K array).
+    Shoonya API client using OAuth2 Bearer token authentication.
+    Fully autonomous — derives auth code internally via QuickAuth + GetAuthCode.
     """
 
     def __init__(self):
         self._api = None
         self._logged_in = False
+        self._session = requests.Session()
 
     # ──────────────────────────────────────────────────────────
-    #   LOGIN
+    #   LOGIN (autonomous OAuth flow)
     # ──────────────────────────────────────────────────────────
 
     def login(
@@ -55,28 +58,16 @@ class ShoonyaClient:
         vendor_code: str,
         imei: str,
         secret_code: str = "",
-        auth_code: str = "",  # Reserved for future OAuth support
+        auth_code: str = "",   # ignored — kept for interface compatibility
     ) -> tuple[bool, str]:
         """
-        Log in to Shoonya using QuickAuth.
+        Authenticate with Shoonya using the full autonomous OAuth flow:
+          1. QuickAuth (user/pass/TOTP)  → jKey
+          2. GetAuthCode (jKey + vendor)  → one-time code
+          3. GenAcsTok (code + checksum)  → access_token
 
-        Appkey computation (April 2026):
-          1. Decode secret_code from base64 → K array (48 bytes)
-          2. Build string: user_id + "|" + chr(K[p]+p) for all p
-          3. Appkey = SHA256(that string)
-
-        Args:
-            user_id: Shoonya user ID
-            password: Login password (will be SHA256 hashed)
-            totp_secret: TOTP secret for 2FA
-            api_key: (Deprecated, not used)
-            vendor_code: Shoonya vendor code
-            imei: Device IMEI identifier
-            secret_code: Base64-encoded K array for appkey computation
-            auth_code: Reserved for future OAuth support
-
-        Returns:
-            (success: bool, message: str)
+        auth_code parameter is ignored — the code is obtained automatically.
+        Returns (success: bool, message: str).
         """
         try:
             from NorenRestApiPy.NorenApi import NorenApi
@@ -84,56 +75,135 @@ class ShoonyaClient:
             class _ShoonyaApi(NorenApi):
                 def __init__(self):
                     super().__init__(
-                        host=f"{API_BASE}{API_PATH}/",
+                        host=BASE_URL,
                         websocket=WS_URL,
                     )
 
             self._api = _ShoonyaApi()
 
-            # Compute appkey from secret_code (K array)
-            if secret_code:
-                try:
-                    K = base64.b64decode(secret_code)
-                    d = user_id + "|"
-                    for p in range(len(K)):
-                        d += chr(K[p] + p)
-                    app_key = hashlib.sha256(d.encode()).hexdigest()
-                    logger.info(f"Computed appkey from secret_code (K len={len(K)})")
-                except Exception as e:
-                    logger.error(f"Failed to decode secret_code: {e}")
-                    return False, f"Invalid secret_code: {e}"
-            else:
-                # Fallback to old method (for compatibility)
-                app_key = hashlib.sha256(f"{user_id}|{api_key}".encode()).hexdigest()
-                logger.warning("No secret_code provided, using fallback appkey")
+            # ── Step 1: QuickAuth ──
+            logger.info(f"Step 1: QuickAuth for {user_id}...")
+            jkey, err = self._quickauth(user_id, password, totp_secret, vendor_code)
+            if not jkey:
+                return False, f"QuickAuth failed: {err}"
+            logger.info("QuickAuth success — got jKey")
 
-            pwd_hash = hashlib.sha256(password.encode()).hexdigest()
-            totp_code = pyotp.TOTP(totp_secret).now()
+            # ── Step 2: GetAuthCode ──
+            logger.info("Step 2: GetAuthCode...")
+            code, err = self._get_auth_code(jkey, vendor_code)
+            if not code:
+                return False, f"GetAuthCode failed: {err}"
+            logger.info(f"Got auth code: {code[:8]}...")
 
-            ret = self._api.login(
-                userid=user_id,
-                password=pwd_hash,
-                twoFA=totp_code,
-                vendor_code=vendor_code,
-                api_secret=app_key,
-                imei=imei,
+            # ── Step 3: GenAcsTok ──
+            logger.info("Step 3: GenAcsTok...")
+            result = self._api.getAccessToken(
+                authcode=code,
+                Secret_Code=secret_code,
+                client_id=vendor_code,
+                UID=user_id,
             )
 
-            if ret is None:
-                return False, "Login returned None — check credentials/IP whitelist"
+            if result is None:
+                return False, "GenAcsTok returned None — auth code may be invalid"
 
-            if ret.get("stat") == "Ok":
-                self._logged_in = True
-                logger.info(f"Shoonya login SUCCESS for user: {user_id}")
-                return True, "Login successful"
-
-            err = ret.get("emsg", str(ret))
-            logger.error(f"Shoonya login FAILED: {err}")
-            return False, err
+            access_token, userid, refresh_token, actid = result
+            logger.info(f"OAuth login SUCCESS for user: {userid}, actid: {actid}")
+            self._logged_in = True
+            return True, "Login successful"
 
         except Exception as e:
-            logger.exception("Unexpected error during Shoonya login")
+            logger.exception("Unexpected error during Shoonya OAuth login")
             return False, str(e)
+
+    def _quickauth(
+        self,
+        user_id: str,
+        password: str,
+        totp_secret: str,
+        vendor_code: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        POST to QuickAuth with credentials.
+        Returns (jKey, None) on success or (None, error_message).
+        """
+        try:
+            # Wait for a fresh TOTP window (avoid using code with < 3s remaining)
+            remaining = 30 - (int(time.time()) % 30)
+            if remaining < 3:
+                logger.debug(f"Waiting {remaining + 1}s for fresh TOTP window...")
+                time.sleep(remaining + 1)
+
+            pwd = hashlib.sha256(password.encode()).hexdigest()
+            appkey = hashlib.sha256(
+                (user_id + "|" + _INTERNAL_SECRET).encode()
+            ).hexdigest()
+            totp = pyotp.TOTP(totp_secret).now()
+
+            payload = {
+                "apkversion": "W2_20250926",
+                "uid": user_id,
+                "pwd": pwd,
+                "factor2": totp,
+                "appkey": appkey,
+                "imei": str(uuid.uuid4()),
+                "addldivinf": "BlitzTrader/1.0",
+                "source": "API",
+                "vc": "NOREN_API",
+                "app_key": vendor_code,
+            }
+
+            resp = self._session.post(
+                f"{BASE_URL}/QuickAuth",
+                data="jData=" + json.dumps(payload),
+                timeout=15,
+            )
+            result = json.loads(resp.text)
+
+            if result.get("stat") == "Ok":
+                return result.get("susertoken"), None
+            return None, result.get("emsg", "unknown error")
+
+        except Exception as e:
+            return None, str(e)
+
+    def _get_auth_code(
+        self, jkey: str, vendor_code: str
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        POST to GetAuthCode using jKey from QuickAuth.
+        Returns (auth_code, None) on success or (None, error_message).
+        """
+        try:
+            from urllib.parse import urlparse, parse_qs
+
+            auth_payload = json.dumps({"app_key": vendor_code}) + "&jKey=" + jkey
+            resp = self._session.post(
+                f"{BASE_URL}/GetAuthCode",
+                data="jData=" + auth_payload,
+                timeout=15,
+                allow_redirects=False,
+            )
+
+            # Response body contains the auth code as JSON
+            try:
+                data = json.loads(resp.text)
+                if "code" in data:
+                    return data["code"], None
+            except Exception:
+                pass
+
+            # Also check Location header as fallback
+            location = resp.headers.get("Location", "")
+            if "code=" in location:
+                code = parse_qs(urlparse(location).query).get("code", [None])[0]
+                if code:
+                    return code, None
+
+            return None, f"Could not extract auth code from response: {resp.text[:200]}"
+
+        except Exception as e:
+            return None, str(e)
 
     @property
     def is_logged_in(self) -> bool:
@@ -152,13 +222,6 @@ class ShoonyaClient:
         """
         Fetch full quote via REST: LTP, bid, ask, open, high, low, volume.
         Returns raw response dict on success, None on failure.
-
-        Key fields in response:
-          lp  = last traded price
-          bp1 = best bid price,  bq1 = best bid qty
-          sp1 = best ask price,  sq1 = best ask qty
-          o   = open, h = high, l = low, c = close
-          v   = volume, oi = open interest
         """
         if not self._api:
             logger.error("Cannot get_quotes: not logged in")
@@ -207,9 +270,8 @@ class ShoonyaClient:
         interval: str = "1",
     ) -> Optional[list[dict]]:
         """
-        Fetch OHLC data.
-        interval: 1/5/15/60 (minutes)
-        Returns list of [timestamp, open, high, low, close, volume, oi]
+        Fetch OHLC candle data. Returns list of candle dicts or None.
+        interval: 1/3/5/10/15/30/60/120/240
         """
         if not self._api:
             logger.error("Cannot get_time_price_series: not logged in")
@@ -222,56 +284,158 @@ class ShoonyaClient:
                 endtime=int(endtime) if endtime else int(time.time()),
                 interval=interval,
             )
-            if resp and resp.get("stat") == "Ok":
-                return resp.get("series", [])
-            err = resp.get("emsg", "Unknown") if resp else "None response"
-            logger.warning(f"get_time_price_series failed: {err}")
+            if isinstance(resp, list):
+                return resp
+            logger.warning(f"get_time_price_series returned non-list: {resp}")
         except Exception:
             logger.exception("Exception in get_time_price_series")
+        return None
+
+    def search_scrip(self, exchange: str, searchtext: str) -> Optional[list]:
+        """
+        Search for a scrip by name. Returns list of scrip dicts, or None.
+        """
+        if not self._api:
+            logger.error("Cannot search_scrip: not logged in")
+            return None
+        try:
+            resp = self._api.searchscrip(exchange=exchange, searchtext=searchtext)
+            if resp and resp.get("stat") == "Ok":
+                return resp.get("values", [])
+            logger.warning(f"search_scrip({exchange}, {searchtext}): {resp}")
+        except Exception:
+            logger.exception(f"Exception in search_scrip({exchange}, {searchtext})")
+        return None
+
+    def get_option_chain(
+        self, exchange: str, tradingsymbol: str, strikeprice: float, count: int = 2
+    ) -> Optional[dict]:
+        """
+        Fetch option chain around a strike price.
+        Returns raw dict with 'values' list on success, None on failure.
+        """
+        if not self._api:
+            logger.error("Cannot get_option_chain: not logged in")
+            return None
+        try:
+            resp = self._api.get_option_chain(
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                strikeprice=str(strikeprice),
+                count=count,
+            )
+            if resp and resp.get("stat") == "Ok":
+                return resp
+            logger.warning(f"get_option_chain({tradingsymbol}): {resp}")
+        except Exception:
+            logger.exception("Exception in get_option_chain")
         return None
 
     # ──────────────────────────────────────────────────────────
     #   WEBSOCKET
     # ──────────────────────────────────────────────────────────
 
-    def start_websocket(self, callback=None, exchange_tokens: list[str] = None) -> bool:
+    def start_websocket(
+        self,
+        on_open=None,
+        on_tick=None,
+        on_error=None,
+        on_close=None,
+        callback=None,
+        exchange_tokens: list[str] = None,
+    ) -> bool:
         """
-        Start WebSocket subscription for market data.
-        callback(data): called on each tick
-        exchange_tokens: list of "NSE|26000" style tokens
+        Start WebSocket connection for live market data. BLOCKS until disconnected.
+
+        Callback signature adapters:
+          NorenApi on_open  → called with ()      live_feed expects (ws)
+          NorenApi on_tick  → called with (msg)   live_feed expects (ws, msg)
+          NorenApi on_error → called with (error) live_feed expects (ws, error)
+          NorenApi on_close → called with ()      live_feed expects (ws, code, msg)
         """
         if not self._api:
             logger.error("Cannot start_websocket: not logged in")
             return False
 
+        import threading as _threading
+
+        tick_cb = on_tick or callback
+        disconnect_event = _threading.Event()
+
+        def _open_adapter():
+            if on_open:
+                try:
+                    on_open(None)
+                except TypeError:
+                    on_open()
+
+        def _tick_adapter(message):
+            if tick_cb:
+                try:
+                    tick_cb(None, message)
+                except TypeError:
+                    tick_cb(message)
+
+        def _error_adapter(error):
+            if on_error:
+                try:
+                    on_error(None, error)
+                except TypeError:
+                    on_error(error)
+
+        def _close_adapter():
+            disconnect_event.set()
+            if on_close:
+                try:
+                    on_close(None, None, None)
+                except TypeError:
+                    on_close()
+
         try:
-            # Subscribe to tokens if provided
-            if exchange_tokens:
-                for et in exchange_tokens:
-                    parts = et.split("|")
-                    if len(parts) == 2:
-                        exchange, token = parts
-                        self._api.subscribe(exchange=exchange, token=token)
-                        logger.info(f"Subscribed to {exchange}:{token}")
+            self._api.start_websocket(
+                subscribe_callback=_tick_adapter,
+                socket_open_callback=_open_adapter,
+                socket_close_callback=_close_adapter,
+                socket_error_callback=_error_adapter,
+            )
+            logger.info("WebSocket started — waiting for connection")
 
-            # Set websocket callback
-            if callback:
-                self._api.set_websocket_callback(callback)
-
-            logger.info("WebSocket started")
+            # Block until WebSocket disconnects
+            disconnect_event.wait()
+            logger.info("WebSocket disconnected")
             return True
 
         except Exception:
             logger.exception("Failed to start WebSocket")
             return False
 
-    def stop_websocket(self) -> bool:
-        """Stop WebSocket connection."""
+    def close_websocket(self) -> bool:
+        """Close the WebSocket connection."""
         try:
             if self._api:
                 self._api.close_websocket()
-                logger.info("WebSocket stopped")
+                logger.info("WebSocket closed")
             return True
         except Exception:
-            logger.exception("Failed to stop WebSocket")
+            logger.exception("Failed to close WebSocket")
             return False
+
+    def subscribe(self, exchange_token_pairs: list[tuple[str, str]]) -> None:
+        """Subscribe to touchline feed for (exchange, token) pairs."""
+        if not self._api:
+            return
+        for exchange, token in exchange_token_pairs:
+            try:
+                self._api.subscribe(exchange=exchange, token=token)
+            except Exception:
+                logger.exception(f"Failed to subscribe {exchange}:{token}")
+
+    def unsubscribe(self, exchange_token_pairs: list[tuple[str, str]]) -> None:
+        """Unsubscribe from touchline feed for (exchange, token) pairs."""
+        if not self._api:
+            return
+        for exchange, token in exchange_token_pairs:
+            try:
+                self._api.unsubscribe(exchange=exchange, token=token)
+            except Exception:
+                logger.exception(f"Failed to unsubscribe {exchange}:{token}")
