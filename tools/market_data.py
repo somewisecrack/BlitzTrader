@@ -61,25 +61,32 @@ class MarketDataTools:
                 token = results[0].get("token", "")
 
             now_ist = datetime.datetime.now(IST)
-            yesterday = now_ist - datetime.timedelta(seconds=86400)
-            yesterday_date = yesterday.date()
 
-            yesterday_9am = IST.localize(
-                datetime.datetime(yesterday_date.year, yesterday_date.month, yesterday_date.day, 9, 15, 0)
-            )
-            yesterday_3pm = IST.localize(
-                datetime.datetime(yesterday_date.year, yesterday_date.month, yesterday_date.day, 15, 30, 0)
-            )
+            # Walk back to find last trading day: skip weekends (Mon=0 … Sun=6)
+            # and retry up to 5 days back to handle market holidays.
+            result = None
+            for days_back in range(1, 6):
+                candidate = (now_ist - datetime.timedelta(days=days_back)).date()
+                if candidate.weekday() >= 5:   # Saturday or Sunday
+                    continue
+                day_9am = IST.localize(
+                    datetime.datetime(candidate.year, candidate.month, candidate.day, 9, 15, 0)
+                )
+                day_3pm = IST.localize(
+                    datetime.datetime(candidate.year, candidate.month, candidate.day, 15, 30, 0)
+                )
+                result = self._client.get_time_price_series(
+                    exchange=exchange,
+                    token=token,
+                    starttime=int(day_9am.timestamp()),
+                    endtime=int(day_3pm.timestamp()),
+                    interval="60",
+                )
+                if result and isinstance(result, list) and len(result) > 0:
+                    break   # found a day with actual data
+                result = None
 
-            result = self._client.get_time_price_series(
-                exchange=exchange,
-                token=token,
-                starttime=int(yesterday_9am.timestamp()),
-                endtime=int(yesterday_3pm.timestamp()),
-                interval="60",
-            )
-
-            if not result or not isinstance(result, list) or len(result) == 0:
+            if not result:
                 return None
 
             highs  = [float(c["inth"]) for c in result if "inth" in c]
@@ -241,11 +248,10 @@ class MarketDataTools:
         step = 50 if index.upper() == "NIFTY" else 100
         atm_strike = round(spot / step) * step
 
-        exchange, _ = self._resolve_token(index)
-
+        # Options trade on NFO, not NSE. tradingsymbol is the index name.
         try:
             resp = self._client.get_option_chain(
-                exchange=exchange,
+                exchange="NFO",
                 tradingsymbol=index.upper(),
                 strikeprice=atm_strike,
                 count=10,
@@ -260,17 +266,22 @@ class MarketDataTools:
         if not values:
             return {"error": "Empty option chain response"}
 
+        expiry_upper = expiry.upper()
         chain = []
         for item in values:
             try:
+                sym = item.get("tsym", "")
+                # Filter by expiry substring if provided (e.g. '27MAR', '03APR')
+                if expiry_upper and expiry_upper not in sym.upper():
+                    continue
                 chain.append({
-                    "symbol": item.get("tsym", ""),
+                    "symbol": sym,
                     "strike": float(item.get("strprc", 0)),
-                    "type": item.get("optt", ""),
-                    "ltp": float(item.get("lp", 0)),
-                    "bid": float(item.get("bp1", 0)),
-                    "ask": float(item.get("sp1", 0)),
-                    "oi": int(item.get("oi", 0)),
+                    "type":   item.get("optt", ""),
+                    "ltp":    float(item.get("lp", 0)),
+                    "bid":    float(item.get("bp1", 0)),
+                    "ask":    float(item.get("sp1", 0)),
+                    "oi":     int(item.get("oi", 0)),
                     "volume": int(item.get("v", 0)),
                 })
             except (ValueError, TypeError):
@@ -393,14 +404,27 @@ class MarketDataTools:
         if not raw_candles:
             return {"error": f"No candle data for {symbol}"}
 
+        import datetime as _dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+
         candles = []
         for c in raw_candles[:count]:
+            # Shoonya REST time is a string like "09:15:00 07-04-2026".
+            # Normalise to epoch float so first-hour filters work with live candles.
+            raw_time = c.get("time", c.get("ssboe", ""))
+            try:
+                ts = _IST.localize(
+                    _dt.datetime.strptime(raw_time, "%H:%M:%S %d-%m-%Y")
+                ).timestamp()
+            except Exception:
+                ts = float(raw_time) if str(raw_time).isdigit() else 0.0
             candles.append({
-                "time": c.get("time", c.get("ssboe", "")),
-                "open": float(c.get("into", 0)),
-                "high": float(c.get("inth", 0)),
-                "low": float(c.get("intl", 0)),
-                "close": float(c.get("intc", 0)),
+                "time":   ts,
+                "open":   float(c.get("into", 0)),
+                "high":   float(c.get("inth", 0)),
+                "low":    float(c.get("intl", 0)),
+                "close":  float(c.get("intc", 0)),
                 "volume": int(c.get("intv", 0)),
             })
 

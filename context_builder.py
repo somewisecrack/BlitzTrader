@@ -210,6 +210,26 @@ Open positions: {pos_summary}
 Trades today: {trade_count}
 Virtual balance available: ₹{available:,.2f}{pending_summary}{goals_section}{command_context}
 
+MANDATORY ANALYSIS SEQUENCE — follow this every iteration:
+1. Call get_indicators() for BOTH symbols on MULTIPLE timeframes — ALWAYS start here:
+   - get_indicators("NIFTY", "2") and get_indicators("BANKNIFTY", "2")   ← primary (most strategies)
+   - get_indicators("NIFTY", "5") and get_indicators("BANKNIFTY", "5")   ← confirmation
+   - get_indicators("NIFTY", "15") when checking higher-timeframe bias
+   This gives you EMA20/50/100, RSI14, ATR14, ADX14, VWAP, Pivot/CPR levels per timeframe.
+   You CANNOT evaluate any strategy without indicators. Do not skip this step.
+2. Use get_candles(symbol, interval, count) for pattern recognition (candle shapes, wick sizes, consecutive bars).
+   Match the interval to the strategy's best timeframe (e.g. 2m for VP-05, VP-07, VP-08, VP-20, VP-24).
+3. Cross-reference indicators with strategy rules:
+   - VP-05: requires ema_stacked_bull or ema_stacked_bear + pin bar at EMA20 or EMA50
+   - VP-07/08/09/16/17: check avg_volume_20 for volume confirmation (VSA patterns)
+   - VP-20: check cpr_tc, cpr_bc, cpr_width — only trade on narrow CPR days
+   - VP-24: check proximity to pivot, r1, r2, s1, s2 (within 0.1%)
+   - Momentum Pinball: use lbr_rsi < 30 (long setup) or lbr_rsi > 70 (short setup) — NOT rsi14.
+     lbr_rsi is the 3-period RSI of 1-period ROC as required by the strategy.
+     Entry is a buy-stop above first_hour_high (long) or sell-stop below first_hour_low (short).
+   - ALL strategies: use atr14 for stop-loss sizing, adx14 > 20 confirms trend strength
+4. Only place orders if ALL conditions in the strategy doc are met — not just some.
+
 IMPORTANT: Be silent in this iteration unless you have an ACTION:
 - Send Telegram ONLY if you are entering or exiting a position
 - Do NOT send "thinking" or "observing" messages during market scans

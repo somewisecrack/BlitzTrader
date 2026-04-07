@@ -172,6 +172,7 @@ class OrderExecutionTools:
             entry_price=entry_price,
             quantity=quantity,
             max_risk_amount=self._max_risk_amount,
+            stop_loss=stop_loss,   # risk = |entry - SL| * qty when SL is provided
         )
         if not is_valid:
             return {"error": f"BLOCKED: {reason}", "status": "REJECTED"}
