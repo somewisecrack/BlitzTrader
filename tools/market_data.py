@@ -248,11 +248,28 @@ class MarketDataTools:
         step = 50 if index.upper() == "NIFTY" else 100
         atm_strike = round(spot / step) * step
 
-        # Options trade on NFO, not NSE. tradingsymbol is the index name.
+        # Resolve an actual NFO trading symbol so GetOptionChain gets a
+        # confirmed-valid tsym (bare index name may not be accepted by Shoonya).
+        # Strategy: search NFO for "<INDEX><EXPIRY>" to find a futures/options
+        # contract, then use its tsym.  Fall back to bare index name if search
+        # yields nothing (e.g. market closed / expiry not yet listed).
+        nfo_tsym = index.upper()   # conservative default
+        search_term = index.upper() + expiry.upper()   # e.g. "NIFTY27APR"
+        try:
+            hits = self._client.search_scrip("NFO", search_term) or []
+            # Prefer a FUT contract as the anchor tsym for option-chain lookup
+            fut_hits = [h for h in hits if "FUT" in h.get("tsym", "").upper()]
+            if fut_hits:
+                nfo_tsym = fut_hits[0]["tsym"]
+            elif hits:
+                nfo_tsym = hits[0]["tsym"]
+        except Exception:
+            pass   # fall through with bare index name
+
         try:
             resp = self._client.get_option_chain(
                 exchange="NFO",
-                tradingsymbol=index.upper(),
+                tradingsymbol=nfo_tsym,
                 strikeprice=atm_strike,
                 count=10,
             )
