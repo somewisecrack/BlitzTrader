@@ -117,6 +117,8 @@ class OrderExecutionTools:
         quantity: int,
         order_type: str = "MARKET",
         price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        target: Optional[float] = None,
     ) -> dict:
         """
         Place a virtual order (MARKET or LIMIT).
@@ -126,6 +128,8 @@ class OrderExecutionTools:
         :param quantity:    Number of units
         :param order_type: 'MARKET' or 'LIMIT'
         :param price:      Required for LIMIT orders, ignored for MARKET
+        :param stop_loss:  Optional stop-loss price for auto-close
+        :param target:     Optional target price for auto-close
         :returns: Order confirmation or error
         """
         direction = direction.upper()
@@ -181,6 +185,8 @@ class OrderExecutionTools:
                 best_bid=best_bid,
                 best_ask=best_ask,
             )
+            fill["stop_loss"] = stop_loss
+            fill["target"] = target
             return self._process_fill(fill)
 
         else:
@@ -198,6 +204,8 @@ class OrderExecutionTools:
                 "status": "PENDING",
                 "best_bid_at_placement": best_bid,
                 "best_ask_at_placement": best_ask,
+                "stop_loss": stop_loss,
+                "target": target,
             }
             self._state.add_pending_order(pending)
             logger.info(
@@ -212,6 +220,8 @@ class OrderExecutionTools:
                 "quantity": quantity,
                 "order_type": "LIMIT",
                 "limit_price": price,
+                "stop_loss": stop_loss,
+                "target": target,
                 "status": "PENDING",
                 "message": (
                     f"Limit order placed. Will fill if LTP reaches ₹{price:.2f} "
@@ -366,6 +376,8 @@ class OrderExecutionTools:
                 "current_price": current_price or pos["entry_price"],
                 "unrealized_pnl": unrealized,
                 "entry_time": pos.get("entry_time"),
+                "stop_loss": pos.get("stop_loss"),
+                "target": pos.get("target"),
             })
 
         return {"positions": enriched, "count": len(enriched)}
@@ -429,12 +441,57 @@ class OrderExecutionTools:
                     quantity=order["quantity"],
                     limit_price=order["limit_price"],
                 )
+                fill["stop_loss"] = order.get("stop_loss")
+                fill["target"] = order.get("target")
                 self._state.remove_pending_order(order["order_id"])
                 self._process_fill(fill)
                 logger.info(
                     f"LIMIT ORDER FILLED: {order['order_id']} "
                     f"{order['direction']} {order['symbol']} @ ₹{order['limit_price']:.2f}"
                 )
+
+    def check_sl_target(self) -> list:
+        """
+        Check all open positions for stop-loss or target breach.
+        Closes positions deterministically when thresholds are hit.
+
+        :returns: List of auto-closed position dicts (symbol, reason, pnl)
+        """
+        positions = self._state.get_open_positions()
+        auto_closed = []
+
+        for pos in list(positions):
+            sl = pos.get("stop_loss")
+            tgt = pos.get("target")
+
+            if sl is None and tgt is None:
+                continue
+
+            current_price = self._get_current_price(pos["symbol"])
+            if current_price is None:
+                continue
+
+            direction = pos["direction"]
+            reason = None
+
+            if direction == "BUY":
+                if sl is not None and current_price <= sl:
+                    reason = f"Stop-loss hit: price {current_price:.2f} <= SL {sl:.2f}"
+                elif tgt is not None and current_price >= tgt:
+                    reason = f"Target hit: price {current_price:.2f} >= target {tgt:.2f}"
+            elif direction == "SELL":
+                if sl is not None and current_price >= sl:
+                    reason = f"Stop-loss hit: price {current_price:.2f} >= SL {sl:.2f}"
+                elif tgt is not None and current_price <= tgt:
+                    reason = f"Target hit: price {current_price:.2f} <= target {tgt:.2f}"
+
+            if reason:
+                logger.info(f"AUTO-CLOSE {pos['symbol']}: {reason}")
+                result = self.close_position(pos["symbol"])
+                result["auto_close_reason"] = reason
+                auto_closed.append(result)
+
+        return auto_closed
 
     # ──────────────────────────────────────────────────────────
     #   INTERNAL HELPERS
@@ -503,6 +560,8 @@ class OrderExecutionTools:
             "margin_used": fill["margin_used"],
             "entry_time": fill["fill_time"],
             "order_id": fill["order_id"],
+            "stop_loss": fill.get("stop_loss"),
+            "target": fill.get("target"),
         }
         self._state.add_position(position)
 

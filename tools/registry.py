@@ -41,6 +41,7 @@ class ToolRegistry:
             "get_option_chain": self._market_data.get_option_chain,
             "get_quote": self._market_data.get_quote,
             "get_candles": self._market_data.get_candles,
+            "get_indicators": self._market_data.get_indicators,
             "get_vix": self._market_data.get_vix,
             "get_market_depth": self._market_data.get_market_depth,
             # Position & Account
@@ -183,13 +184,40 @@ class ToolRegistry:
                         "interval": {
                             "type": "string",
                             "description": "Candle interval in minutes",
-                            "enum": ["1", "5", "15", "30", "60"],
+                            "enum": ["1", "2", "3", "5", "15", "30", "60"],
                             "default": "5",
                         },
                         "count": {
                             "type": "integer",
                             "description": "Number of candles to return",
                             "default": 20,
+                        },
+                    },
+                    "required": ["symbol"],
+                },
+            },
+            {
+                "name": "get_indicators",
+                "description": (
+                    "Get all technical indicators for a symbol computed from live candles. "
+                    "ALWAYS call this before evaluating any strategy. Returns: "
+                    "EMA20/50/100 (trend, stacking), RSI14 (momentum), ATR14 (SL sizing), "
+                    "ADX14 (trend strength), VWAP (intraday bias), avg_volume_20 (VSA), "
+                    "Pivot/R1/R2/S1/S2 (VP-24 pivot bounce), CPR TC/BC/width (VP-20 CPR reversal), "
+                    "ema_stacked_bull/bear flags (VP-05 3-EMA trend filter)."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "Trading symbol e.g. 'NIFTY' or 'BANKNIFTY'",
+                        },
+                        "interval": {
+                            "type": "string",
+                            "description": "Candle interval in minutes to compute indicators on",
+                            "enum": ["1", "2", "3", "5", "15", "30", "60"],
+                            "default": "5",
                         },
                     },
                     "required": ["symbol"],
@@ -291,8 +319,22 @@ class ToolRegistry:
                             "type": "number",
                             "description": "Limit price (required for LIMIT, ignored for MARKET)",
                         },
+                        "stop_loss": {
+                            "type": "number",
+                            "description": (
+                                "Stop-loss price. Enforced deterministically on every tick — "
+                                "position auto-closes if LTP crosses this level. ALWAYS set this."
+                            ),
+                        },
+                        "target": {
+                            "type": "number",
+                            "description": (
+                                "Profit target price. Enforced deterministically on every tick — "
+                                "position auto-closes if LTP reaches this level."
+                            ),
+                        },
                     },
-                    "required": ["symbol", "direction", "quantity"],
+                    "required": ["symbol", "direction", "quantity", "stop_loss"],
                 },
             },
             {

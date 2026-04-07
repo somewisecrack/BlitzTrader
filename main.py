@@ -224,6 +224,13 @@ class BlitzTrader:
 
         def on_tick(token, quote):
             self._order_exec.check_pending_limit_orders(token)
+            # Deterministic SL/target enforcement — fires on every tick
+            auto_closed = self._order_exec.check_sl_target()
+            for ac in auto_closed:
+                logger.info(
+                    f"AUTO-CLOSE [{ac['auto_close_reason']}]: "
+                    f"{ac['symbol']} P&L ₹{ac.get('pnl', 0):+,.2f}"
+                )
 
         self._feed._on_tick_callback = on_tick
 

@@ -49,6 +49,15 @@ class LiveFeedManager:
         self._cache: dict[str, dict] = {}
         self._lock = threading.Lock()
 
+        # Live candle aggregator: {(token, interval_mins): deque of completed candles}
+        # Each candle: {time, open, high, low, close, volume}
+        # Current (in-progress) candle: {(token, interval_mins): dict}
+        from collections import deque
+        self._candles: dict[tuple, deque] = {}
+        self._current_candle: dict[tuple, dict] = {}
+        self._vol_at_start: dict[tuple, int] = {}
+        self._MAX_CANDLES = 100  # keep last 100 candles per token+interval
+
         # WebSocket thread
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -188,6 +197,70 @@ class LiveFeedManager:
         with self._lock:
             return dict(self._cache)
 
+    def get_candles(self, token: str, interval_mins: int, count: int = 20) -> Optional[list[dict]]:
+        """
+        Get last N completed OHLCV candles built from live ticks.
+
+        :param token: Shoonya token (e.g. "26000" for NIFTY)
+        :param interval_mins: Candle size in minutes (1, 5, 15, 60, etc.)
+        :param count: Number of completed candles to return
+        :returns: List of candle dicts [{time, open, high, low, close, volume}], newest last.
+                  Returns None if not enough data yet.
+        """
+        key = (token, interval_mins)
+        with self._lock:
+            candles = self._candles.get(key)
+            if not candles:
+                return None
+            result = list(candles)[-count:]
+            return result if result else None
+
+    def _update_candles(self, token: str, ltp: float, volume: int, ts: float) -> None:
+        """
+        Update live candle aggregator with a new tick.
+        Called inside _on_tick while lock is held.
+        Builds 1m, 5m, 15m, and 60m candles simultaneously.
+        """
+        from collections import deque
+        import math
+
+        for interval_mins in (1, 2, 3, 5, 15, 30, 60):
+            key = (token, interval_mins)
+            # Candle boundary: floor tick timestamp to interval
+            candle_ts = math.floor(ts / (interval_mins * 60)) * (interval_mins * 60)
+
+            current = self._current_candle.get(key)
+
+            if current is None or current["time"] != candle_ts:
+                # Candle boundary crossed — finalise old candle
+                if current is not None:
+                    if key not in self._candles:
+                        self._candles[key] = deque(maxlen=self._MAX_CANDLES)
+                    # Remove internal vol_start before saving completed candle
+                    saved = {k: v for k, v in current.items() if k != "vol_start"}
+                    self._candles[key].append(saved)
+                # Record cumulative volume at the start of the new candle
+                vol_start = volume
+                self._vol_at_start[key] = vol_start
+                # Start new candle
+                self._current_candle[key] = {
+                    "time": candle_ts,
+                    "open": ltp,
+                    "high": ltp,
+                    "low": ltp,
+                    "close": ltp,
+                    "volume": 0,
+                    "vol_start": vol_start,
+                }
+            else:
+                # Update current candle
+                current["high"] = max(current["high"], ltp)
+                current["low"] = min(current["low"], ltp)
+                current["close"] = ltp
+                # Per-bar volume = current cumulative - baseline at candle start
+                vol_start = current.get("vol_start", self._vol_at_start.get(key, volume))
+                current["volume"] = max(0, volume - vol_start)
+
     # ──────────────────────────────────────────────────────────
     #   WEBSOCKET LOOP (runs in thread)
     # ──────────────────────────────────────────────────────────
@@ -305,6 +378,12 @@ class LiveFeedManager:
                 existing["token"] = token
 
                 self._cache[token] = existing
+
+                # Build live candles from this tick
+                ltp = existing.get("ltp")
+                vol = existing.get("volume", 0)
+                if ltp:
+                    self._update_candles(token, ltp, vol, now)
 
             # External callback
             if self._on_tick_callback:
