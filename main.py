@@ -418,7 +418,11 @@ class BlitzTrader:
             market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
             if now < market_open_time:
                 wait_secs = (market_open_time - now).total_seconds()
-                logger.info(f"Waiting {wait_secs:.0f}s for market open...")
+                # Log at most once per minute to avoid spam
+                if (not hasattr(self, '_last_wait_log')
+                        or (now - self._last_wait_log).total_seconds() >= 60):
+                    logger.info(f"Waiting {wait_secs:.0f}s for market open...")
+                    self._last_wait_log = now
                 time.sleep(min(wait_secs, TELEGRAM_POLL_INTERVAL_SECONDS))
                 continue
 
@@ -469,6 +473,9 @@ class BlitzTrader:
                     f"({now.strftime('%H:%M:%S')} IST) "
                     f"pending_signals={len(pending_signals)} ---"
                 )
+                # Update timer BEFORE running — prevents re-entry if iteration is slow.
+                # Signals are preserved even if Gemini fails (cleared only on success below).
+                last_scheduled_at = now
 
                 try:
                     context = build_iteration_context(

@@ -217,6 +217,16 @@ class AgentLoop:
             except Exception as e:
                 err_str = str(e).lower()
                 if "429" in str(e) or "resource" in err_str or "quota" in err_str:
+                    # Daily quota exhausted — retrying in 5/10s will never help.
+                    # Bail out immediately so the main loop can continue (with its
+                    # 5-minute interval) rather than blocking for 30+ seconds.
+                    if "perday" in err_str or "per_day" in err_str or "GenerateRequestsPerDay" in str(e):
+                        logger.error(
+                            f"Gemini DAILY quota exhausted — no retries until midnight UTC. "
+                            f"Check billing at https://console.cloud.google.com/billing. "
+                            f"Consider switching GEMINI_MODEL to gemini-2.0-flash (1500 RPD free tier)."
+                        )
+                        return None
                     if attempt < max_retries - 1:
                         logger.warning(
                             f"Rate limit (attempt {attempt + 1}/{max_retries}). "
