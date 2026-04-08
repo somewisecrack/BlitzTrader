@@ -81,7 +81,7 @@ TELEGRAM_AUTHORIZED_USER_ID = _optional_env("TELEGRAM_AUTHORIZED_USER_ID")
 # ──────────────────────────────────────────────────────────────
 
 GEMINI_API_KEY = _optional_env("GEMINI_API_KEY")
-GEMINI_MODEL = _optional_env("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = _optional_env("GEMINI_MODEL", "gemini-2.0-flash")
 
 # ──────────────────────────────────────────────────────────────
 #   DATA EXPORT / GOOGLE DRIVE
