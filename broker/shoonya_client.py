@@ -87,6 +87,8 @@ class ShoonyaClient:
             if not jkey:
                 return False, f"QuickAuth failed: {err}"
             logger.info("QuickAuth success — got jKey")
+            # Save jKey for WebSocket auth (server requires old-style t:c format)
+            self._jkey = jkey
 
             # ── Step 2: GetAuthCode ──
             logger.info("Step 2: GetAuthCode...")
@@ -110,6 +112,7 @@ class ShoonyaClient:
             access_token, userid, refresh_token, actid = result
             logger.info(f"OAuth login SUCCESS for user: {userid}, actid: {actid}")
             self._logged_in = True
+            self._user_id = user_id
             return True, "Login successful"
 
         except Exception as e:
@@ -392,16 +395,65 @@ class ShoonyaClient:
                     on_close()
 
         try:
-            self._api.start_websocket(
-                subscribe_callback=_tick_adapter,
-                socket_open_callback=_open_adapter,
-                socket_close_callback=_close_adapter,
-                socket_error_callback=_error_adapter,
-            )
-            logger.info("WebSocket started — waiting for connection")
+            import websocket as _ws_lib
+            import json as _json
 
-            # Block until WebSocket disconnects
-            disconnect_event.wait()
+            uid = getattr(self, '_user_id', None) or (
+                self._api._NorenApi__username if self._api else ""
+            )
+            jkey = getattr(self, '_jkey', None) or getattr(
+                self._api, '_NorenApi__susertoken', None
+            )
+
+            raw_ws: list = [None]  # container so inner functions can reference it
+
+            def _raw_on_open(ws):
+                raw_ws[0] = ws
+                # Old-style Shoonya auth (t:c + susertoken/jKey).
+                # The newer t:a (OAuth accesstoken) format gets no server response.
+                auth = _json.dumps({
+                    "t": "c",
+                    "uid": uid,
+                    "actid": uid,
+                    "susertoken": jkey,
+                    "source": "API",
+                })
+                ws.send(auth)
+                logger.info("WebSocket TCP open — sent auth message")
+
+            def _raw_on_message(ws, message):
+                try:
+                    msg = _json.loads(message)
+                except Exception:
+                    msg = {}
+                # Connection acknowledgement
+                if msg.get("t") == "ck":
+                    if msg.get("s") == "OK":
+                        logger.info("WebSocket auth OK — connection established")
+                        _open_adapter()
+                    else:
+                        logger.error(f"WebSocket auth rejected: {msg}")
+                    return
+                # Market data tick
+                _tick_adapter(msg)
+
+            def _raw_on_error(ws, error):
+                _error_adapter(error)
+
+            def _raw_on_close(ws, code, msg):
+                _close_adapter()
+
+            ws_app = _ws_lib.WebSocketApp(
+                WS_URL,
+                on_open=_raw_on_open,
+                on_message=_raw_on_message,
+                on_error=_raw_on_error,
+                on_close=_raw_on_close,
+            )
+            self._ws_app = ws_app
+
+            logger.info("WebSocket started — waiting for connection")
+            ws_app.run_forever(ping_interval=30, ping_payload='{"t":"h"}')
             logger.info("WebSocket disconnected")
             return True
 
@@ -412,8 +464,9 @@ class ShoonyaClient:
     def close_websocket(self) -> bool:
         """Close the WebSocket connection."""
         try:
-            if self._api:
-                self._api.close_websocket()
+            ws_app = getattr(self, '_ws_app', None)
+            if ws_app:
+                ws_app.close()
                 logger.info("WebSocket closed")
             return True
         except Exception:
