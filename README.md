@@ -1,6 +1,6 @@
 # BlitzTrader
 
-An autonomous AI trading agent for NSE intraday options (NIFTY / BANKNIFTY), powered by Claude Haiku and deployed on Google Cloud Platform.
+An autonomous AI trading agent for NSE intraday options (NIFTY / BANKNIFTY), powered by Gemini 2.5 Flash and deployed on Google Cloud Platform.
 
 ## What it does
 
@@ -19,7 +19,7 @@ systemd timer (9:00 AM IST, Mon–Fri)
     main.py
     ├── Startup phase      — load memory, strategy docs, set session goals
     ├── Trading loop       — 15-min scheduled iterations + 3s Telegram poll
-    │     ├── AgentLoop    — Claude Haiku ReAct (Reason → Tool → Observe)
+    │     ├── AgentLoop    — Gemini 2.5 Flash ReAct (Reason → Tool → Observe)
     │     ├── ToolRegistry — market data, order execution, journaling, Telegram
     │     └── LiveFeed     — WebSocket price stream from Shoonya
     └── EOD phase          — close positions, write journal, update memory
@@ -29,7 +29,7 @@ systemd timer (9:00 AM IST, Mon–Fri)
 
 | Feature | Detail |
 |---|---|
-| Model | `claude-haiku-4-5-20251001` |
+| Model | `gemini-2.5-flash` |
 | Broker | Shoonya (Finvasia) via `NorenRestApiPy` |
 | Exchange | NSE — NIFTY & BANKNIFTY options |
 | Capital | ₹3,00,000 virtual tracked |
@@ -59,7 +59,7 @@ All intraday, NSE-specific:
 - GCP VM (e2-medium, `asia-south1` recommended)
 - Shoonya trading account with API access
 - Telegram bot token (via @BotFather)
-- Anthropic API key
+- Gemini API key
 
 ### Install
 
@@ -105,7 +105,7 @@ SHOONYA_TOTP_SECRET
 SHOONYA_VENDOR_CODE
 TELEGRAM_BOT_TOKEN
 TELEGRAM_AUTHORIZED_USER_ID
-ANTHROPIC_API_KEY
+GEMINI_API_KEY
 ```
 
 ## Telegram commands
@@ -116,11 +116,11 @@ ANTHROPIC_API_KEY
 | `/pause` | Pause new entries (exits still active) |
 | `/resume` | Resume trading |
 | `/abort` | Emergency stop — close all positions immediately |
-| _(any message)_ | Claude responds conversationally |
+| _(any message)_ | Gemini responds conversationally |
 
 ## Cost
 
-Approximately **$15–20 / month** on Claude Haiku 4.5 with 15-minute iteration intervals and per-iteration context reset.
+Approximately **$15–20 / month** on Gemini 2.5 Flash with 15-minute iteration intervals and per-iteration context reset.
 
 ## Disclaimer
 

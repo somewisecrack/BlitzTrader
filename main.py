@@ -27,9 +27,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
+    DATA_EXPORTS_DIR,
+    GOOGLE_DRIVE_UPLOAD_DIR,
     JOURNALS_DIR,
     LOGS_DIR,
     LOOP_INTERVAL_SECONDS,
+    SCAN_INTERVAL_SECONDS,
     MASTER_STRATEGY_FILE,
     MAX_DAILY_LOSS_AMOUNT,
     MAX_POSITIONS,
@@ -37,6 +40,8 @@ from config import (
     MEMORY_FILE,
     NO_NEW_ENTRY_AFTER,
     NSE_TOKENS,
+    RCLONE_FOLDER,
+    RCLONE_REMOTE,
     SHOONYA_API_KEY,
     SHOONYA_AUTH_CODE,
     SHOONYA_IMEI,
@@ -58,6 +63,7 @@ from broker.live_feed import LiveFeedManager
 from tools.state_manager import StateManager
 from tools.virtual_ledger import VirtualLedger
 from tools.market_data import MarketDataTools
+from tools.data_recorder import DataRecorder
 from tools.order_execution import OrderExecutionTools
 from tools.telegram_handler import TelegramHandler
 from tools.journal_writer import JournalWriter
@@ -92,8 +98,10 @@ class BlitzTrader:
         self._agent = None
         self._state = None
         self._order_exec = None
+        self._market_data = None
         self._journal = None
         self._goals = None
+        self._data_recorder = None
 
     def run(self):
         """Run the full trading session."""
@@ -184,12 +192,39 @@ class BlitzTrader:
         logger.info("✓ Shoonya login successful")
         self._telegram.send_telegram("✅ Shoonya login successful! Initializing agent...")
 
-        # 2. Live feed (WebSocket) with health alerts
+        # 2. Data recorder and live feed (WebSocket) with health alerts
+        self._data_recorder = DataRecorder(
+            base_dir=DATA_EXPORTS_DIR,
+            nse_tokens=NSE_TOKENS,
+            google_drive_upload_dir=GOOGLE_DRIVE_UPLOAD_DIR,
+            rclone_remote=RCLONE_REMOTE,
+            rclone_folder=RCLONE_FOLDER,
+        )
+        logger.info(f"✓ Data recorder initialized at {self._data_recorder.day_dir}")
+
         def on_feed_health_alert(msg: str):
             logger.warning(msg)
             self._telegram.send_telegram(msg)
 
-        self._feed = LiveFeedManager(self._shoonya, on_health_alert=on_feed_health_alert)
+        def on_tick(token, quote):
+            if self._data_recorder:
+                self._data_recorder.record_feed_tick(token, quote)
+            if not self._order_exec:
+                return
+            self._order_exec.check_pending_limit_orders(token)
+            # Deterministic SL/target enforcement — fires on every tick
+            auto_closed = self._order_exec.check_sl_target()
+            for ac in auto_closed:
+                logger.info(
+                    f"AUTO-CLOSE [{ac['auto_close_reason']}]: "
+                    f"{ac['symbol']} P&L ₹{ac.get('pnl', 0):+,.2f}"
+                )
+
+        self._feed = LiveFeedManager(
+            self._shoonya,
+            on_tick_callback=on_tick,
+            on_health_alert=on_feed_health_alert,
+        )
         self._feed.start()
 
         index_tokens = [
@@ -208,7 +243,13 @@ class BlitzTrader:
         ledger = VirtualLedger()
 
         # 5. Market data tools
-        market_data = MarketDataTools(self._shoonya, self._feed, NSE_TOKENS)
+        market_data = MarketDataTools(
+            self._shoonya,
+            self._feed,
+            NSE_TOKENS,
+            data_recorder=self._data_recorder,
+        )
+        self._market_data = market_data
 
         # 6. Order execution tools
         self._order_exec = OrderExecutionTools(
@@ -221,18 +262,6 @@ class BlitzTrader:
             max_daily_loss=MAX_DAILY_LOSS_AMOUNT,
             no_entry_after=NO_NEW_ENTRY_AFTER,
         )
-
-        def on_tick(token, quote):
-            self._order_exec.check_pending_limit_orders(token)
-            # Deterministic SL/target enforcement — fires on every tick
-            auto_closed = self._order_exec.check_sl_target()
-            for ac in auto_closed:
-                logger.info(
-                    f"AUTO-CLOSE [{ac['auto_close_reason']}]: "
-                    f"{ac['symbol']} P&L ₹{ac.get('pnl', 0):+,.2f}"
-                )
-
-        self._feed._on_tick_callback = on_tick
 
         # 7. Journal (with state_manager for ground-truth injection)
         journal = JournalWriter(JOURNALS_DIR, VIRTUAL_CAPITAL, state_manager=self._state)
@@ -302,16 +331,20 @@ class BlitzTrader:
         """
         Event-driven agentic loop.
 
-        Two types of iterations:
-          - Scheduled: full market analysis every 60 seconds
-          - Chat: immediate response to Telegram messages (within 3 seconds)
+        Three types of activity:
+          - Background scanner: pure-Python get_strategy_signals() every 60 s — no LLM cost.
+          - Signal-triggered LLM: fires immediately when the scanner finds a new signal.
+          - Scheduled LLM: full market context check every 5 minutes regardless of signals.
+          - Chat: immediate LLM response to Telegram messages (within 3 seconds).
 
         Runs until market close or abort.
         """
         logger.info("=== TRADING LOOP STARTED ===")
         iteration = 0
         consecutive_errors = 0
-        last_scheduled_at = None  # time of last full 60-second iteration
+        last_scheduled_at = None   # time of last LLM iteration (scheduled or signal-triggered)
+        last_scan_at = None        # time of last background Python scanner run
+        pending_signals: list = [] # signals queued for next LLM iteration
         last_feed_health_alert = None  # avoid spam
         feed_disconnect_start = None  # track how long feed is disconnected
 
@@ -324,6 +357,9 @@ class BlitzTrader:
                 logger.info("=== EOD SEQUENCE ===")
                 eod_context = build_eod_context()
                 self._agent.run_iteration(eod_context)
+                if self._feed:
+                    self._feed.stop()
+                self._upload_data_export()
                 self._running = False
                 return
 
@@ -395,13 +431,44 @@ class BlitzTrader:
                 logger.info("Market open — Telegram notified")
                 self._market_open_notified = True
 
-            # ── Scheduled iteration: full market analysis every 60 seconds ──
+            # ── Background scanner: pure-Python, no LLM, every 60 seconds ──
             elif (
+                last_scan_at is None
+                or (now - last_scan_at).total_seconds() >= SCAN_INTERVAL_SECONDS
+            ):
+                last_scan_at = now
+                try:
+                    scan_result = self._market_data.get_strategy_signals()
+                    new_sigs = scan_result.get("signals", [])
+                    if new_sigs:
+                        pending_signals.extend(new_sigs)
+                        logger.info(
+                            f"Scanner: {len(new_sigs)} new signal(s) → "
+                            f"{[s['strategy'] + ' ' + s['direction'] for s in new_sigs]}"
+                        )
+                    if scan_result.get("notes"):
+                        logger.debug(f"Scanner notes: {scan_result['notes']}")
+                except Exception:
+                    logger.exception("Background scanner error (non-fatal)")
+
+            # ── LLM iteration: signal-triggered OR every 5 minutes ──
+            due_for_scheduled_llm = (
                 last_scheduled_at is None
                 or (now - last_scheduled_at).total_seconds() >= LOOP_INTERVAL_SECONDS
-            ):
+            )
+            due_for_signal_llm = bool(pending_signals) and (
+                # Don't fire signal-triggered LLM in the same 3-second tick as the
+                # scanner; scheduled baseline analysis should not be blocked by this.
+                last_scan_at is None or (now - last_scan_at).total_seconds() >= 1
+            )
+            if due_for_signal_llm or due_for_scheduled_llm:
                 iteration += 1
-                logger.info(f"--- Iteration {iteration} ({now.strftime('%H:%M:%S')} IST) ---")
+                trigger = "signals" if pending_signals else "scheduled"
+                logger.info(
+                    f"--- Iteration {iteration} [{trigger}] "
+                    f"({now.strftime('%H:%M:%S')} IST) "
+                    f"pending_signals={len(pending_signals)} ---"
+                )
 
                 try:
                     context = build_iteration_context(
@@ -409,15 +476,20 @@ class BlitzTrader:
                         telegram_handler=self._telegram,
                         order_execution=self._order_exec,
                         goal_manager=self._goals,
+                        pending_signals=pending_signals if pending_signals else None,
                     )
+                    # Clear only after context is built and iteration succeeds.
+                    # Captured here so that on failure the signals remain in
+                    # pending_signals and will be included in the next iteration.
+                    signals_this_iter = list(pending_signals)
                     response = self._agent.run_iteration(context)
+                    pending_signals.clear()  # success — safe to discard
                     logger.info(f"Iteration {iteration} response: {(response or '')[:200]}...")
 
                     if iteration % 10 == 0:
                         usage = self._agent.get_token_usage()
                         logger.info(f"Token usage: {usage}")
 
-                    last_scheduled_at = now
                     consecutive_errors = 0
                     self._agent.reset()
 
@@ -425,6 +497,7 @@ class BlitzTrader:
                     consecutive_errors += 1
                     err_msg = str(e)
                     logger.exception(f"Error in iteration {iteration}")
+                    # pending_signals was NOT cleared — signals survive for retry
 
                     self._telegram.send_telegram(
                         f"⚠️ SYSTEM ERROR (Attempt {consecutive_errors}/3):\n{err_msg[:200]}"
@@ -482,12 +555,6 @@ class BlitzTrader:
         except Exception:
             logger.exception("Error closing positions during shutdown")
 
-        # Stop components
-        if self._feed:
-            self._feed.stop()
-        if self._telegram:
-            self._telegram.stop()
-
         # Log final state and update journal summary
         if self._state:
             pnl, pnl_pct = self._state.get_daily_pnl()
@@ -509,7 +576,44 @@ class BlitzTrader:
             usage = self._agent.get_token_usage()
             logger.info(f"Total token usage: {usage}")
 
+        # Stop feed before exporting so CSV files are no longer being appended.
+        if self._feed:
+            self._feed.stop()
+
+        self._upload_data_export()
+
+        # Stop notification channel last so export status can be sent.
+        if self._telegram:
+            self._telegram.stop()
+
         logger.info("BlitzTrader session ended")
+
+    def _upload_data_export(self):
+        """Upload today's feed/indicator CSV exports once."""
+        if not self._data_recorder:
+            return
+        now = datetime.now(IST)
+        eod_time = now.replace(hour=15, minute=15, second=0, microsecond=0)
+        if now < eod_time:
+            logger.info("Skipping data export upload before 15:15 IST")
+            return
+        try:
+            result = self._data_recorder.finalize_and_upload()
+            logger.info(f"Data export result: {result}")
+            if self._telegram and result.get("status") == "uploaded":
+                self._telegram.send_telegram(
+                    f"📊 Data CSV export uploaded to Google Drive.\n"
+                    f"Destination: {result.get('destination')}"
+                )
+            elif self._telegram and result.get("status") == "no_destination_configured":
+                self._telegram.send_telegram(
+                    "⚠️ Data CSV export saved locally but not uploaded. "
+                    "Set GOOGLE_DRIVE_UPLOAD_DIR or RCLONE_REMOTE."
+                )
+        except Exception as e:
+            logger.exception("Failed to upload data export")
+            if self._telegram:
+                self._telegram.send_telegram(f"⚠️ Failed to upload data CSV export: {str(e)[:200]}")
 
     def _signal_handler(self, signum, frame):
         """Handle SIGINT/SIGTERM gracefully."""

@@ -14,7 +14,7 @@ timedatectl set-timezone Asia/Kolkata
 
 echo "[2/8] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq python3.11 python3.11-venv python3-pip git
+apt-get install -y -qq python3.11 python3.11-venv python3-pip git rclone
 
 # ──────────────────────────────────────────────────────────
 #   USER & DIRECTORY
@@ -25,7 +25,7 @@ id -u blitztrader &>/dev/null || useradd -r -m -s /bin/bash blitztrader
 
 echo "[4/8] Setting up directory..."
 APP_DIR="/opt/blitztrader"
-mkdir -p "$APP_DIR"/{journals,logs,strategies}
+mkdir -p "$APP_DIR"/{journals,logs,strategies,data_exports}
 
 # Copy project files (exclude local .env so Secret Manager is always used)
 cp -r ./* "$APP_DIR/"
@@ -62,7 +62,10 @@ else
         SHOONYA_IMEI
         TELEGRAM_BOT_TOKEN
         TELEGRAM_AUTHORIZED_USER_ID
-        ANTHROPIC_API_KEY
+        GEMINI_API_KEY
+        GOOGLE_DRIVE_UPLOAD_DIR
+        RCLONE_REMOTE
+        RCLONE_FOLDER
     )
 
     ENV_FILE="$APP_DIR/.env"

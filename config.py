@@ -15,12 +15,14 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).parent
 JOURNALS_DIR = BASE_DIR / "journals"
 LOGS_DIR = BASE_DIR / "logs"
+DATA_EXPORTS_DIR = BASE_DIR / "data_exports"
 STATE_FILE = BASE_DIR / "live_state.json"
 STRATEGIES_DIR = BASE_DIR / "strategies"
 
 # Ensure directories exist
 JOURNALS_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+DATA_EXPORTS_DIR.mkdir(exist_ok=True)
 STRATEGIES_DIR.mkdir(exist_ok=True)
 
 # ──────────────────────────────────────────────────────────────
@@ -82,6 +84,17 @@ GEMINI_API_KEY = _optional_env("GEMINI_API_KEY")
 GEMINI_MODEL = _optional_env("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ──────────────────────────────────────────────────────────────
+#   DATA EXPORT / GOOGLE DRIVE
+# ──────────────────────────────────────────────────────────────
+
+# Option 1: mounted Google Drive folder, e.g. /mnt/gdrive/MyDrive
+GOOGLE_DRIVE_UPLOAD_DIR = _optional_env("GOOGLE_DRIVE_UPLOAD_DIR")
+
+# Option 2: rclone remote configured on the VM, e.g. RCLONE_REMOTE=gdrive
+RCLONE_REMOTE = _optional_env("RCLONE_REMOTE")
+RCLONE_FOLDER = _optional_env("RCLONE_FOLDER", "BlitzTrader")
+
+# ──────────────────────────────────────────────────────────────
 #   TRADING PARAMETERS
 # ──────────────────────────────────────────────────────────────
 
@@ -99,7 +112,11 @@ SESSION_START = "09:00"
 SESSION_END = "15:25"  # Buffer after market close for EOD
 
 # Agent loop
-LOOP_INTERVAL_SECONDS = 900
+# Python scanner (get_strategy_signals) runs every SCAN_INTERVAL_SECONDS — no LLM cost.
+SCAN_INTERVAL_SECONDS = 60
+# LLM (Gemini) is invoked every LOOP_INTERVAL_SECONDS baseline, OR immediately when the
+# scanner surfaces a new signal — whichever comes first.
+LOOP_INTERVAL_SECONDS = 300
 TELEGRAM_POLL_INTERVAL_SECONDS = 3   # How often to check for new Telegram messages
 LIMIT_ORDER_TIMEOUT_SECONDS = 300    # 5 minutes
 

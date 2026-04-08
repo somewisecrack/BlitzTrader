@@ -42,6 +42,7 @@ class ToolRegistry:
             "get_quote": self._market_data.get_quote,
             "get_candles": self._market_data.get_candles,
             "get_indicators": self._market_data.get_indicators,
+            "get_strategy_signals": self._market_data.get_strategy_signals,
             "get_vix": self._market_data.get_vix,
             "get_market_depth": self._market_data.get_market_depth,
             # Position & Account
@@ -221,6 +222,33 @@ class ToolRegistry:
                         },
                     },
                     "required": ["symbol"],
+                },
+            },
+            {
+                "name": "get_strategy_signals",
+                "description": (
+                    "Deterministically scan recent NIFTY/BANKNIFTY candles for approved "
+                    "price-action, VSA/VPA confirmation, and daily first-hour strategy setups. "
+                    "Use this every market-analysis iteration so entries are not missed by "
+                    "manual LLM inspection. "
+                    "Returns candidate entries with strategy, direction, entry reference, "
+                    "stop_loss, target, requires_volume_confirmation, and rule-based reasoning."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "NIFTY, BANKNIFTY, or BOTH",
+                            "enum": ["NIFTY", "BANKNIFTY", "BOTH"],
+                            "default": "BOTH",
+                        },
+                        "lookback_bars": {
+                            "type": "integer",
+                            "description": "How many most-recent bars per timeframe to scan",
+                            "default": 5,
+                        },
+                    },
                 },
             },
             {

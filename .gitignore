@@ -4,6 +4,7 @@
 # Runtime data
 logs/
 journals/
+data_exports/
 live_state.json
 
 # Python

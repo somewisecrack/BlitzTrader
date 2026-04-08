@@ -116,7 +116,7 @@ NEVER invent trades, P&L, win rates, or symbols. Before ANY performance report:
 3. If trades=0, say "No trades today" — do not invent any
 The system auto-appends verified data to your messages. The trader cross-checks.
 
-Available tools: get_spot_price, get_option_chain, get_quote, get_candles, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, place_virtual_order, cancel_order, close_position, close_all_positions, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision"""
+Available tools: get_spot_price, get_option_chain, get_quote, get_candles, get_indicators, get_strategy_signals, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, place_virtual_order, cancel_order, close_position, close_all_positions, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision"""
 
 
 def build_startup_context() -> str:
@@ -149,9 +149,14 @@ def build_iteration_context(
     telegram_handler,
     order_execution,
     goal_manager=None,
+    pending_signals: list = None,
 ) -> str:
     """
-    Build the scheduled 60-second market analysis context.
+    Build the scheduled market analysis context.
+
+    pending_signals: list of signal dicts already surfaced by the background Python
+    scanner (get_strategy_signals).  When provided the agent must NOT call
+    get_strategy_signals again — those results are pre-injected below.
     """
     now = datetime.now(IST)
     state = state_manager.get_state()
@@ -203,32 +208,56 @@ def build_iteration_context(
 
     market_phase = _get_market_phase(now)
 
+    # Build the signal section — pre-injected by background scanner or absent
+    if pending_signals:
+        import json as _json
+        signal_lines = _json.dumps(pending_signals, indent=2, default=str)
+        signal_section = f"""
+BACKGROUND SCANNER — NEW SIGNALS DETECTED ({len(pending_signals)}):
+{signal_lines}
+
+DO NOT call get_strategy_signals() — those results are already above.
+For each signal above you MUST either:
+  a) Trade it — call get_indicators() to confirm, then place_virtual_order(), or
+  b) Reject it — call log_decision() with the exact reason (wrong phase, spread too wide, etc.)
+Silently ignoring a signal is not allowed."""
+        analysis_sequence = """
+MANDATORY ANALYSIS SEQUENCE (signal-triggered iteration):
+1. For each signal listed above:
+   a. Call get_indicators(symbol, interval) for the signal's symbol and tool interval to confirm
+      EMAs, RSI, ADX, ATR align with the strategy rules.
+      For daily-first-hour signals, interval is set to "2" and signal_timeframe shows the setup type.
+   b. If requires_volume_confirmation=true, call get_candles() and verify avg_volume_20.
+   c. If all conditions met: get_option_chain(), size the position, place_virtual_order().
+   d. If any condition fails: log_decision() with specific reason — do not skip silently.
+2. After handling all signals, check open positions — adjust stops if needed.
+3. Only place orders if ALL conditions in the strategy doc are met — not just some."""
+    else:
+        signal_section = ""
+        analysis_sequence = """
+MANDATORY ANALYSIS SEQUENCE (scheduled 5-min iteration):
+1. Call get_indicators() for BOTH symbols on MULTIPLE timeframes:
+   - get_indicators("NIFTY", "2") and get_indicators("BANKNIFTY", "2")   ← primary
+   - get_indicators("NIFTY", "5") and get_indicators("BANKNIFTY", "5")   ← confirmation
+   - get_indicators("NIFTY", "15") when checking higher-timeframe bias
+   This gives you EMA20/50/100, RSI14, daily_lbr_rsi, ATR14, ADX14, VWAP, Pivot/CPR.
+2. Use get_candles(symbol, interval, count) for pattern recognition if indicators suggest a setup.
+3. Cross-reference with strategy rules:
+   - VP-05: ema_stacked_bull/bear + pin bar at EMA20 or EMA50
+   - VP-20: narrow CPR day only (cpr_is_narrow=True)
+   - VP-24: proximity to pivot/r1/r2/s1/s2 within 0.1%
+   - Momentum Pinball: daily_lbr_rsi < 30 or > 70, entry on first-hour breakout
+   - ALL strategies: atr14 for SL sizing, adx14 > 20 for trend confirmation
+4. If a setup is valid: get_option_chain(), size position, place_virtual_order().
+5. Only place orders if ALL conditions in the strategy doc are met."""
+
     return f"""Current time: {now.strftime('%H:%M:%S')} IST
 Market phase: {market_phase}
 Session P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)
 Open positions: {pos_summary}
 Trades today: {trade_count}
-Virtual balance available: ₹{available:,.2f}{pending_summary}{goals_section}{command_context}
-
-MANDATORY ANALYSIS SEQUENCE — follow this every iteration:
-1. Call get_indicators() for BOTH symbols on MULTIPLE timeframes — ALWAYS start here:
-   - get_indicators("NIFTY", "2") and get_indicators("BANKNIFTY", "2")   ← primary (most strategies)
-   - get_indicators("NIFTY", "5") and get_indicators("BANKNIFTY", "5")   ← confirmation
-   - get_indicators("NIFTY", "15") when checking higher-timeframe bias
-   This gives you EMA20/50/100, RSI14, ATR14, ADX14, VWAP, Pivot/CPR levels per timeframe.
-   You CANNOT evaluate any strategy without indicators. Do not skip this step.
-2. Use get_candles(symbol, interval, count) for pattern recognition (candle shapes, wick sizes, consecutive bars).
-   Match the interval to the strategy's best timeframe (e.g. 2m for VP-05, VP-07, VP-08, VP-20, VP-24).
-3. Cross-reference indicators with strategy rules:
-   - VP-05: requires ema_stacked_bull or ema_stacked_bear + pin bar at EMA20 or EMA50
-   - VP-07/08/09/16/17: check avg_volume_20 for volume confirmation (VSA patterns)
-   - VP-20: check cpr_tc, cpr_bc, cpr_width — only trade on narrow CPR days
-   - VP-24: check proximity to pivot, r1, r2, s1, s2 (within 0.1%)
-   - Momentum Pinball: use lbr_rsi < 30 (long setup) or lbr_rsi > 70 (short setup) — NOT rsi14.
-     lbr_rsi is the 3-period RSI of 1-period ROC as required by the strategy.
-     Entry is a buy-stop above first_hour_high (long) or sell-stop below first_hour_low (short).
-   - ALL strategies: use atr14 for stop-loss sizing, adx14 > 20 confirms trend strength
-4. Only place orders if ALL conditions in the strategy doc are met — not just some.
+Virtual balance available: ₹{available:,.2f}{pending_summary}{goals_section}{command_context}{signal_section}
+{analysis_sequence}
 
 IMPORTANT: Be silent in this iteration unless you have an ACTION:
 - Send Telegram ONLY if you are entering or exiting a position
