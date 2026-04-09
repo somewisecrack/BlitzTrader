@@ -475,20 +475,27 @@ class ShoonyaClient:
 
     def subscribe(self, exchange_token_pairs: list[tuple[str, str]]) -> None:
         """Subscribe to touchline feed for (exchange, token) pairs."""
-        if not self._api:
+        ws_app = getattr(self, '_ws_app', None)
+        if not ws_app:
+            logger.warning("subscribe() called before WebSocket is open — ignored")
             return
-        for exchange, token in exchange_token_pairs:
-            try:
-                self._api.subscribe(exchange=exchange, token=token)
-            except Exception:
-                logger.exception(f"Failed to subscribe {exchange}:{token}")
+        instruments = "#".join(f"{ex}|{tok}" for ex, tok in exchange_token_pairs)
+        try:
+            import json as _json
+            ws_app.send(_json.dumps({"t": "t", "k": instruments}))
+            logger.info(f"Subscribed: {instruments}")
+        except Exception:
+            logger.exception(f"Failed to subscribe {instruments}")
 
     def unsubscribe(self, exchange_token_pairs: list[tuple[str, str]]) -> None:
         """Unsubscribe from touchline feed for (exchange, token) pairs."""
-        if not self._api:
+        ws_app = getattr(self, '_ws_app', None)
+        if not ws_app:
             return
-        for exchange, token in exchange_token_pairs:
-            try:
-                self._api.unsubscribe(exchange=exchange, token=token)
-            except Exception:
-                logger.exception(f"Failed to unsubscribe {exchange}:{token}")
+        instruments = "#".join(f"{ex}|{tok}" for ex, tok in exchange_token_pairs)
+        try:
+            import json as _json
+            ws_app.send(_json.dumps({"t": "u", "k": instruments}))
+            logger.info(f"Unsubscribed: {instruments}")
+        except Exception:
+            logger.exception(f"Failed to unsubscribe {instruments}")
