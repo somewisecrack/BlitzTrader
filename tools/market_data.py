@@ -490,8 +490,13 @@ class MarketDataTools:
             exchange = scrip.get("exch", "NFO")
 
         # ── PRIMARY: Shoonya REST get_time_price_series ───────────────────────
-        interval_secs = int(interval) * 60
-        start_time = time.time() - (count + 10) * interval_secs
+        # Go back far enough to cover full indicator warm-up across multiple
+        # trading days (EMA100 needs 100 bars; a trading day = 375 min).
+        import math as _math
+        trading_mins_needed = (count + 20) * int(interval)
+        trading_days_needed = _math.ceil(trading_mins_needed / 375) + 1
+        calendar_days_needed = trading_days_needed * 3   # buffer for weekends/holidays
+        start_time = time.time() - calendar_days_needed * 86400
 
         raw_candles = self._client.get_time_price_series(
             exchange=exchange,
@@ -502,24 +507,34 @@ class MarketDataTools:
 
         if raw_candles:
             candles = []
-            for c in raw_candles[:count]:
-                # Shoonya REST time is "HH:MM:SS DD-MM-YYYY"; normalise to epoch float.
-                raw_time = c.get("time", c.get("ssboe", ""))
-                try:
-                    ts = _IST.localize(
-                        _dt.datetime.strptime(raw_time, "%H:%M:%S %d-%m-%Y")
-                    ).timestamp()
-                except Exception:
-                    ts = float(raw_time) if str(raw_time).isdigit() else 0.0
+            for c in raw_candles:
+                # Prefer ssboe (Unix epoch string) — present in futures and index candles.
+                # Fall back to parsing the human-readable time field.
+                ssboe = c.get("ssboe", "")
+                if ssboe and str(ssboe).isdigit():
+                    ts = float(ssboe)
+                else:
+                    raw_time = c.get("time", "")
+                    ts = 0.0
+                    for fmt in ("%H:%M:%S %d-%m-%Y", "%d-%m-%Y %H:%M:%S"):
+                        try:
+                            ts = _IST.localize(
+                                _dt.datetime.strptime(raw_time, fmt)
+                            ).timestamp()
+                            break
+                        except ValueError:
+                            continue
                 candles.append({
                     "time":   ts,
                     "open":   float(c.get("into", 0)),
                     "high":   float(c.get("inth", 0)),
                     "low":    float(c.get("intl", 0)),
                     "close":  float(c.get("intc", 0)),
-                    "volume": int(c.get("intv", 0)),
+                    "volume": int(float(c.get("intv", 0))),
                 })
             candles.sort(key=lambda c: c["time"])
+            # Trim to requested count (newest bars)
+            candles = candles[-count:]
 
             if len(candles) >= min(count, 2):
                 result = {

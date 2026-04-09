@@ -294,6 +294,56 @@ class ShoonyaClient:
             logger.exception("Exception in get_time_price_series")
         return None
 
+    def get_front_month_futures_token(self, symbol: str) -> Optional[dict]:
+        """
+        Find the front-month FUTIDX contract for an index (NIFTY or BANKNIFTY).
+
+        Searches NFO for all FUTIDX contracts matching the symbol, picks the
+        nearest expiry that has not yet expired, and returns:
+            {"exchange": "NFO", "token": "66691", "tsym": "NIFTY28APR26F",
+             "expiry": "28-APR-2026", "name": "NIFTY"}
+
+        Returns None if login not done or no contract found.
+        """
+        import datetime as _dt
+
+        results = self.search_scrip("NFO", symbol)
+        if not results:
+            logger.error(f"get_front_month_futures_token: no NFO results for {symbol}")
+            return None
+
+        today = _dt.date.today()
+        candidates = []
+        for r in results:
+            if r.get("instname") != "FUTIDX":
+                continue
+            exd = r.get("exd", "")          # e.g. "28-APR-2026"
+            try:
+                expiry = _dt.datetime.strptime(exd, "%d-%b-%Y").date()
+            except ValueError:
+                continue
+            if expiry >= today:
+                candidates.append((expiry, r))
+
+        if not candidates:
+            logger.error(f"get_front_month_futures_token: no live FUTIDX for {symbol}")
+            return None
+
+        candidates.sort(key=lambda x: x[0])
+        expiry, scrip = candidates[0]
+        info = {
+            "exchange": "NFO",
+            "token":    scrip["token"],
+            "tsym":     scrip.get("tsym", ""),
+            "expiry":   scrip.get("exd", ""),
+            "name":     symbol.upper(),
+        }
+        logger.info(
+            f"Front-month futures: {symbol} → {info['tsym']} "
+            f"(token {info['token']}, expiry {info['expiry']})"
+        )
+        return info
+
     def search_scrip(self, exchange: str, searchtext: str) -> Optional[list]:
         """
         Search for a scrip by name. Returns list of scrip dicts, or None.

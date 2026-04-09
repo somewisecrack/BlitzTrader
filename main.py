@@ -227,12 +227,31 @@ class BlitzTrader:
         )
         self._feed.start()
 
-        index_tokens = [
+        # Resolve front-month futures for NIFTY and BANKNIFTY so we get real
+        # volume data.  Fall back to index tokens if futures lookup fails.
+        active_tokens = dict(NSE_TOKENS)  # starts with VIX index token
+        for sym in ("NIFTY", "BANKNIFTY"):
+            fut = self._shoonya.get_front_month_futures_token(sym)
+            if fut:
+                active_tokens[sym] = {
+                    "exchange": fut["exchange"],
+                    "token":    fut["token"],
+                    "tsym":     fut["tsym"],
+                    "expiry":   fut["expiry"],
+                }
+                logger.info(
+                    f"✓ {sym} → futures {fut['tsym']} "
+                    f"(token {fut['token']}, expiry {fut['expiry']})"
+                )
+            else:
+                logger.warning(f"Futures lookup failed for {sym} — using index token")
+
+        subscribe_tokens = [
             (info["exchange"], info["token"])
-            for info in NSE_TOKENS.values()
+            for info in active_tokens.values()
         ]
-        self._feed.subscribe(index_tokens)
-        logger.info(f"✓ WebSocket feed started, subscribed to {len(index_tokens)} tokens")
+        self._feed.subscribe(subscribe_tokens)
+        logger.info(f"✓ WebSocket feed started, subscribed to {len(subscribe_tokens)} tokens")
 
         # 3. State manager
         self._state = StateManager(STATE_FILE, VIRTUAL_CAPITAL)
@@ -246,7 +265,7 @@ class BlitzTrader:
         market_data = MarketDataTools(
             self._shoonya,
             self._feed,
-            NSE_TOKENS,
+            active_tokens,
             data_recorder=self._data_recorder,
         )
         self._market_data = market_data
