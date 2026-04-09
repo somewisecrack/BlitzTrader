@@ -441,11 +441,22 @@ class MarketDataTools:
         """
         Get last N candles at given interval.
 
-        :param symbol: Trading symbol
-        :param interval: '1', '5', '15', '30', '60' (minutes)
+        Source priority (REST-first architecture):
+          1. Exact cache hit (55 s TTL)
+          2. Larger-count cache hit (same TTL)
+          3. Shoonya REST get_time_price_series  ← PRIMARY
+          4. LiveFeedManager.get_candles()       ← FALLBACK
+             (used when REST returns nothing, e.g. 2-min interval or outage)
+
+        :param symbol: Trading symbol (e.g. 'NIFTY')
+        :param interval: Candle width in minutes: '1', '2', '5', '15', '30', '60'
         :param count: Number of candles to return
-        :returns: {symbol, interval, candles: [{time, open, high, low, close, volume}]}
+        :returns: dict with keys: symbol, interval, candles, count, source
         """
+        import datetime as _dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+
         cache_key = (symbol.upper(), str(interval), int(count))
         cached = self._candle_cache.get(cache_key)
         if cached and time.time() - cached[0] < 55:
@@ -464,7 +475,6 @@ class MarketDataTools:
             return result
 
         # Resolve symbol to (exchange, token)
-        # For known indices use hardcoded tokens (searchscrip doesn't work for indices)
         token_info = self._tokens.get(symbol.upper())
         if token_info:
             token = token_info["token"]
@@ -479,21 +489,7 @@ class MarketDataTools:
             token = scrip.get("token", "")
             exchange = scrip.get("exch", "NFO")
 
-        # Primary: live candles built from WebSocket ticks
-        if self._feed:
-            live_candles = self._feed.get_candles(token, int(interval), count)
-            if live_candles and len(live_candles) >= min(count, 2):
-                result = {
-                    "symbol": symbol,
-                    "interval": f"{interval}min",
-                    "candles": live_candles[-count:],
-                    "count": len(live_candles[-count:]),
-                    "source": "live_feed",
-                }
-                self._candle_cache[cache_key] = (time.time(), result)
-                return result
-
-        # Fallback: REST historical data
+        # ── PRIMARY: Shoonya REST get_time_price_series ───────────────────────
         interval_secs = int(interval) * 60
         start_time = time.time() - (count + 10) * interval_secs
 
@@ -504,50 +500,75 @@ class MarketDataTools:
             interval=interval,
         )
 
-        if not raw_candles:
-            return {"error": f"No candle data for {symbol}"}
+        if raw_candles:
+            candles = []
+            for c in raw_candles[:count]:
+                # Shoonya REST time is "HH:MM:SS DD-MM-YYYY"; normalise to epoch float.
+                raw_time = c.get("time", c.get("ssboe", ""))
+                try:
+                    ts = _IST.localize(
+                        _dt.datetime.strptime(raw_time, "%H:%M:%S %d-%m-%Y")
+                    ).timestamp()
+                except Exception:
+                    ts = float(raw_time) if str(raw_time).isdigit() else 0.0
+                candles.append({
+                    "time":   ts,
+                    "open":   float(c.get("into", 0)),
+                    "high":   float(c.get("inth", 0)),
+                    "low":    float(c.get("intl", 0)),
+                    "close":  float(c.get("intc", 0)),
+                    "volume": int(c.get("intv", 0)),
+                })
+            candles.sort(key=lambda c: c["time"])
 
-        import datetime as _dt
-        import pytz as _pytz
-        _IST = _pytz.timezone("Asia/Kolkata")
+            if len(candles) >= min(count, 2):
+                result = {
+                    "symbol":   symbol,
+                    "interval": f"{interval}min",
+                    "candles":  candles,
+                    "count":    len(candles),
+                    "source":   "rest_api",
+                }
+                self._candle_cache[cache_key] = (time.time(), result)
+                logger.debug(
+                    "[candles] %s %sm → rest_api (%d bars)", symbol, interval, len(candles)
+                )
+                return result
 
-        candles = []
-        for c in raw_candles[:count]:
-            # Shoonya REST time is a string like "09:15:00 07-04-2026".
-            # Normalise to epoch float so first-hour filters work with live candles.
-            raw_time = c.get("time", c.get("ssboe", ""))
-            try:
-                ts = _IST.localize(
-                    _dt.datetime.strptime(raw_time, "%H:%M:%S %d-%m-%Y")
-                ).timestamp()
-            except Exception:
-                ts = float(raw_time) if str(raw_time).isdigit() else 0.0
-            candles.append({
-                "time":   ts,
-                "open":   float(c.get("into", 0)),
-                "high":   float(c.get("inth", 0)),
-                "low":    float(c.get("intl", 0)),
-                "close":  float(c.get("intc", 0)),
-                "volume": int(c.get("intv", 0)),
-            })
-        candles.sort(key=lambda c: c["time"])
+        # ── FALLBACK: live-feed candles (WebSocket-aggregated ticks) ─────────
+        # Triggered when REST returns nothing (2-min interval, market-hours
+        # quirk, or connectivity issue).  Strategy logic still runs; the LLM
+        # receives a clear candle_source so it can weigh the data accordingly.
+        if self._feed:
+            live_candles = self._feed.get_candles(token, int(interval), count)
+            if live_candles and len(live_candles) >= min(count, 2):
+                logger.info(
+                    "[candles] %s %sm → live_feed (%d bars) — REST returned no data",
+                    symbol, interval, len(live_candles),
+                )
+                result = {
+                    "symbol":   symbol,
+                    "interval": f"{interval}min",
+                    "candles":  live_candles[-count:],
+                    "count":    len(live_candles[-count:]),
+                    "source":   "live_feed",
+                }
+                self._candle_cache[cache_key] = (time.time(), result)
+                return result
 
-        result = {
-            "symbol": symbol,
-            "interval": f"{interval}min",
-            "candles": candles,
-            "count": len(candles),
-            "source": "rest_api",
-        }
-        self._candle_cache[cache_key] = (time.time(), result)
-        return result
+        logger.warning(
+            "[candles] %s %sm → no data (REST empty, live feed empty/disconnected)",
+            symbol, interval,
+        )
+        return {"error": f"No candle data for {symbol} {interval}m", "candles": []}
 
     def get_indicators(self, symbol: str, interval: str = "5") -> dict:
         """
         Get all technical indicators needed for strategy analysis.
-        Computed from live candle data (WebSocket feed).
+        Computed from REST candles (primary) with live-feed candle fallback.
 
         Returns:
+            candle_source              — 'rest_api' | 'live_feed' | '*_cache'
             ema20, ema50, ema100       — trend EMAs (VP-05, VP-07, VP-15, etc.)
             rsi14                      — RSI 14-period (momentum_pinball, adx_gapper)
             lbr_rsi/daily_lbr_rsi      — daily 3-period RSI of 1-period ROC (Momentum Pinball)
@@ -567,6 +588,7 @@ class MarketDataTools:
             return {"error": f"Cannot compute indicators — no candle data for {symbol}"}
 
         candles = candle_data["candles"]
+        candle_source = candle_data.get("source", "unknown")
         if len(candles) < 20:
             return {"error": f"Not enough candles ({len(candles)}) to compute indicators for {symbol}"}
 
@@ -714,6 +736,7 @@ class MarketDataTools:
         result = {
             "symbol":          symbol,
             "interval":        f"{interval}min",
+            "candle_source":   candle_source,
             "candles_used":    len(candles),
             "current_price":   ltp,
             "ema20":           e20,
@@ -823,7 +846,12 @@ class MarketDataTools:
                     lows.append((idx, candles[idx]))
             return lows
 
-        def add_signal(sym, interval, candle, strategy, direction, reason, stop_loss, target, requires_volume_confirmation=False):
+        # Mutable container so add_signal always picks up the current interval's source
+        # without needing it passed explicitly through 34+ call sites.
+        _active_src: list = ["unknown"]
+
+        def add_signal(sym, interval, candle, strategy, direction, reason, stop_loss, target,
+                       requires_volume_confirmation=False, candle_source=None):
             # Daily-first-hour signals must use a date-based key (not candle time) because
             # latest["time"] changes every 2 min, which would re-emit the same signal ~156×/day.
             if interval == "daily-first-hour":
@@ -846,6 +874,7 @@ class MarketDataTools:
                 "stop_loss": round(stop_loss, 2) if stop_loss is not None else None,
                 "target": round(target, 2) if target is not None else None,
                 "requires_volume_confirmation": requires_volume_confirmation,
+                "candle_source": candle_source if candle_source is not None else _active_src[0],
                 "reason": reason,
             })
 
@@ -895,6 +924,8 @@ class MarketDataTools:
                     daily_lbr = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
 
             daily_candles_data = self.get_candles(sym, "2", count=220)
+            daily_candles_src = daily_candles_data.get("source", "unknown") if isinstance(daily_candles_data, dict) else "unknown"
+            _active_src[0] = daily_candles_src  # used by daily-first-hour add_signal calls below
             daily_candles = daily_candles_data.get("candles", []) if isinstance(daily_candles_data, dict) else []
             if prev_day and daily_candles:
                 first_hour = []
@@ -912,10 +943,12 @@ class MarketDataTools:
                     fh_low = min(dc["low"] for dc in first_hour)
                     if daily_lbr is not None and daily_lbr < 30 and latest["close"] > fh_high:
                         add_signal(sym, "daily-first-hour", latest, "Momentum Pinball", "BUY",
-                                   f"Daily LBR/RSI {daily_lbr:.1f} < 30 and price broke first-hour high", fh_low, latest["close"] + 2 * (latest["close"] - fh_low))
+                                   f"Daily LBR/RSI {daily_lbr:.1f} < 30 and price broke first-hour high", fh_low, latest["close"] + 2 * (latest["close"] - fh_low),
+                                   candle_source=daily_candles_src)
                     if daily_lbr is not None and daily_lbr > 70 and latest["close"] < fh_low:
                         add_signal(sym, "daily-first-hour", latest, "Momentum Pinball", "SELL",
-                                   f"Daily LBR/RSI {daily_lbr:.1f} > 70 and price broke first-hour low", fh_high, latest["close"] - 2 * (fh_high - latest["close"]))
+                                   f"Daily LBR/RSI {daily_lbr:.1f} > 70 and price broke first-hour low", fh_high, latest["close"] - 2 * (fh_high - latest["close"]),
+                                   candle_source=daily_candles_src)
 
                 pd_range = prev_day["high"] - prev_day["low"]
                 if pd_range:
@@ -925,27 +958,33 @@ class MarketDataTools:
                     if pd_open_pct >= 80 and pd_close_pct <= 20 and today_low <= prev_day["low"] - test_buffer and latest["close"] > prev_day["low"]:
                         add_signal(sym, "daily-first-hour", latest, "80-20 Reversal", "BUY",
                                    "Previous day opened in top 20%, closed in bottom 20%, today tested below prior low and reclaimed it",
-                                   today_low, latest["close"] + 2 * (latest["close"] - today_low))
+                                   today_low, latest["close"] + 2 * (latest["close"] - today_low),
+                                   candle_source=daily_candles_src)
                     if pd_open_pct <= 20 and pd_close_pct >= 80 and today_high >= prev_day["high"] + test_buffer and latest["close"] < prev_day["high"]:
                         add_signal(sym, "daily-first-hour", latest, "80-20 Reversal", "SELL",
                                    "Previous day opened in bottom 20%, closed in top 20%, today tested above prior high and rejected it",
-                                   today_high, latest["close"] - 2 * (today_high - latest["close"]))
+                                   today_high, latest["close"] - 2 * (today_high - latest["close"]),
+                                   candle_source=daily_candles_src)
 
                 if today_open < prev_day["low"] and latest["close"] > prev_day["low"]:
                     add_signal(sym, "daily-first-hour", latest, "ADX Gapper", "BUY",
                                "Gap below previous low reclaimed; confirm ADX>30 and +DI>-DI before trading",
-                               today_low, latest["close"] + 2 * (latest["close"] - today_low))
+                               today_low, latest["close"] + 2 * (latest["close"] - today_low),
+                               candle_source=daily_candles_src)
                 if today_open > prev_day["high"] and latest["close"] < prev_day["high"]:
                     add_signal(sym, "daily-first-hour", latest, "ADX Gapper", "SELL",
                                "Gap above previous high rejected; confirm ADX>30 and -DI>+DI before trading",
-                               today_high, latest["close"] - 2 * (today_high - latest["close"]))
+                               today_high, latest["close"] - 2 * (today_high - latest["close"]),
+                               candle_source=daily_candles_src)
 
             for interval in intervals:
                 candle_count = 220 if interval == "2" else 140
                 data = self.get_candles(sym, interval, count=candle_count)
+                intraday_src = data.get("source", "unknown") if isinstance(data, dict) else "unknown"
+                _active_src[0] = intraday_src  # picked up by add_signal() closure
                 candles = data.get("candles", []) if isinstance(data, dict) else []
                 if len(candles) < 25:
-                    notes.append(f"{sym} {interval}m: insufficient candles ({len(candles)})")
+                    notes.append(f"{sym} {interval}m: insufficient candles ({len(candles)}) [{intraday_src}]")
                     continue
 
                 closes = [c["close"] for c in candles]
