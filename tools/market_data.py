@@ -446,10 +446,10 @@ class MarketDataTools:
           2. Larger-count cache hit (same TTL)
           3. Shoonya REST get_time_price_series  ← PRIMARY
           4. LiveFeedManager.get_candles()       ← FALLBACK
-             (used when REST returns nothing, e.g. 2-min interval or outage)
+             (used when REST returns nothing, e.g. outage)
 
         :param symbol: Trading symbol (e.g. 'NIFTY')
-        :param interval: Candle width in minutes: '1', '2', '5', '15', '30', '60'
+        :param interval: Candle width in minutes: '1', '3', '5', '15', '30', '60'
         :param count: Number of candles to return
         :returns: dict with keys: symbol, interval, candles, count, source
         """
@@ -792,7 +792,7 @@ class MarketDataTools:
         import pytz
 
         symbols = ["NIFTY", "BANKNIFTY"] if symbol.upper() == "BOTH" else [symbol.upper()]
-        intervals = ["2", "5", "15"]
+        intervals = ["3", "5", "15"]
         signals = []
         notes = []
         IST = pytz.timezone("Asia/Kolkata")
@@ -853,7 +853,7 @@ class MarketDataTools:
         def add_signal(sym, interval, candle, strategy, direction, reason, stop_loss, target,
                        requires_volume_confirmation=False, candle_source=None):
             # Daily-first-hour signals must use a date-based key (not candle time) because
-            # latest["time"] changes every 2 min, which would re-emit the same signal ~156×/day.
+            # latest["time"] changes every 3 min, which would re-emit the same signal ~104×/day.
             if interval == "daily-first-hour":
                 sig_key = (sym, "daily-first-hour", strategy, direction, today_date)
             else:
@@ -861,7 +861,7 @@ class MarketDataTools:
             if sig_key in self._emitted_signals:
                 return
             self._emitted_signals.add(sig_key)
-            tool_interval = "2" if interval == "daily-first-hour" else str(interval)
+            tool_interval = "3" if interval == "daily-first-hour" else str(interval)
             signal_timeframe = "daily-first-hour" if interval == "daily-first-hour" else f"{interval}min"
             signals.append({
                 "symbol": sym,
@@ -923,7 +923,7 @@ class MarketDataTools:
                     avg_loss = sum(losses[-3:]) / 3
                     daily_lbr = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
 
-            daily_candles_data = self.get_candles(sym, "2", count=220)
+            daily_candles_data = self.get_candles(sym, "3", count=220)
             daily_candles_src = daily_candles_data.get("source", "unknown") if isinstance(daily_candles_data, dict) else "unknown"
             _active_src[0] = daily_candles_src  # used by daily-first-hour add_signal calls below
             daily_candles = daily_candles_data.get("candles", []) if isinstance(daily_candles_data, dict) else []
@@ -978,7 +978,7 @@ class MarketDataTools:
                                candle_source=daily_candles_src)
 
             for interval in intervals:
-                candle_count = 220 if interval == "2" else 140
+                candle_count = 220 if interval == "3" else 140
                 data = self.get_candles(sym, interval, count=candle_count)
                 intraday_src = data.get("source", "unknown") if isinstance(data, dict) else "unknown"
                 _active_src[0] = intraday_src  # picked up by add_signal() closure
@@ -1048,7 +1048,7 @@ class MarketDataTools:
                                     break
 
                     # VP-24: BANKNIFTY pivot bounce/rejection on preferred timeframes.
-                    if sym == "BANKNIFTY" and interval in ("2", "5"):
+                    if sym == "BANKNIFTY" and interval in ("3", "5"):
                         for level_name, level in pivot_levels.items():
                             if not level or math.isnan(level):
                                 continue
@@ -1063,7 +1063,7 @@ class MarketDataTools:
                                            f"Bearish upper-wick rejection within 0.1% of {level_name}", sl, c["close"] - 2 * (sl - c["close"]))
 
                     # VP-20: BANKNIFTY narrow-CPR reversal.
-                    if sym == "BANKNIFTY" and interval == "2" and cpr_is_narrow and cpr_tc and cpr_bc and cpr_width:
+                    if sym == "BANKNIFTY" and interval == "3" and cpr_is_narrow and cpr_tc and cpr_bc and cpr_width:
                         if abs(c["close"] - cpr_bc) <= 0.5 * cpr_width and bull and lower > body:
                             sl = cpr_bc - cpr_width
                             add_signal(sym, interval, c, "VP-20 CPR Reversal", "BUY",
@@ -1084,11 +1084,11 @@ class MarketDataTools:
                                 add_signal(sym, interval, c, "VP-01 Counter Bull Trap", "SELL",
                                            "Price below EMA20; bearish candle closed below largest recent green candle close",
                                            c["high"], target_for(c, "SELL", c["high"]))
-                        if sym == "NIFTY" and interval == "2" and red_bodies and c["close"] > e20 and bull:
+                        if sym == "NIFTY" and interval == "3" and red_bodies and c["close"] > e20 and bull:
                             _, trap = max(red_bodies, key=lambda item: item[0])
                             if c["close"] > trap["close"]:
                                 add_signal(sym, interval, c, "VP-02 Counter Bear Trap", "BUY",
-                                           "NIFTY 2m only; price above EMA20 and green candle reclaimed largest recent red candle close",
+                                           "NIFTY 3m only; price above EMA20 and green candle reclaimed largest recent red candle close",
                                            c["low"], target_for(c, "BUY", c["low"]))
 
                     # VP-08: V-reversal after 5+ bearish candles. Volume remains a required confirmation.
@@ -1127,13 +1127,13 @@ class MarketDataTools:
                                 add_signal(sym, interval, c, "VP-09 Power Candle Pullback", "SELL",
                                            "Rally rejected the high of a recent bearish power candle",
                                            c["high"], target_for(c, "SELL", c["high"]))
-                            if pc_bull and interval == "2" and e20 and c["low"] <= midpoint <= c["close"] and bull and c["close"] > e20:
+                            if pc_bull and interval == "3" and e20 and c["low"] <= midpoint <= c["close"] and bull and c["close"] > e20:
                                 add_signal(sym, interval, c, "VP-16 GCR Green Candle Retracement", "BUY",
-                                           "2m bullish power candle 50% body retracement reclaimed above EMA20",
+                                           "3m bullish power candle 50% body retracement reclaimed above EMA20",
                                            pc["low"], target_for(c, "BUY", pc["low"]))
-                            if pc_bear and sym == "NIFTY" and interval in ("2", "5") and e20 and c["close"] <= midpoint <= c["high"] and bear and c["close"] < e20:
+                            if pc_bear and sym == "NIFTY" and interval in ("3", "5") and e20 and c["close"] <= midpoint <= c["high"] and bear and c["close"] < e20:
                                 add_signal(sym, interval, c, "VP-17 RCR Red Candle Retracement", "SELL",
-                                           "NIFTY 2m/5m bearish power candle 50% body retracement rejected below EMA20",
+                                           "NIFTY 3m/5m bearish power candle 50% body retracement rejected below EMA20",
                                            pc["high"], target_for(c, "SELL", pc["high"]))
 
                     # VP-10: first 09:15 candle open breakout, best in first 45 minutes.
@@ -1211,7 +1211,7 @@ class MarketDataTools:
                                        c["high"], target_for(c, "SELL", c["high"]))
 
                     # VP-22: NIFTY supply-zone rejection.
-                    if sym == "NIFTY" and i >= 45 and interval in ("2", "15"):
+                    if sym == "NIFTY" and i >= 45 and interval in ("3", "15"):
                         zone_source = candles[max(0, i - 45):i - 5]
                         prior_swings = swing_highs(zone_source)
                         if prior_swings:
