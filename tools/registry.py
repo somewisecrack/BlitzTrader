@@ -185,7 +185,7 @@ class ToolRegistry:
                         "interval": {
                             "type": "string",
                             "description": "Candle interval in minutes",
-                            "enum": ["1", "2", "3", "5", "15", "30", "60"],
+                            "enum": ["1", "3", "5", "15", "30", "60"],
                             "default": "5",
                         },
                         "count": {
@@ -217,7 +217,7 @@ class ToolRegistry:
                         "interval": {
                             "type": "string",
                             "description": "Candle interval in minutes to compute indicators on",
-                            "enum": ["1", "2", "3", "5", "15", "30", "60"],
+                            "enum": ["1", "3", "5", "15", "30", "60"],
                             "default": "5",
                         },
                     },

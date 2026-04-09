@@ -6,6 +6,11 @@ description: VP Strategy Index. Master reference for all 21 backtested intraday 
 **Source PDFs**: 1-Minute Scalping in Nifty & Bank Nifty | 25 Day Trading Strategies | Day-Trading Stocks  
 **Backtested**: 60 days | NIFTY & BANKNIFTY | 2m, 5m, 15m | 1:2 Risk:Reward
 
+> **LIVE TRADING NOTE (effective April 2026):** Backtests were run on 2-minute candles.
+> The live engine now uses **3-minute candles** as the short-timeframe primary (Shoonya REST
+> does not support 2m). When this index says "Best TF: 2m", treat it as **3m** for live trading.
+> Individual strategy files retain the original 2m backtest data as historical reference.
+
 ---
 
 ## ⭐ Tier 1 — Highest Priority (PF ≥ 1.5 on best setting)
@@ -55,17 +60,17 @@ description: VP Strategy Index. Master reference for all 21 backtested intraday 
 
 ---
 
-## Quick Reference: Best Combinations by Instrument
+## Quick Reference: Best Combinations by Instrument (LIVE — use 3m for all former 2m setups)
 
 ### NIFTY Best Setups
-1. `05 3-EMA Trend` on **2m** (PF 1.84)
+1. `05 3-EMA Trend` on **3m** (backtested 2m PF 1.84)
 2. `01 Counter Bull Trap` on **5m** (PF 1.36)
-3. `07 Wicks Pullback` on **2m** (PF 1.56)
+3. `07 Wicks Pullback` on **3m** (backtested 2m PF 1.56)
 4. `13 Open Drive` on **5m/15m** (PF 5–11)
 
 ### BANKNIFTY Best Setups
-1. `24 Pivot Point Bounce` on **2m** (PF 2.14)
-2. `07 Wicks Pullback` on **2m** (PF 1.96)
+1. `24 Pivot Point Bounce` on **3m** (backtested 2m PF 2.14)
+2. `07 Wicks Pullback` on **3m** (backtested 2m PF 1.96)
 3. `21 Extreme Candle Reversal` on **15m** (PF 3.08)
-4. `15 Evening Star` on **2m** (PF 1.89)
+4. `15 Evening Star` on **3m** (backtested 2m PF 1.89)
 5. `13 Open Drive` on **15m** (PF 21.7!)

@@ -226,7 +226,7 @@ MANDATORY ANALYSIS SEQUENCE (signal-triggered iteration):
 1. For each signal listed above:
    a. Call get_indicators(symbol, interval) for the signal's symbol and tool interval to confirm
       EMAs, RSI, ADX, ATR align with the strategy rules.
-      For daily-first-hour signals, interval is set to "2" and signal_timeframe shows the setup type.
+      For daily-first-hour signals, interval is set to "3" and signal_timeframe shows the setup type.
    b. If requires_volume_confirmation=true, call get_candles() and verify avg_volume_20.
    c. If all conditions met: get_option_chain(), size the position, place_virtual_order().
    d. If any condition fails: log_decision() with specific reason — do not skip silently.
@@ -237,7 +237,7 @@ MANDATORY ANALYSIS SEQUENCE (signal-triggered iteration):
         analysis_sequence = """
 MANDATORY ANALYSIS SEQUENCE (scheduled 5-min iteration):
 1. Call get_indicators() for BOTH symbols on MULTIPLE timeframes:
-   - get_indicators("NIFTY", "2") and get_indicators("BANKNIFTY", "2")   ← primary
+   - get_indicators("NIFTY", "3") and get_indicators("BANKNIFTY", "3")   ← primary
    - get_indicators("NIFTY", "5") and get_indicators("BANKNIFTY", "5")   ← confirmation
    - get_indicators("NIFTY", "15") when checking higher-timeframe bias
    This gives you EMA20/50/100, RSI14, daily_lbr_rsi, ATR14, ADX14, VWAP, Pivot/CPR.

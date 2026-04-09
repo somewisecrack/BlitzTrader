@@ -219,12 +219,12 @@ class LiveFeedManager:
         """
         Update live candle aggregator with a new tick.
         Called inside _on_tick while lock is held.
-        Builds 1m, 5m, 15m, and 60m candles simultaneously.
+        Builds 1m, 3m, 5m, 15m, 30m, and 60m candles simultaneously.
         """
         from collections import deque
         import math
 
-        for interval_mins in (1, 2, 3, 5, 15, 30, 60):
+        for interval_mins in (1, 3, 5, 15, 30, 60):
             key = (token, interval_mins)
             # Candle boundary: floor tick timestamp to interval
             candle_ts = math.floor(ts / (interval_mins * 60)) * (interval_mins * 60)

@@ -536,8 +536,8 @@ class MarketDataTools:
                 return result
 
         # ── FALLBACK: live-feed candles (WebSocket-aggregated ticks) ─────────
-        # Triggered when REST returns nothing (2-min interval, market-hours
-        # quirk, or connectivity issue).  Strategy logic still runs; the LLM
+        # Triggered when REST returns nothing (market-hours quirk or
+        # connectivity issue).  Strategy logic still runs; the LLM
         # receives a clear candle_source so it can weigh the data accordingly.
         if self._feed:
             live_candles = self._feed.get_candles(token, int(interval), count)
