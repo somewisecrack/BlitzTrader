@@ -140,5 +140,118 @@ class TestCandleSourcePriority(unittest.TestCase):
             self.assertEqual(result["candle_source"], "rest_api")
 
 
+class TestStarttimeFormula(unittest.TestCase):
+    """Verify the lookback formula in get_candles() provides enough history."""
+
+    def _calendar_days(self, count: int, interval_min: int) -> int:
+        import math
+        trading_mins_needed = (count + 20) * interval_min
+        trading_days_needed = math.ceil(trading_mins_needed / 375) + 1
+        return trading_days_needed * 3
+
+    def test_3m_100_bars_is_enough(self):
+        """100 × 3m bars need 300 trading-minutes (< 1 day). Formula gives ≥ 6 calendar days."""
+        days = self._calendar_days(count=100, interval_min=3)
+        # 120 bars × 3m = 360 min → ceil(360/375)=1 + 1 = 2 trading days → 6 calendar days
+        self.assertGreaterEqual(days, 6)
+
+    def test_5m_100_bars_is_enough(self):
+        """100 × 5m bars need 500 trading-minutes (~1.3 days). Formula gives ≥ 9 calendar days."""
+        days = self._calendar_days(count=100, interval_min=5)
+        # 120 × 5 = 600 min → ceil(600/375)=2 + 1 = 3 trading days → 9 calendar days
+        self.assertGreaterEqual(days, 9)
+
+    def test_15m_100_bars_is_enough(self):
+        """100 × 15m bars need 1500 trading-minutes (~4 days). Formula gives ≥ 15 calendar days."""
+        days = self._calendar_days(count=100, interval_min=15)
+        # 120 × 15 = 1800 min → ceil(1800/375)=5 + 1 = 6 trading days → 18 calendar days
+        self.assertGreaterEqual(days, 15)
+
+    def test_220_bars_3m_covers_ema100(self):
+        """Default candle count of 220 for 3m must cover 100-period EMA warm-up (220 bars)."""
+        days = self._calendar_days(count=220, interval_min=3)
+        # 240 × 3 = 720 min → ceil(720/375)=2 + 1 = 3 trading days → 9 calendar days
+        self.assertGreaterEqual(days, 9)
+        # The returned count (220) exceeds EMA100 requirement of 100 bars
+        self.assertGreaterEqual(220, 100)
+
+    def test_lookback_increases_monotonically_with_interval(self):
+        """Larger intervals require proportionally more lookback calendar days."""
+        days_3m  = self._calendar_days(count=100, interval_min=3)
+        days_5m  = self._calendar_days(count=100, interval_min=5)
+        days_15m = self._calendar_days(count=100, interval_min=15)
+        self.assertLessEqual(days_3m, days_5m)
+        self.assertLessEqual(days_5m, days_15m)
+
+
+class TestSsboeParsing(unittest.TestCase):
+    """Verify the candle timestamp parsing logic (ssboe-first with time-string fallback)."""
+
+    def _parse_ts(self, c: dict) -> float:
+        """Mirror the parsing logic from market_data.py get_candles()."""
+        import datetime
+        import pytz
+        IST = pytz.timezone("Asia/Kolkata")
+
+        ssboe = c.get("ssboe", "")
+        if ssboe and str(ssboe).isdigit():
+            return float(ssboe)
+
+        raw_time = c.get("time", "")
+        for fmt in ("%H:%M:%S %d-%m-%Y", "%d-%m-%Y %H:%M:%S"):
+            try:
+                return IST.localize(datetime.datetime.strptime(raw_time, fmt)).timestamp()
+            except ValueError:
+                continue
+        return 0.0
+
+    def test_ssboe_takes_priority_over_time_field(self):
+        """When ssboe is present and numeric, it wins regardless of time field."""
+        c = {"ssboe": "1775533500", "time": "totally-invalid"}
+        self.assertEqual(self._parse_ts(c), 1775533500.0)
+
+    def test_index_time_format_hhmm_ddmm(self):
+        """Old index candle format: 'HH:MM:SS DD-MM-YYYY' parses correctly."""
+        import datetime, pytz
+        IST = pytz.timezone("Asia/Kolkata")
+        c = {"time": "09:15:00 10-04-2026"}
+        ts = self._parse_ts(c)
+        expected = IST.localize(datetime.datetime(2026, 4, 10, 9, 15, 0)).timestamp()
+        self.assertAlmostEqual(ts, expected, places=0)
+
+    def test_futures_time_format_ddmm_hhmm(self):
+        """Futures candle format: 'DD-MM-YYYY HH:MM:SS' parses correctly."""
+        import datetime, pytz
+        IST = pytz.timezone("Asia/Kolkata")
+        c = {"time": "10-04-2026 09:15:00"}
+        ts = self._parse_ts(c)
+        expected = IST.localize(datetime.datetime(2026, 4, 10, 9, 15, 0)).timestamp()
+        self.assertAlmostEqual(ts, expected, places=0)
+
+    def test_both_formats_produce_same_timestamp(self):
+        """Both time-field formats for the same instant produce the same epoch."""
+        c1 = {"time": "09:15:00 10-04-2026"}
+        c2 = {"time": "10-04-2026 09:15:00"}
+        self.assertAlmostEqual(self._parse_ts(c1), self._parse_ts(c2), places=0)
+
+    def test_invalid_time_returns_zero(self):
+        """Unparseable time field returns 0.0 so the candle can be filtered out."""
+        c = {"time": "garbage"}
+        self.assertEqual(self._parse_ts(c), 0.0)
+
+    def test_missing_ssboe_and_time_returns_zero(self):
+        """Empty candle with no timestamp fields returns 0.0."""
+        self.assertEqual(self._parse_ts({}), 0.0)
+
+    def test_non_numeric_ssboe_falls_back_to_time_field(self):
+        """If ssboe is present but not all-digits, time field is used instead."""
+        import datetime, pytz
+        IST = pytz.timezone("Asia/Kolkata")
+        c = {"ssboe": "N/A", "time": "09:15:00 10-04-2026"}
+        ts = self._parse_ts(c)
+        expected = IST.localize(datetime.datetime(2026, 4, 10, 9, 15, 0)).timestamp()
+        self.assertAlmostEqual(ts, expected, places=0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

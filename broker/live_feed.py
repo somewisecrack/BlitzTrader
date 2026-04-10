@@ -56,7 +56,7 @@ class LiveFeedManager:
         self._candles: dict[tuple, deque] = {}
         self._current_candle: dict[tuple, dict] = {}
         self._vol_at_start: dict[tuple, int] = {}
-        self._MAX_CANDLES = 500  # keep last 500 candles per token+interval (enough for EMA100/ADX warm-up)
+        self._MAX_CANDLES = 500  # keep last 500 tick-aggregated candles per token+interval in live-feed fallback path
 
         # WebSocket thread
         self._thread: Optional[threading.Thread] = None

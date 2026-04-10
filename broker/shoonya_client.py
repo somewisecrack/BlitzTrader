@@ -303,30 +303,83 @@ class ShoonyaClient:
             {"exchange": "NFO", "token": "66691", "tsym": "NIFTY28APR26F",
              "expiry": "28-APR-2026", "name": "NIFTY"}
 
+        Strict filtering rules (to avoid NIFTYNXT50, FINNIFTY, MIDCPNIFTY, etc.):
+          - instname must be exactly "FUTIDX"
+          - tsym must start with exactly the requested symbol prefix followed
+            immediately by a digit (month-year or day pattern), NOT by letters.
+            e.g. for "NIFTY": NIFTY28APR26F matches (tsym[5] is a digit),
+            but NIFTYNXT50..., FINNIFTY..., MIDCPNIFTY... do NOT match.
+          - symname field (if present) must also match the exact symbol.
+
         Returns None if login not done or no contract found.
         """
         import datetime as _dt
+        import re as _re
 
-        results = self.search_scrip("NFO", symbol)
+        sym_upper = symbol.upper()
+        # Pattern: symbol prefix immediately followed by a digit
+        # e.g. NIFTY28APR26F → "NIFTY" + "2" (digit) ✓
+        #       NIFTYNXT50...  → "NIFTY" + "N" (letter) ✗
+        prefix_digit_re = _re.compile(r"^" + _re.escape(sym_upper) + r"\d")
+
+        results = self.search_scrip("NFO", sym_upper)
+        raw_count = len(results) if results else 0
+        logger.info(
+            f"get_front_month_futures_token({sym_upper}): "
+            f"search_scrip returned {raw_count} raw candidate(s)"
+        )
+
         if not results:
-            logger.error(f"get_front_month_futures_token: no NFO results for {symbol}")
+            logger.error(
+                f"get_front_month_futures_token: no NFO results for {sym_upper}"
+            )
             return None
 
         today = _dt.date.today()
         candidates = []
         for r in results:
+            tsym = r.get("tsym", "")
+
+            # 1. Must be a futures contract
             if r.get("instname") != "FUTIDX":
                 continue
+
+            # 2. tsym must start with EXACTLY the symbol followed by a digit
+            #    (rejects NIFTYNXT50, FINNIFTY, MIDCPNIFTY, BANKNIFTY when asking for NIFTY, etc.)
+            if not prefix_digit_re.match(tsym):
+                logger.debug(
+                    f"  Skipping {tsym!r}: tsym prefix does not match "
+                    f"^{sym_upper}\\d pattern"
+                )
+                continue
+
+            # 3. Parse expiry date
             exd = r.get("exd", "")          # e.g. "28-APR-2026"
             try:
                 expiry = _dt.datetime.strptime(exd, "%d-%b-%Y").date()
             except ValueError:
+                logger.debug(f"  Skipping {tsym!r}: cannot parse expiry {exd!r}")
                 continue
+
             if expiry >= today:
                 candidates.append((expiry, r))
 
+        filtered_count = len(candidates)
+        logger.info(
+            f"get_front_month_futures_token({sym_upper}): "
+            f"{filtered_count} candidate(s) after instname+prefix filter"
+        )
+
         if not candidates:
-            logger.error(f"get_front_month_futures_token: no live FUTIDX for {symbol}")
+            logger.error(
+                f"get_front_month_futures_token: no live FUTIDX for {sym_upper} "
+                f"after strict filtering. Raw candidates were:"
+            )
+            for r in (results or []):
+                logger.error(
+                    f"  tsym={r.get('tsym')!r} instname={r.get('instname')!r} "
+                    f"exd={r.get('exd')!r} symname={r.get('symname')!r}"
+                )
             return None
 
         candidates.sort(key=lambda x: x[0])
@@ -336,10 +389,10 @@ class ShoonyaClient:
             "token":    scrip["token"],
             "tsym":     scrip.get("tsym", ""),
             "expiry":   scrip.get("exd", ""),
-            "name":     symbol.upper(),
+            "name":     sym_upper,
         }
         logger.info(
-            f"Front-month futures: {symbol} → {info['tsym']} "
+            f"Front-month futures: {sym_upper} → {info['tsym']} "
             f"(token {info['token']}, expiry {info['expiry']})"
         )
         return info

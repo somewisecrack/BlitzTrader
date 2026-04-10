@@ -133,8 +133,11 @@ class ToolRegistry:
             {
                 "name": "get_option_chain",
                 "description": (
+                    "INFORMATIONAL ONLY — not used for live execution. "
                     "Get full option chain with strikes, LTP, bid, ask, OI for a given "
-                    "index and expiry. Returns chain of CE and PE options around ATM."
+                    "index and expiry. Use this only for market context (e.g. checking IV, "
+                    "PCR, OI distribution). DO NOT call this before placing a trade — "
+                    "all orders use futures contracts directly via place_virtual_order()."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -317,17 +320,19 @@ class ToolRegistry:
             {
                 "name": "place_virtual_order",
                 "description": (
-                    "Place a virtual order. MARKET fills immediately at best bid/ask midpoint. "
+                    "Place a virtual FUTURES order. MARKET fills immediately at best bid/ask midpoint. "
                     "LIMIT fills only if LTP touches price within 5 minutes, else auto-cancels. "
                     "Hard guardrails enforced: max 2 positions, no entry after 15:05 IST, "
-                    "daily loss limit, position size limit."
+                    "daily loss limit, position size limit. "
+                    "FUTURES ONLY: symbol must be the futures tsym (e.g. NIFTY28APR26F). "
+                    "Options (CE/PE) are BLOCKED — do not pass CE/PE symbols."
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Trading symbol (e.g., 'NIFTY27MAR24500CE')",
+                            "description": "Futures trading symbol (e.g. 'NIFTY28APR26F'). Options are blocked.",
                         },
                         "direction": {
                             "type": "string",

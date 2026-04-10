@@ -27,6 +27,7 @@ class DataRecorder:
         "recorded_at",
         "token",
         "symbol",
+        "tradingsymbol",
         "ltp",
         "best_bid",
         "best_ask",
@@ -46,6 +47,8 @@ class DataRecorder:
         "symbol",
         "interval",
         "time",
+        "signal_date",
+        "signal_datetime_ist",
         "strategy",
         "direction",
         "entry_reference",
@@ -69,11 +72,20 @@ class DataRecorder:
         self._drive_dir = Path(google_drive_upload_dir).expanduser() if google_drive_upload_dir else None
         self._rclone_remote = rclone_remote.strip()
         self._rclone_folder = rclone_folder.strip().strip("/")
-        self._token_to_symbol = {
-            str(info.get("token")): symbol
-            for symbol, info in nse_tokens.items()
-            if info.get("token")
-        }
+
+        # Build two lookup maps from token:
+        #   token → logical symbol name  (e.g. "66691" → "NIFTY")
+        #   token → futures tsym          (e.g. "66691" → "NIFTY28APR26F")
+        self._token_to_symbol: dict[str, str] = {}
+        self._token_to_tsym: dict[str, str] = {}
+        for symbol, info in nse_tokens.items():
+            tok = str(info.get("token", "") or "")
+            if tok:
+                self._token_to_symbol[tok] = symbol
+                tsym = info.get("tsym", "")
+                if tsym:
+                    self._token_to_tsym[tok] = tsym
+
         self._lock = threading.Lock()
         self._uploaded = False
         self._date = datetime.now(IST).strftime("%Y%m%d")
@@ -82,17 +94,36 @@ class DataRecorder:
         self._indicator_fields = set()
         self._indicator_header_fields: list[str] = []
 
+    def update_token_map(self, nse_tokens: dict) -> None:
+        """Update the token→symbol mapping (call after futures tokens are resolved)."""
+        with self._lock:
+            for symbol, info in nse_tokens.items():
+                tok = str(info.get("token", "") or "")
+                if tok:
+                    self._token_to_symbol[tok] = symbol
+                    tsym = info.get("tsym", "")
+                    if tsym:
+                        self._token_to_tsym[tok] = tsym
+
     @property
     def day_dir(self) -> Path:
         return self._day_dir
 
     def record_feed_tick(self, token: str, quote: dict) -> None:
-        """Append one live-feed tick/merged quote to feed_ticks.csv."""
+        """Append one live-feed tick/merged quote to feed_ticks.csv.
+
+        Each row includes:
+          symbol:         logical name (NIFTY / BANKNIFTY / INDIA VIX)
+          tradingsymbol:  actual futures tsym (e.g. NIFTY28APR26F) — blank for index tokens
+          token:          numeric Shoonya token
+        """
         try:
+            tok_str = str(token)
             row = {
                 "recorded_at": self._now(),
                 "token": token,
-                "symbol": self._token_to_symbol.get(str(token), ""),
+                "symbol": self._token_to_symbol.get(tok_str, ""),
+                "tradingsymbol": self._token_to_tsym.get(tok_str, ""),
                 "ltp": quote.get("ltp"),
                 "best_bid": quote.get("best_bid"),
                 "best_ask": quote.get("best_ask"),
@@ -145,6 +176,8 @@ class DataRecorder:
                     "symbol": signal.get("symbol"),
                     "interval": signal.get("interval"),
                     "time": signal.get("time"),
+                    "signal_date": signal.get("signal_date"),
+                    "signal_datetime_ist": signal.get("signal_datetime_ist"),
                     "strategy": signal.get("strategy"),
                     "direction": signal.get("direction"),
                     "entry_reference": signal.get("entry_reference"),

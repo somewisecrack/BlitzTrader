@@ -253,6 +253,10 @@ class BlitzTrader:
         self._feed.subscribe(subscribe_tokens)
         logger.info(f"✓ WebSocket feed started, subscribed to {len(subscribe_tokens)} tokens")
 
+        # Update recorder token map now that futures tsyms are resolved
+        # (DataRecorder was created before futures lookup — update it now)
+        self._data_recorder.update_token_map(active_tokens)
+
         # 3. State manager
         self._state = StateManager(STATE_FILE, VIRTUAL_CAPITAL)
         self._state.init_state()
@@ -270,7 +274,7 @@ class BlitzTrader:
         )
         self._market_data = market_data
 
-        # 6. Order execution tools
+        # 6. Order execution tools (pass active_tokens so futures tsym resolves correctly)
         self._order_exec = OrderExecutionTools(
             state_manager=self._state,
             virtual_ledger=ledger,
@@ -280,6 +284,7 @@ class BlitzTrader:
             max_risk_amount=VIRTUAL_CAPITAL * MAX_RISK_PCT,
             max_daily_loss=MAX_DAILY_LOSS_AMOUNT,
             no_entry_after=NO_NEW_ENTRY_AFTER,
+            active_tokens=active_tokens,
         )
 
         # 7. Journal (with state_manager for ground-truth injection)

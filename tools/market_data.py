@@ -878,11 +878,16 @@ class MarketDataTools:
             self._emitted_signals.add(sig_key)
             tool_interval = "3" if interval == "daily-first-hour" else str(interval)
             signal_timeframe = "daily-first-hour" if interval == "daily-first-hour" else f"{interval}min"
+            # Candle timestamp → IST datetime string (date + time for unambiguous audit trail).
+            # Uses candle["time"] (Unix epoch from ssboe or parsed time field), NOT datetime.now().
+            _candle_ist = datetime.datetime.fromtimestamp(candle["time"], IST)
             signals.append({
                 "symbol": sym,
                 "interval": tool_interval,
                 "signal_timeframe": signal_timeframe,
-                "time": datetime.datetime.fromtimestamp(candle["time"], IST).strftime("%H:%M:%S"),
+                "time": _candle_ist.strftime("%H:%M:%S"),
+                "signal_date": _candle_ist.strftime("%Y-%m-%d"),
+                "signal_datetime_ist": _candle_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
                 "strategy": strategy,
                 "direction": direction,
                 "entry_reference": round(candle["close"], 2),

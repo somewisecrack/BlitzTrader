@@ -32,6 +32,7 @@ class OrderExecutionTools:
         max_risk_amount: float = 15000,  # 5% of 3L
         max_daily_loss: float = 15000,  # 5% of 3L
         no_entry_after: str = "15:05",
+        active_tokens: dict = None,
     ):
         self._state = state_manager
         self._ledger = virtual_ledger
@@ -42,6 +43,9 @@ class OrderExecutionTools:
         self._max_daily_loss = max_daily_loss
         self._no_entry_after = no_entry_after
 
+        # active_tokens: {symbol: {exchange, token, tsym, ...}}
+        # Pre-populated with resolved futures tokens from main.py
+        self._active_tokens = active_tokens or {}
         self._token_cache = {}
 
         # Limit order monitoring
@@ -123,7 +127,8 @@ class OrderExecutionTools:
         """
         Place a virtual order (MARKET or LIMIT).
 
-        :param symbol:     Trading symbol (e.g., 'NIFTY27MAR24500CE')
+        :param symbol:     Futures trading symbol (e.g., 'NIFTY28APR26F').
+                           Options (CE/PE) are BLOCKED — use futures tsym only.
         :param direction:  'BUY' or 'SELL'
         :param quantity:    Number of units
         :param order_type: 'MARKET' or 'LIMIT'
@@ -144,12 +149,19 @@ class OrderExecutionTools:
         if quantity <= 0:
             return {"error": f"Invalid quantity: {quantity}. Must be positive."}
 
-        # Enforce Options-Only Guardrail (No Futures)
+        # Enforce Futures-Only Guardrail: only NIFTY/BANKNIFTY futures are allowed.
+        # Options (CE/PE) are NOT permitted for live execution.
         sym_up = symbol.upper().strip()
         if not (sym_up.startswith("NIFTY") or sym_up.startswith("BANKNIFTY")):
             return {"error": "BLOCKED: Only NIFTY and BANKNIFTY instruments are allowed.", "status": "REJECTED"}
-        if "FUT" in sym_up:
-            return {"error": "BLOCKED: Only Options are allowed. Futures (FUT) are disabled by user.", "status": "REJECTED"}
+        if sym_up.endswith("CE") or sym_up.endswith("PE"):
+            return {
+                "error": (
+                    "BLOCKED: Options (CE/PE) are disabled for live execution. "
+                    "Use the resolved NIFTY/BANKNIFTY futures tsym (e.g. NIFTY28APR26F) instead."
+                ),
+                "status": "REJECTED",
+            }
 
         # Run state guardrails
         guardrail_error = self._check_guardrails(is_new_entry=True)
@@ -531,9 +543,31 @@ class OrderExecutionTools:
         return None
 
     def _resolve_token(self, symbol: str) -> Optional[str]:
-        """Resolve symbol to Shoonya token via search (cached)."""
+        """Resolve symbol to Shoonya token.
+
+        Priority:
+        1. active_tokens map (pre-resolved futures tokens from main.py)
+        2. In-memory token cache (from previous searches)
+        3. search_scrip API (NFO first, then NSE)
+        """
         if symbol in self._token_cache:
             return self._token_cache[symbol]
+
+        # Check active_tokens map first (handles futures tsym lookups like NIFTY28APR26F)
+        sym_up = symbol.upper()
+        for logical, info in self._active_tokens.items():
+            tsym = info.get("tsym", "")
+            if tsym and tsym.upper() == sym_up:
+                token = str(info.get("token", ""))
+                if token:
+                    self._token_cache[symbol] = token
+                    return token
+            # Also allow bare logical name (e.g. "NIFTY") to resolve to futures token
+            if logical.upper() == sym_up:
+                token = str(info.get("token", ""))
+                if token:
+                    self._token_cache[symbol] = token
+                    return token
 
         results = self._client.search_scrip("NFO", symbol)
         if not results:
@@ -545,9 +579,21 @@ class OrderExecutionTools:
         return None
 
     def _resolve_exchange(self, symbol: str) -> str:
-        """Determine exchange for a symbol."""
+        """Determine exchange for a symbol.
+
+        Futures tsyms (e.g. NIFTY28APR26F, BANKNIFTY28APR26F) end with 'F'
+        and contain month-year digits; they trade on NFO.
+        Options (CE/PE suffixes) also trade on NFO.
+        Bare index names (NIFTY, BANKNIFTY) are on NSE.
+        """
         sym = symbol.upper()
-        if any(x in sym for x in ["CE", "PE", "FUT"]):
+        if any(x in sym for x in ["CE", "PE"]):
+            return "NFO"
+        # Futures tsym: ends with 'F' and has digits before it (e.g. NIFTY28APR26F)
+        if sym.endswith("F") and any(c.isdigit() for c in sym):
+            return "NFO"
+        # Explicit FUT keyword
+        if "FUT" in sym:
             return "NFO"
         return "NSE"
 

@@ -1,9 +1,12 @@
 # NSE Intraday Trading Rules — BlitzTrader
 
 ## Instruments
-- **NIFTY** options and futures (lot size: 25)
-- **BANKNIFTY** options and futures (lot size: 15)
-- Weekly expiry options preferred for intraday (higher gamma, lower premium)
+- **NIFTY** futures (lot size: 25) — front-month FUTIDX, e.g. NIFTY28APR26F
+- **BANKNIFTY** futures (lot size: 15) — front-month FUTIDX, e.g. BANKNIFTY28APR26F
+
+> **LIVE EXECUTION NOTE:** All entries and exits are placed on FUTURES contracts only.
+> Options (CE/PE) are blocked at the guardrail level. Use the futures tsym (e.g. NIFTY28APR26F)
+> directly in place_virtual_order(). Do NOT call get_option_chain() as part of the entry flow.
 
 ## Session Phases
 
@@ -27,22 +30,22 @@
 ### Breakout Long
 - Price breaks above previous day high (PDH) or a consolidation range
 - Confirm with: volume spike, VIX stable or declining, BANKNIFTY confirming
-- Entry: Buy ATM or slightly OTM CE on pullback to breakout level
-- Stop: Below breakout level minus 0.5× ATR
+- Entry: BUY NIFTY/BANKNIFTY futures (tsym e.g. NIFTY28APR26F) on pullback to breakout level
+- Stop: Below breakout level minus 0.5× ATR (futures price level)
 - Target: 1.5× to 2× risk
 
 ### Breakdown Short
 - Price breaks below previous day low (PDL) or support
 - Confirm with: VIX rising, breadth negative, NIFTY/BANKNIFTY diverging
-- Entry: Buy ATM or slightly OTM PE on pullback to breakdown level
-- Stop: Above breakdown level plus 0.5× ATR
+- Entry: SELL NIFTY/BANKNIFTY futures (tsym e.g. NIFTY28APR26F) on pullback to breakdown level
+- Stop: Above breakdown level plus 0.5× ATR (futures price level)
 - Target: 1.5× to 2× risk
 
 ### Mean Reversion
 - Price extended 1.5× ATR from VWAP
 - RSI divergence on 5-min chart
-- Entry: Fade the move with ATM option
-- Stop: Beyond the extreme
+- Entry: Counter-trend trade on futures at extreme, using ATR-based stop
+- Stop: Beyond the extreme (futures price level)
 - Target: VWAP retest
 
 ## Risk Rules
@@ -50,7 +53,7 @@
 - Max 2 simultaneous positions
 - If daily loss hits 5% (₹15,000), stop all trading
 - Always define stop loss BEFORE entry
-- Prefer options buying (defined max loss = premium paid)
+- Trade futures with defined stop-loss (risk = |entry - SL| × quantity)
 
 ## Market Regime Filters
 - **VIX < 13**: Low vol environment. Breakouts may fail. Prefer mean reversion.
