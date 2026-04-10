@@ -1,6 +1,8 @@
 ---
-description: Counter Bear Trap long setup for Nifty & Bank Nifty.
+description: Counter Bear Trap long setup for Nifty & Bank Nifty. Best on NIFTY short timeframe.
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-02: Counter Bear Trap (Long)
 **Source**: Day-Trading Stocks PDF  
@@ -35,4 +37,4 @@ description: Counter Bear Trap long setup for Nifty & Bank Nifty.
 
 ## 💡 Notes
 - Mirror of VP-01. Bears got trapped when price reversed above the large red candle's close.
-- Significantly weaker than the Bull Trap version. Only trade NIFTY 2m.
+- Significantly weaker than the Bull Trap version. Best on NIFTY short timeframe (backtested 2m; live uses 3m).

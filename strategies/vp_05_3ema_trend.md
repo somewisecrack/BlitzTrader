@@ -1,6 +1,8 @@
 ---
-description: 3-EMA Trend Following pullback. Best on NIFTY 2m (50% WR, PF 1.84).
+description: 3-EMA Trend Following pullback. Best on NIFTY short timeframe (50% WR, PF 1.84 backtested on 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-05: 3-EMA Trend Following ⭐
 **Source**: 1-Minute Scalping PDF  

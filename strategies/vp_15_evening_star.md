@@ -1,6 +1,8 @@
 ---
-description: Evening Star 3-candle bearish reversal. Top performer on BANKNIFTY 2m (PF 1.89).
+description: Evening Star 3-candle bearish reversal. Top performer on BANKNIFTY short-TF (PF 1.89, backtested 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-15: Evening Star (Bearish Reversal) ⭐
 **Source**: 25 Day Trading Strategies PDF  

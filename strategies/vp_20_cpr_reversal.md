@@ -1,6 +1,8 @@
 ---
-description: CPR (Central Pivot Range) Reversal. Works best on BANKNIFTY 2m (PF 1.75).
+description: CPR (Central Pivot Range) Reversal. Works best on BANKNIFTY short-TF (PF 1.75, backtested 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-20: CPR Reversal
 **Source**: 25 Day Trading Strategies PDF  
@@ -38,5 +40,5 @@ description: CPR (Central Pivot Range) Reversal. Works best on BANKNIFTY 2m (PF 
 
 ## 💡 Notes
 - Most powerful on **Narrow CPR days** (CPR width < 50% of 10-day avg).
-- BANKNIFTY 2m is the only combination worth systematic trading.
+- BANKNIFTY short timeframe (3m live) is the only combination worth systematic trading.
 - Premium, low-frequency setup — treat each signal as high value.

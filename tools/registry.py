@@ -200,7 +200,8 @@ class ToolRegistry:
             {
                 "name": "get_indicators",
                 "description": (
-                    "Get all technical indicators for a symbol computed from live candles. "
+                    "Get all technical indicators for a symbol computed from Shoonya REST candles "
+                    "(primary source, multi-day history) with live-feed candles as fallback. "
                     "ALWAYS call this before evaluating any strategy. Returns: "
                     "EMA20/50/100 (trend, stacking), RSI14 (momentum), ATR14 (SL sizing), "
                     "ADX14 (trend strength), VWAP (intraday bias), avg_volume_20 (VSA), "

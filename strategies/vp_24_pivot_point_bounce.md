@@ -1,6 +1,8 @@
 ---
-description: Pivot Point Bounce. Outstanding on BANKNIFTY 2m (PF 2.14, 54% WR).
+description: Pivot Point Bounce. Outstanding on BANKNIFTY short-TF (PF 2.14, 54% WR, backtested 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-24: Pivot Point Bounce ⭐ TOP PERFORMER
 **Source**: 25 Day Trading Strategies PDF  

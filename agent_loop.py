@@ -223,8 +223,9 @@ class AgentLoop:
                     if "perday" in err_str or "per_day" in err_str or "GenerateRequestsPerDay" in str(e):
                         logger.error(
                             f"Gemini DAILY quota exhausted — no retries until midnight UTC. "
-                            f"Check billing at https://console.cloud.google.com/billing. "
-                            f"Consider switching GEMINI_MODEL to gemini-2.0-flash (1500 RPD free tier)."
+                            f"Check quota usage at https://ai.dev/rate-limit and billing at "
+                            f"https://console.cloud.google.com/billing. Ensure a paid-tier API "
+                            f"key is set in GEMINI_API_KEY (current model: {model})."
                         )
                         return None
                     if attempt < max_retries - 1:

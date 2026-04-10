@@ -1,6 +1,8 @@
 ---
-description: V Reversal (capitulation bottom). Best on BANKNIFTY 2m and 15m.
+description: V Reversal (capitulation bottom). Best on BANKNIFTY short-TF and 15m (backtested 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-08: V Reversal
 **Source**: 1-Minute Scalping PDF  

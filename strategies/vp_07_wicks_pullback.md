@@ -1,6 +1,8 @@
 ---
-description: Wicks Pullback. Best performer overall — BANKNIFTY 2m PF 1.96, +5171 pts.
+description: Wicks Pullback. Best performer overall — BANKNIFTY short-TF PF 1.96, +5171 pts (backtested 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-07: Wicks Pullback ⭐ TOP PERFORMER
 **Source**: 1-Minute Scalping PDF  
@@ -36,6 +38,6 @@ description: Wicks Pullback. Best performer overall — BANKNIFTY 2m PF 1.96, +5
 
 ## 💡 Notes
 - Wick candle = institutional order. Follow-through candle = smart money adding.
-- BANKNIFTY 2m is by far the best — high volatility amplifies wick signals.
+- BANKNIFTY short timeframe (3m live) is by far the best — high volatility amplifies wick signals.
 - Trend continuation setup — always trade in EMA20 direction.
 - Positive PF across ALL 6 tested combinations.

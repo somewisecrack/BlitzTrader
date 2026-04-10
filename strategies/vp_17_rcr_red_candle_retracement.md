@@ -1,6 +1,8 @@
 ---
-description: RCR (Red Candle Retracement). 50% pullback short re-entry. NIFTY 2m/5m only.
+description: RCR (Red Candle Retracement). 50% pullback short re-entry. NIFTY short-TF/5m only (backtested 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-17: RCR — Red Candle Retracement
 **Source**: 25 Day Trading Strategies PDF  

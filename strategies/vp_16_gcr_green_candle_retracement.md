@@ -1,6 +1,8 @@
 ---
-description: GCR (Green Candle Retracement). 50% pullback re-entry. 2m only.
+description: GCR (Green Candle Retracement). 50% pullback re-entry. Short timeframe only (backtested 2m; live uses 3m).
 ---
+
+> **Live trading note (Apr 2026):** Backtests used 2m candles. Live engine runs on **3m candles** — treat all "2m" references as 3m.
 
 # VP-16: GCR — Green Candle Retracement
 **Source**: 25 Day Trading Strategies PDF  
