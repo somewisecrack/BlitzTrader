@@ -1,12 +1,13 @@
 # BlitzTrader
 
-An autonomous AI trading agent for NSE intraday options (NIFTY / BANKNIFTY), powered by Gemini 2.5 Flash and deployed on Google Cloud Platform.
+An autonomous AI trading agent for NSE intraday **FUTURES** (NIFTY / BANKNIFTY), powered by Gemini 2.5 Flash and deployed on Google Cloud Platform.
 
 ## What it does
 
 - Runs every trading day via a systemd timer on a GCP VM
 - Logs into Shoonya (Finvasia) broker API at session start
-- Uses a Claude Haiku ReAct loop to analyze market conditions and place / manage options trades
+- Resolves front-month NIFTY and BANKNIFTY futures contracts at startup
+- Uses a Gemini ReAct loop to analyze market conditions and place / manage **futures trades only**
 - Sends real-time alerts and responds to commands via a Telegram bot
 - Writes a daily trading journal and maintains cross-session memory so it learns from past sessions
 
@@ -17,8 +18,8 @@ systemd timer (9:00 AM IST, Mon–Fri)
         │
         ▼
     main.py
-    ├── Startup phase      — load memory, strategy docs, set session goals
-    ├── Trading loop       — 15-min scheduled iterations + 3s Telegram poll
+    ├── Startup phase      — login, resolve futures tokens, load memory, set session goals
+    ├── Trading loop       — background scanner every 60s + LLM every 5min + Telegram poll
     │     ├── AgentLoop    — Gemini 2.5 Flash ReAct (Reason → Tool → Observe)
     │     ├── ToolRegistry — market data, order execution, journaling, Telegram
     │     └── LiveFeed     — WebSocket price stream from Shoonya
@@ -31,25 +32,34 @@ systemd timer (9:00 AM IST, Mon–Fri)
 |---|---|
 | Model | `gemini-2.5-flash` |
 | Broker | Shoonya (Finvasia) via `NorenRestApiPy` |
-| Exchange | NSE — NIFTY & BANKNIFTY options |
+| Exchange | NFO — NIFTY & BANKNIFTY front-month futures |
 | Capital | ₹3,00,000 virtual tracked |
-| Risk | 2% per trade (₹6,000 max), 5% daily stop (₹15,000) |
-| Instruments | NIFTY 25-lot, BANKNIFTY 15-lot |
-| Trading window | 9:30 AM – 3:05 PM IST (no entries in first 15 min) |
+| Risk | 5% per trade (₹15,000 max), 5% daily stop (₹15,000) |
+| Instruments | NIFTY 25-lot futures, BANKNIFTY 15-lot futures |
+| Execution | Futures-only guardrail: CE/PE and bare index names are hard-blocked |
+| Trading window | 9:15 AM – 3:05 PM IST (CAUTION in first 15 min) |
 | Telegram | Real-time alerts + conversational Q&A |
 | Memory | Cross-session `journals/memory.md` |
 
+## Execution enforcement
+
+BlitzTrader is **futures-only**. Two hard guardrails are enforced in Python (not LLM-side):
+
+1. `place_virtual_order()` rejects any symbol ending in `CE` or `PE`.
+2. `place_virtual_order()` rejects bare logical names (`NIFTY`, `BANKNIFTY`, etc.) — the agent must use the resolved futures tsym (e.g. `NIFTY28APR26F`).
+
+The active futures tsym is resolved at startup via `get_front_month_futures_token()` and surfaced in every iteration context under `ACTIVE FUTURES INSTRUMENTS`.
+
 ## Strategies
 
-All intraday, NSE-specific:
+All intraday, executed on NIFTY / BANKNIFTY futures:
 
 - **80-20 Reversal** — gap open reversal when price opens in top/bottom 20% of prior range
-- **Momentum Pinball** — RSI < 30 / > 70 mean-reversion with first-hour breakout confirmation
+- **Momentum Pinball** — LBR/RSI < 30 / > 70 mean-reversion with first-hour breakout confirmation
 - **VPA Hanging Man** — volume-price analysis: hanging man candle with climax volume
 - **VPA No Demand** — narrow spread up-bar on low volume = weakness signal
 - **VSA Shakeout** — smart money shakeout pattern (intraday variant, 74% WR)
 - **VSA Upthrust / Hidden Upthrust / Buying Climax / Bag Holding** — VSA confluence signals
-- **NSE Intraday Rules** — VIX regime awareness, option symbol formatting, position sizing
 
 ## Setup
 
@@ -120,7 +130,7 @@ GEMINI_API_KEY
 
 ## Cost
 
-Approximately **$15–20 / month** on Gemini 2.5 Flash with 15-minute iteration intervals and per-iteration context reset.
+Approximately **$15–20 / month** on Gemini 2.5 Flash with 5-minute LLM iteration intervals and per-iteration context reset.
 
 ## Disclaimer
 

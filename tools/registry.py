@@ -133,11 +133,12 @@ class ToolRegistry:
             {
                 "name": "get_option_chain",
                 "description": (
-                    "INFORMATIONAL ONLY — not used for live execution. "
+                    "LEGACY/INFORMATIONAL ONLY — removed from live agent tool list. "
+                    "Do not call this for trade entry. "
                     "Get full option chain with strikes, LTP, bid, ask, OI for a given "
-                    "index and expiry. Use this only for market context (e.g. checking IV, "
-                    "PCR, OI distribution). DO NOT call this before placing a trade — "
-                    "all orders use futures contracts directly via place_virtual_order()."
+                    "index and expiry. May be used manually for market context (e.g. checking IV, "
+                    "PCR, OI distribution) but has NO role in the live execution path. "
+                    "All orders use futures contracts directly via place_virtual_order()."
                 ),
                 "input_schema": {
                     "type": "object",

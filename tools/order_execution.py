@@ -16,6 +16,10 @@ logger = logging.getLogger("BlitzTrader.OrderExecution")
 
 IST = pytz.timezone("Asia/Kolkata")
 
+# Known bare logical names that must not be used directly for execution.
+# Callers must use the resolved futures tsym (e.g. NIFTY28APR26F).
+_BARE_LOGICAL_NAMES = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+
 
 class OrderExecutionTools:
     """
@@ -152,6 +156,19 @@ class OrderExecutionTools:
         # Enforce Futures-Only Guardrail: only NIFTY/BANKNIFTY futures are allowed.
         # Options (CE/PE) are NOT permitted for live execution.
         sym_up = symbol.upper().strip()
+
+        # Reject bare logical names — caller must use the resolved futures tsym.
+        if sym_up in _BARE_LOGICAL_NAMES:
+            return {
+                "error": (
+                    f"BLOCKED: bare logical name '{symbol}' not accepted. "
+                    f"Use the resolved futures tsym "
+                    f"(e.g. NIFTY28APR26F, BANKNIFTY28APR26F). "
+                    f"Check the ACTIVE FUTURES INSTRUMENTS section in context for the correct tsym."
+                ),
+                "status": "REJECTED",
+            }
+
         if not (sym_up.startswith("NIFTY") or sym_up.startswith("BANKNIFTY")):
             return {"error": "BLOCKED: Only NIFTY and BANKNIFTY instruments are allowed.", "status": "REJECTED"}
         if sym_up.endswith("CE") or sym_up.endswith("PE"):

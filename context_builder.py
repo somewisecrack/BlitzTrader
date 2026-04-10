@@ -131,7 +131,9 @@ NEVER invent trades, P&L, win rates, or symbols. Before ANY performance report:
 3. If trades=0, say "No trades today" — do not invent any
 The system auto-appends verified data to your messages. The trader cross-checks.
 
-Available tools: get_spot_price, get_option_chain, get_quote, get_candles, get_indicators, get_strategy_signals, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, place_virtual_order, cancel_order, close_position, close_all_positions, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision"""
+Available tools: get_spot_price, get_quote, get_candles, get_indicators, get_strategy_signals, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, place_virtual_order, cancel_order, close_position, close_all_positions, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision
+
+NOTE: get_option_chain is NOT in the live tool list. It is a legacy/informational utility only and has NO role in trade entry or execution."""
 
 
 def build_startup_context() -> str:
@@ -165,6 +167,7 @@ def build_iteration_context(
     order_execution,
     goal_manager=None,
     pending_signals: list = None,
+    active_tokens: dict = None,
 ) -> str:
     """
     Build the scheduled market analysis context.
@@ -223,6 +226,21 @@ def build_iteration_context(
 
     market_phase = _get_market_phase(now)
 
+    # Build active futures section from resolved tokens
+    futures_section = ""
+    if active_tokens:
+        lines = ["ACTIVE FUTURES INSTRUMENTS:"]
+        for sym in ("NIFTY", "BANKNIFTY"):
+            info = active_tokens.get(sym)
+            if info and info.get("tsym"):
+                tsym = info["tsym"]
+                token = info.get("token", "N/A")
+                exchange = info.get("exchange", "NFO")
+                lines.append(f"  {sym:<12} → {tsym:<22} ({exchange}, token: {token})")
+        if len(lines) > 1:
+            lines.append("Use these exact tsym strings when calling place_virtual_order().")
+            futures_section = "\n" + "\n".join(lines) + "\n"
+
     # Build the signal section — pre-injected by background scanner or absent
     if pending_signals:
         import json as _json
@@ -276,7 +294,7 @@ Market phase: {market_phase}
 Session P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)
 Open positions: {pos_summary}
 Trades today: {trade_count}
-Virtual balance available: ₹{available:,.2f}{pending_summary}{goals_section}{command_context}{signal_section}
+Virtual balance available: ₹{available:,.2f}{pending_summary}{futures_section}{goals_section}{command_context}{signal_section}
 {analysis_sequence}
 
 IMPORTANT: Be silent in this iteration unless you have an ACTION:

@@ -102,6 +102,7 @@ class BlitzTrader:
         self._journal = None
         self._goals = None
         self._data_recorder = None
+        self._active_tokens = None
 
     def run(self):
         """Run the full trading session."""
@@ -245,6 +246,9 @@ class BlitzTrader:
                 )
             else:
                 logger.warning(f"Futures lookup failed for {sym} — using index token")
+
+        # Store resolved tokens so the iteration context can surface them to the agent.
+        self._active_tokens = active_tokens
 
         subscribe_tokens = [
             (info["exchange"], info["token"])
@@ -508,6 +512,7 @@ class BlitzTrader:
                         order_execution=self._order_exec,
                         goal_manager=self._goals,
                         pending_signals=pending_signals if pending_signals else None,
+                        active_tokens=self._active_tokens,
                     )
                     # Clear only after context is built and iteration succeeds.
                     # Captured here so that on failure the signals remain in
