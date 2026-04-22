@@ -6,6 +6,8 @@ The model reasons, calls tools, observes results, and acts.
 """
 import json
 import logging
+import queue
+import threading
 import time
 
 from google import genai
@@ -84,6 +86,7 @@ class AgentLoop:
         system_prompt: str,
         max_tool_rounds: int = 10,
         max_tokens: int = 8192,
+        api_timeout_seconds: int = 45,
     ):
         self._client = genai.Client(api_key=api_key)
         self._model = model
@@ -91,6 +94,7 @@ class AgentLoop:
         self._system_prompt = system_prompt
         self._max_tool_rounds = max_tool_rounds
         self._max_tokens = max_tokens
+        self._api_timeout_seconds = api_timeout_seconds
 
         # Gemini conversation history
         self._history: list[types.Content] = []
@@ -98,18 +102,29 @@ class AgentLoop:
         # Token tracking
         self._total_input_tokens = 0
         self._total_output_tokens = 0
+        self._last_error: dict | None = None
 
-    def run_iteration(self, user_message: str) -> str:
+    def run_iteration(
+        self,
+        user_message: str,
+        model: str = None,
+        max_tokens: int = None,
+        max_tool_rounds: int = None,
+    ) -> str:
         """
         Run one complete agent iteration.
         Each iteration starts fresh to keep context clean.
         """
         # Start fresh each iteration
         self._history = []
+        self._last_error = None
 
         tool_defs = self._registry.get_tool_definitions()
         gemini_tools = _build_gemini_tools(tool_defs)
         final_text = ""
+        active_model = model or self._model
+        active_max_tokens = max_tokens or self._max_tokens
+        active_max_tool_rounds = max_tool_rounds or self._max_tool_rounds
 
         # Add user message
         self._history.append(types.Content(
@@ -117,8 +132,19 @@ class AgentLoop:
             parts=[types.Part.from_text(text=user_message)],
         ))
 
-        for round_num in range(self._max_tool_rounds):
-            response = self._call_with_retry(gemini_tools)
+        logger.info(
+            "Starting Gemini iteration model=%s max_tokens=%s max_tool_rounds=%s",
+            active_model,
+            active_max_tokens,
+            active_max_tool_rounds,
+        )
+
+        for round_num in range(active_max_tool_rounds):
+            response = self._call_with_retry(
+                gemini_tools,
+                model=active_model,
+                max_tokens=active_max_tokens,
+            )
             if response is None:
                 logger.warning("API call returned None — ending iteration gracefully")
                 break
@@ -194,38 +220,116 @@ class AgentLoop:
             ))
         else:
             logger.warning(
-                f"Agent hit max tool rounds ({self._max_tool_rounds}), forcing stop"
+                f"Agent hit max tool rounds ({active_max_tool_rounds}), forcing stop"
             )
 
         return final_text
 
-    def _call_with_retry(self, gemini_tools, max_retries: int = 3) -> object:
+    def _generate_content_with_timeout(
+        self,
+        *,
+        model: str,
+        contents,
+        config,
+    ):
+        """
+        Run Gemini in a daemon worker so a hung network/model call cannot freeze
+        the trading loop, Telegram handling, SL checks, or EOD cleanup.
+        """
+        result_q: queue.Queue = queue.Queue(maxsize=1)
+
+        def worker():
+            try:
+                result_q.put((
+                    "ok",
+                    self._client.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=config,
+                    ),
+                ))
+            except Exception as exc:
+                result_q.put(("err", exc))
+
+        thread = threading.Thread(
+            target=worker,
+            name="BlitzTrader-GeminiCall",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            status, payload = result_q.get(timeout=self._api_timeout_seconds)
+        except queue.Empty as exc:
+            raise TimeoutError(
+                f"Gemini API call timed out after {self._api_timeout_seconds}s"
+            ) from exc
+        if status == "err":
+            raise payload
+        return payload
+
+    def get_last_error(self) -> dict | None:
+        """Return the last API failure metadata for caller-side circuit breakers."""
+        return self._last_error
+
+    def _call_with_retry(
+        self,
+        gemini_tools,
+        model: str = None,
+        max_tokens: int = None,
+        max_retries: int = 3,
+    ) -> object:
         """Call Gemini API with retry on transient errors."""
         delay = 5
+        active_model = model or self._model
+        active_max_tokens = max_tokens or self._max_tokens
         for attempt in range(max_retries):
             try:
-                return self._client.models.generate_content(
-                    model=self._model,
+                return self._generate_content_with_timeout(
+                    model=active_model,
                     contents=self._history,
                     config=types.GenerateContentConfig(
                         system_instruction=self._system_prompt,
                         tools=gemini_tools,
-                        max_output_tokens=self._max_tokens,
+                        max_output_tokens=active_max_tokens,
                         temperature=0.3,
                     ),
                 )
             except Exception as e:
                 err_str = str(e).lower()
+                if isinstance(e, TimeoutError):
+                    self._last_error = {
+                        "kind": "api_timeout",
+                        "model": active_model,
+                        "message": str(e),
+                    }
+                    logger.error("%s — disabling retries for this call", e)
+                    return None
                 if "429" in str(e) or "resource" in err_str or "quota" in err_str:
+                    if "monthly spending cap" in err_str or "spend cap" in err_str:
+                        self._last_error = {
+                            "kind": "monthly_spending_cap",
+                            "model": active_model,
+                            "message": str(e),
+                        }
+                        logger.error(
+                            "Gemini monthly spending cap exceeded — disabling retries "
+                            "for this call. Manage the project spend cap in AI Studio."
+                        )
+                        return None
                     # Daily quota exhausted — retrying in 5/10s will never help.
-                    # Bail out immediately so the main loop can continue (with its
-                    # 5-minute interval) rather than blocking for 30+ seconds.
+                    # Bail out immediately so the main loop can continue rather
+                    # than blocking for 30+ seconds.
                     if "perday" in err_str or "per_day" in err_str or "GenerateRequestsPerDay" in str(e):
+                        self._last_error = {
+                            "kind": "daily_quota_exhausted",
+                            "model": active_model,
+                            "message": str(e),
+                        }
                         logger.error(
                             f"Gemini DAILY quota exhausted — no retries until midnight UTC. "
                             f"Check quota usage at https://ai.dev/rate-limit and billing at "
                             f"https://console.cloud.google.com/billing. Ensure a paid-tier API "
-                            f"key is set in GEMINI_API_KEY (current model: {model})."
+                            f"key is set in GEMINI_API_KEY (current model: {active_model})."
                         )
                         return None
                     if attempt < max_retries - 1:
@@ -240,6 +344,11 @@ class AgentLoop:
                         return None
                 else:
                     logger.error(f"Gemini API error: {e}")
+                    self._last_error = {
+                        "kind": "api_error",
+                        "model": active_model,
+                        "message": str(e),
+                    }
                     if attempt >= max_retries - 1:
                         return None
                     time.sleep(delay)

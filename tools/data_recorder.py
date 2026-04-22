@@ -1,11 +1,11 @@
 """
-tools/data_recorder.py - CSV audit recorder for market data and indicators.
+tools/data_recorder.py - Markdown audit recorder for market data and indicators.
 
-Writes every live-feed tick and every indicator payload the agent computes.
-At EOD it can copy the daily export folder to a mounted Google Drive path or
-use an rclone remote if configured.
+Writes every live-feed tick, indicator payload, and deterministic strategy
+signal the agent sees into append-only Markdown files. At EOD it can copy the
+daily export folder to a mounted Google Drive path or use an rclone remote if
+configured.
 """
-import csv
 import json
 import logging
 import shutil
@@ -21,7 +21,7 @@ IST = pytz.timezone("Asia/Kolkata")
 
 
 class DataRecorder:
-    """Thread-safe CSV recorder for feed ticks, indicators, and scanner signals."""
+    """Thread-safe Markdown recorder for feed ticks, indicators, and scanner signals."""
 
     FEED_FIELDS = [
         "recorded_at",
@@ -91,8 +91,6 @@ class DataRecorder:
         self._date = datetime.now(IST).strftime("%Y%m%d")
         self._day_dir = self._base_dir / self._date
         self._day_dir.mkdir(parents=True, exist_ok=True)
-        self._indicator_fields = set()
-        self._indicator_header_fields: list[str] = []
 
     def update_token_map(self, nse_tokens: dict) -> None:
         """Update the token→symbol mapping (call after futures tokens are resolved)."""
@@ -110,10 +108,10 @@ class DataRecorder:
         return self._day_dir
 
     def record_feed_tick(self, token: str, quote: dict) -> None:
-        """Append one live-feed tick/merged quote to feed_ticks.csv.
+        """Append one live-feed tick/merged quote to feed_ticks.md.
 
-        Each row includes:
-          symbol:         logical name (NIFTY / BANKNIFTY / INDIA VIX)
+        Each record includes:
+          symbol:         logical name (NIFTY / BANKNIFTY / FINNIFTY / INDIA VIX)
           tradingsymbol:  actual futures tsym (e.g. NIFTY28APR26F) — blank for index tokens
           token:          numeric Shoonya token
         """
@@ -136,14 +134,19 @@ class DataRecorder:
                 "low": quote.get("low"),
                 "prev_close": quote.get("prev_close"),
                 "feed_timestamp": quote.get("timestamp"),
-                "raw_json": self._json(quote),
             }
-            self._append_row(self._day_dir / "feed_ticks.csv", self.FEED_FIELDS, row)
+            self._append_markdown_record(
+                self._day_dir / "feed_ticks.md",
+                "Feed Ticks",
+                "Feed Tick",
+                row,
+                raw_payload=quote,
+            )
         except Exception:
             logger.exception("Failed to record feed tick")
 
     def record_indicators(self, symbol: str, interval: str, indicators: dict) -> None:
-        """Append one indicator snapshot to indicators.csv."""
+        """Append one indicator snapshot to indicators.md."""
         try:
             flat = {
                 key: value for key, value in indicators.items()
@@ -154,21 +157,19 @@ class DataRecorder:
                 "symbol": symbol,
                 "interval": interval,
                 **flat,
-                "raw_json": self._json(indicators),
             }
-            self._indicator_fields.update(row.keys())
-            fields = ["recorded_at", "symbol", "interval"] + sorted(
-                f for f in self._indicator_fields
-                if f not in ("recorded_at", "symbol", "interval", "raw_json")
-            ) + ["raw_json"]
-            rewrite_header = fields != self._indicator_header_fields
-            self._append_row(self._day_dir / "indicators.csv", fields, row, rewrite_header=rewrite_header)
-            self._indicator_header_fields = fields
+            self._append_markdown_record(
+                self._day_dir / "indicators.md",
+                "Indicators",
+                f"Indicator Snapshot: {symbol} {interval}m",
+                row,
+                raw_payload=indicators,
+            )
         except Exception:
             logger.exception("Failed to record indicators")
 
     def record_strategy_signals(self, result: dict) -> None:
-        """Append each emitted deterministic strategy signal to strategy_signals.csv."""
+        """Append each emitted deterministic strategy signal to strategy_signals.md."""
         try:
             for signal in result.get("signals", []):
                 row = {
@@ -185,9 +186,14 @@ class DataRecorder:
                     "target": signal.get("target"),
                     "requires_volume_confirmation": signal.get("requires_volume_confirmation"),
                     "reason": signal.get("reason"),
-                    "raw_json": self._json(signal),
                 }
-                self._append_row(self._day_dir / "strategy_signals.csv", self.SIGNAL_FIELDS, row)
+                self._append_markdown_record(
+                    self._day_dir / "strategy_signals.md",
+                    "Strategy Signals",
+                    f"Strategy Signal: {signal.get('strategy', 'unknown')}",
+                    row,
+                    raw_payload=signal,
+                )
         except Exception:
             logger.exception("Failed to record strategy signals")
 
@@ -213,7 +219,7 @@ class DataRecorder:
             result = {"status": "uploaded", "method": "copy", "destination": str(dest), "local_dir": str(self._day_dir)}
             with self._lock:
                 self._uploaded = True
-            logger.info(f"CSV export copied to Google Drive folder: {dest}")
+            logger.info(f"Markdown export copied to Google Drive folder: {dest}")
             return result
 
         if self._rclone_remote:
@@ -225,34 +231,41 @@ class DataRecorder:
             result = {"status": "uploaded", "method": "rclone", "destination": remote_path, "local_dir": str(self._day_dir)}
             with self._lock:
                 self._uploaded = True
-            logger.info(f"CSV export uploaded via rclone: {remote_path}")
+            logger.info(f"Markdown export uploaded via rclone: {remote_path}")
             return result
 
         with self._lock:
             self._uploaded = True
-        logger.warning("CSV export not uploaded: configure GOOGLE_DRIVE_UPLOAD_DIR or RCLONE_REMOTE")
+        logger.warning("Markdown export not uploaded: configure GOOGLE_DRIVE_UPLOAD_DIR or RCLONE_REMOTE")
         return result
 
-    def _append_row(self, path: Path, fields: list[str], row: dict, rewrite_header: bool = False) -> None:
+    def _append_markdown_record(
+        self,
+        path: Path,
+        document_title: str,
+        record_title: str,
+        fields: dict,
+        raw_payload: dict | None = None,
+    ) -> None:
         with self._lock:
-            if rewrite_header and path.exists():
-                existing_rows = []
-                with path.open("r", newline="", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    existing_rows = list(reader)
-                with path.open("w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(existing_rows)
-                    writer.writerow(row)
-                return
+            needs_title = not path.exists() or path.stat().st_size == 0
+            with path.open("a", encoding="utf-8") as f:
+                if needs_title:
+                    f.write(f"# {document_title} - {self._date}\n\n")
+                    f.write("Append-only trading audit generated by BlitzTrader.\n\n")
 
-            needs_header = not path.exists() or path.stat().st_size == 0
-            with path.open("a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-                if needs_header:
-                    writer.writeheader()
-                writer.writerow(row)
+                recorded_at = fields.get("recorded_at") or self._now()
+                f.write(f"## {recorded_at} - {record_title}\n\n")
+                f.write("| Field | Value |\n")
+                f.write("|---|---|\n")
+                for key, value in fields.items():
+                    f.write(f"| {self._md(key)} | {self._md(value)} |\n")
+                if raw_payload is not None:
+                    f.write("\n<details><summary>Raw JSON</summary>\n\n")
+                    f.write("```json\n")
+                    f.write(self._json(raw_payload))
+                    f.write("\n```\n\n</details>\n")
+                f.write("\n")
 
     @staticmethod
     def _now() -> str:
@@ -261,3 +274,13 @@ class DataRecorder:
     @staticmethod
     def _json(payload: dict) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _md(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list, tuple)):
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        else:
+            text = str(value)
+        return text.replace("|", "\\|").replace("\n", "<br>")

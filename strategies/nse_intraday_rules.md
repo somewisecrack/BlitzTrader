@@ -6,7 +6,7 @@
 
 > **LIVE EXECUTION NOTE:** All entries and exits are placed on FUTURES contracts only.
 > Options (CE/PE) are blocked at the guardrail level. Use the futures tsym (e.g. NIFTY28APR26F)
-> directly in place_virtual_order(). Do NOT call get_option_chain() as part of the entry flow.
+> directly in place_virtual_order().
 
 ## Session Phases
 
@@ -30,14 +30,14 @@
 ### Breakout Long
 - Price breaks above previous day high (PDH) or a consolidation range
 - Confirm with: volume spike, VIX stable or declining, BANKNIFTY confirming
-- Entry: BUY NIFTY/BANKNIFTY futures (tsym e.g. NIFTY28APR26F) on pullback to breakout level
+- Entry: BUY NIFTY/BANKNIFTY/FINNIFTY futures (tsym e.g. NIFTY28APR26F) on pullback to breakout level
 - Stop: Below breakout level minus 0.5× ATR (futures price level)
 - Target: 1.5× to 2× risk
 
 ### Breakdown Short
 - Price breaks below previous day low (PDL) or support
-- Confirm with: VIX rising, breadth negative, NIFTY/BANKNIFTY diverging
-- Entry: SELL NIFTY/BANKNIFTY futures (tsym e.g. NIFTY28APR26F) on pullback to breakdown level
+- Confirm with: VIX rising, breadth negative, NIFTY/BANKNIFTY/FINNIFTY diverging
+- Entry: SELL NIFTY/BANKNIFTY/FINNIFTY futures (tsym e.g. NIFTY28APR26F) on pullback to breakdown level
 - Stop: Above breakdown level plus 0.5× ATR (futures price level)
 - Target: 1.5× to 2× risk
 
@@ -49,11 +49,15 @@
 - Target: VWAP retest
 
 ## Risk Rules
-- Max 5% capital per trade (₹15,000)
-- Max 2 simultaneous positions
-- If daily loss hits 5% (₹15,000), stop all trading
+- Exactly 1 futures lot per trade. Use the resolved Shoonya lot_size for the active futures contract.
+- Max 5% capital per trade (₹25,000)
+- Max 3 simultaneous positions while NIFTY, BANKNIFTY, and FINNIFTY are enabled
+- No pyramiding: only one open position per instrument at a time
+- Max 10 total entries per day. Completed trades + open positions + pending entries count toward this cap.
+- If daily loss hits 5% (₹25,000), stop all trading
 - Always define stop loss BEFORE entry
 - Trade futures with defined stop-loss (risk = |entry - SL| × quantity)
+- Never increase quantity because the stop-loss is tight; one lot is the hard cap
 
 ## Market Regime Filters
 - **VIX < 13**: Low vol environment. Breakouts may fail. Prefer mean reversion.

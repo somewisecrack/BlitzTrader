@@ -9,7 +9,7 @@ This is the entry point. It manages the full trading day:
 
 The LLM (Mixtral via Groq) is the brain. This script is the skeleton.
 Two types of agent iterations:
-  - Scheduled: every 60 seconds for market analysis
+  - Signal review: only when the Python scanner finds a trade candidate
   - Chat:      immediately on any Telegram message
 """
 import logging
@@ -26,15 +26,21 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
     GEMINI_API_KEY,
-    GEMINI_MODEL,
+    GEMINI_DECISION_MODEL,
+    GEMINI_API_TIMEOUT_SECONDS,
+    GEMINI_MAX_DECISION_TOKENS,
+    GEMINI_MAX_SCHEDULED_TOKENS,
+    GEMINI_SCHEDULED_MODEL,
     DATA_EXPORTS_DIR,
     GOOGLE_DRIVE_UPLOAD_DIR,
     JOURNALS_DIR,
     LOGS_DIR,
-    LOOP_INTERVAL_SECONDS,
+    MAX_PENDING_SIGNALS_PER_ITERATION,
     SCAN_INTERVAL_SECONDS,
+    SIGNAL_LLM_COOLDOWN_SECONDS,
     MASTER_STRATEGY_FILE,
     MAX_DAILY_LOSS_AMOUNT,
+    MAX_DAILY_TRADES,
     MAX_POSITIONS,
     MAX_RISK_PCT,
     MEMORY_FILE,
@@ -55,6 +61,7 @@ from config import (
     TELEGRAM_AUTHORIZED_USER_ID,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_POLL_INTERVAL_SECONDS,
+    TRADE_SYMBOLS,
     VIRTUAL_CAPITAL,
     setup_logging,
 )
@@ -71,6 +78,7 @@ from tools.strategy_reader import StrategyReader
 from tools.memory_reader import MemoryReader
 from tools.goal_manager import GoalManager
 from tools.registry import ToolRegistry
+from tools.market_calendar import get_market_holiday_name, is_nse_trading_day
 from agent_loop import AgentLoop
 from context_builder import (
     SYSTEM_PROMPT,
@@ -103,6 +111,8 @@ class BlitzTrader:
         self._goals = None
         self._data_recorder = None
         self._active_tokens = None
+        self._llm_disabled_reason = None
+        self._llm_disabled_notified = False
 
     def run(self):
         """Run the full trading session."""
@@ -110,6 +120,18 @@ class BlitzTrader:
         logger.info("=" * 60)
         logger.info("  BlitzTrader — Starting Session")
         logger.info("=" * 60)
+
+        today = datetime.now(IST).date()
+        if not is_nse_trading_day(today):
+            holiday_name = get_market_holiday_name(today)
+            reason = holiday_name or "weekend"
+            logger.info(
+                "NSE market closed today (%s): %s. "
+                "Skipping Shoonya login, feed startup, Gemini, and trading loop.",
+                today.isoformat(),
+                reason,
+            )
+            return
 
         # Register signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -228,10 +250,11 @@ class BlitzTrader:
         )
         self._feed.start()
 
-        # Resolve front-month futures for NIFTY and BANKNIFTY so we get real
-        # volume data.  Fall back to index tokens if futures lookup fails.
+        # Resolve front-month futures for traded instruments so we get real
+        # volume data.  Fall back to index tokens only where we have a known
+        # index token; FINNIFTY trades only if its futures contract resolves.
         active_tokens = dict(NSE_TOKENS)  # starts with VIX index token
-        for sym in ("NIFTY", "BANKNIFTY"):
+        for sym in TRADE_SYMBOLS:
             fut = self._shoonya.get_front_month_futures_token(sym)
             if fut:
                 active_tokens[sym] = {
@@ -240,10 +263,15 @@ class BlitzTrader:
                     "tsym":     fut["tsym"],
                     "expiry":   fut["expiry"],
                 }
+                if fut.get("lot_size"):
+                    active_tokens[sym]["lot_size"] = fut["lot_size"]
                 logger.info(
                     f"✓ {sym} → futures {fut['tsym']} "
-                    f"(token {fut['token']}, expiry {fut['expiry']})"
+                    f"(token {fut['token']}, expiry {fut['expiry']}, "
+                    f"lot_size {fut.get('lot_size', 'unknown')})"
                 )
+            elif sym not in active_tokens:
+                logger.warning(f"Futures lookup failed for {sym} — skipping this instrument")
             else:
                 logger.warning(f"Futures lookup failed for {sym} — using index token")
 
@@ -263,11 +291,33 @@ class BlitzTrader:
 
         # 3. State manager
         self._state = StateManager(STATE_FILE, VIRTUAL_CAPITAL)
-        self._state.init_state()
+        existing_state = self._state.load_state() if STATE_FILE.exists() else None
+        resume_today = False
+        if existing_state:
+            try:
+                session_day = datetime.fromtimestamp(
+                    float(existing_state.get("session_start", 0)), IST
+                ).date()
+                resume_today = session_day == datetime.now(IST).date()
+            except Exception:
+                resume_today = False
+        if resume_today:
+            logger.warning(
+                "Resuming existing intraday state: session=%s positions=%d",
+                existing_state.get("session_id", "?"),
+                len(existing_state.get("positions", [])),
+            )
+        else:
+            self._state.init_state()
         logger.info("✓ State initialized")
 
         # 4. Virtual ledger
-        ledger = VirtualLedger()
+        ledger_lot_sizes = {
+            sym: info["lot_size"]
+            for sym, info in active_tokens.items()
+            if sym in TRADE_SYMBOLS and info.get("lot_size")
+        }
+        ledger = VirtualLedger(lot_sizes=ledger_lot_sizes)
 
         # 5. Market data tools
         market_data = MarketDataTools(
@@ -285,6 +335,7 @@ class BlitzTrader:
             live_feed=self._feed,
             shoonya_client=self._shoonya,
             max_positions=MAX_POSITIONS,
+            max_daily_trades=MAX_DAILY_TRADES,
             max_risk_amount=VIRTUAL_CAPITAL * MAX_RISK_PCT,
             max_daily_loss=MAX_DAILY_LOSS_AMOUNT,
             no_entry_after=NO_NEW_ENTRY_AFTER,
@@ -322,12 +373,108 @@ class BlitzTrader:
         # 12. Agent loop
         self._agent = AgentLoop(
             api_key=GEMINI_API_KEY,
-            model=GEMINI_MODEL,
+            model=GEMINI_DECISION_MODEL,
             tool_registry=registry,
             system_prompt=SYSTEM_PROMPT,
+            max_tokens=GEMINI_MAX_DECISION_TOKENS,
+            api_timeout_seconds=GEMINI_API_TIMEOUT_SECONDS,
         )
-        logger.info("✓ Agent loop initialized")
+        logger.info(
+            "✓ Agent loop initialized (decision_model=%s, scheduled_model=%s, "
+            "decision_tokens=%s, scheduled_tokens=%s)",
+            GEMINI_DECISION_MODEL,
+            GEMINI_SCHEDULED_MODEL,
+            GEMINI_MAX_DECISION_TOKENS,
+            GEMINI_MAX_SCHEDULED_TOKENS,
+        )
         logger.info("All components initialized successfully")
+
+    def _run_agent_iteration(
+        self,
+        context: str,
+        model: str,
+        max_tokens: int,
+        max_tool_rounds: int = None,
+        phase: str = "unknown",
+    ) -> str:
+        """
+        Run Gemini with a hard circuit breaker for quota/billing failures.
+
+        If the project hits a daily quota or monthly spending cap, retrying on
+        every scanner signal makes Telegram look dead and hammers the API. Disable
+        LLM calls for the session; deterministic feed recording, SL/target checks,
+        and EOD close safety still run in Python.
+        """
+        if self._llm_disabled_reason:
+            logger.warning(
+                "Skipping Gemini phase=%s model=%s because LLM is disabled: %s",
+                phase,
+                model,
+                self._llm_disabled_reason,
+            )
+            return ""
+
+        response = self._agent.run_iteration(
+            context,
+            model=model,
+            max_tokens=max_tokens,
+            max_tool_rounds=max_tool_rounds,
+        )
+        err = self._agent.get_last_error() if self._agent else None
+        if err and err.get("kind") in {
+            "monthly_spending_cap",
+            "daily_quota_exhausted",
+            "api_timeout",
+        }:
+            self._llm_disabled_reason = err.get("kind")
+            logger.critical(
+                "Disabling Gemini for the rest of the session after %s during %s",
+                self._llm_disabled_reason,
+                phase,
+            )
+            if self._telegram and not self._llm_disabled_notified:
+                self._telegram.send_telegram(
+                    "⚠️ Gemini disabled for this session: "
+                    f"{self._llm_disabled_reason}. The bot will keep recording feed data "
+                    "and enforcing deterministic SL/target/EOD close, but it will not "
+                    "open new LLM-approved trades or answer free-form chat until billing/quota is fixed."
+                )
+                self._llm_disabled_notified = True
+        return response
+
+    def _try_answer_simple_chat(self, chat_messages: list[dict]) -> bool:
+        """
+        Answer common operational questions without Gemini.
+
+        This keeps Telegram useful even when Gemini is slow, capped, or disabled.
+        """
+        if not self._telegram or not self._state:
+            return False
+        text = " ".join((m.get("text") or "").lower() for m in chat_messages)
+        wants_status = any(
+            word in text
+            for word in ("pnl", "p&l", "profit", "loss", "position", "positions", "status")
+        )
+        if not wants_status:
+            return False
+
+        state = self._state.get_state()
+        pnl = float(state.get("daily_pnl", 0) or 0)
+        pnl_pct = float(state.get("daily_pnl_pct", 0) or 0)
+        positions = self._order_exec.get_open_positions() if self._order_exec else {"positions": []}
+        lines = [
+            f"Current P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)",
+            f"Open positions: {positions.get('count', 0)}",
+        ]
+        for pos in positions.get("positions", []):
+            lines.append(
+                f"- {pos.get('direction')} {pos.get('symbol')} "
+                f"qty {pos.get('quantity')} | entry ₹{pos.get('entry_price')} | "
+                f"LTP ₹{pos.get('current_price')} | uPnL ₹{pos.get('unrealized_pnl'):+,.2f}"
+            )
+        self._telegram.send_telegram("\n".join(lines))
+        logger.info("Answered simple Telegram status/P&L chat without Gemini")
+        return True
 
     # ──────────────────────────────────────────────────────────
     #   STARTUP PHASE (9:00 - 9:15 AM)
@@ -344,7 +491,12 @@ class BlitzTrader:
         logger.info("=== STARTUP PHASE ===")
 
         startup_context = build_startup_context()
-        response = self._agent.run_iteration(startup_context)
+        response = self._run_agent_iteration(
+            startup_context,
+            model=GEMINI_DECISION_MODEL,
+            max_tokens=GEMINI_MAX_DECISION_TOKENS,
+            phase="startup",
+        )
         logger.info(f"Startup response: {(response or '')[:200]}...")
 
         self._telegram.send_telegram("🚀 Startup complete. Moving to autonomous trading loop.")
@@ -361,8 +513,7 @@ class BlitzTrader:
 
         Three types of activity:
           - Background scanner: pure-Python get_strategy_signals() every 60 s — no LLM cost.
-          - Signal-triggered LLM: fires immediately when the scanner finds a new signal.
-          - Scheduled LLM: full market context check every 5 minutes regardless of signals.
+          - Signal-triggered LLM: Gemini approves/rejects scanner candidates.
           - Chat: immediate LLM response to Telegram messages (within 3 seconds).
 
         Runs until market close or abort.
@@ -370,7 +521,7 @@ class BlitzTrader:
         logger.info("=== TRADING LOOP STARTED ===")
         iteration = 0
         consecutive_errors = 0
-        last_scheduled_at = None   # time of last LLM iteration (scheduled or signal-triggered)
+        last_signal_llm_at = None  # time of last signal-triggered LLM iteration
         last_scan_at = None        # time of last background Python scanner run
         pending_signals: list = [] # signals queued for next LLM iteration
         last_feed_health_alert = None  # avoid spam
@@ -383,8 +534,22 @@ class BlitzTrader:
             eod_time = now.replace(hour=15, minute=15, second=0, microsecond=0)
             if now >= eod_time:
                 logger.info("=== EOD SEQUENCE ===")
+                close_result = self._order_exec.close_all_positions() if self._order_exec else {}
+                logger.info("Deterministic EOD close result: %s", close_result)
                 eod_context = build_eod_context()
-                self._agent.run_iteration(eod_context)
+                self._run_agent_iteration(
+                    eod_context,
+                    model=GEMINI_DECISION_MODEL,
+                    max_tokens=GEMINI_MAX_DECISION_TOKENS,
+                    phase="eod",
+                )
+                if self._telegram:
+                    pnl, pnl_pct = self._state.get_daily_pnl()
+                    self._telegram.send_telegram(
+                        f"EOD complete. Deterministic close_all executed. "
+                        f"Trades: {self._state.get_state().get('trade_count', 0)} | "
+                        f"P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)."
+                    )
                 if self._feed:
                     self._feed.stop()
                 self._upload_data_export()
@@ -415,12 +580,20 @@ class BlitzTrader:
             # ── Handle abort (highest priority, any time) ──
             if abort_cmds:
                 logger.warning("ABORT received!")
+                if self._order_exec:
+                    close_result = self._order_exec.close_all_positions()
+                    logger.info("Abort deterministic close result: %s", close_result)
                 abort_context = build_abort_context()
-                self._agent.run_iteration(abort_context)
+                self._run_agent_iteration(
+                    abort_context,
+                    model=GEMINI_DECISION_MODEL,
+                    max_tokens=GEMINI_MAX_DECISION_TOKENS,
+                    phase="abort",
+                )
                 self._running = False
                 return
 
-            # Re-queue /pause, /resume, /status etc. for next scheduled iteration
+            # Re-queue /pause, /resume, /status etc. for the next agent interaction.
             for cmd in other_cmds:
                 self._telegram._command_queue.append(cmd)
 
@@ -428,12 +601,31 @@ class BlitzTrader:
             if chat_msgs:
                 logger.info(f"Chat message received — responding immediately")
                 try:
+                    if self._try_answer_simple_chat(chat_msgs):
+                        consecutive_errors = 0
+                        continue
+                    if self._llm_disabled_reason:
+                        self._telegram.send_telegram(
+                            "Gemini is currently unavailable "
+                            f"({self._llm_disabled_reason}). Market scanner, "
+                            "feed recording, and deterministic SL/target/EOD safety "
+                            "continue, but I cannot reason or answer conversationally "
+                            "until the Gemini billing/quota issue is fixed."
+                        )
+                        consecutive_errors = 0
+                        continue
                     context = build_chat_context(
                         chat_messages=chat_msgs,
                         state_manager=self._state,
                         order_execution=self._order_exec,
                     )
-                    self._agent.run_iteration(context)
+                    self._run_agent_iteration(
+                        context,
+                        model=GEMINI_SCHEDULED_MODEL,
+                        max_tokens=GEMINI_MAX_SCHEDULED_TOKENS,
+                        max_tool_rounds=6,
+                        phase="chat",
+                    )
                     consecutive_errors = 0
                 except Exception as e:
                     consecutive_errors += 1
@@ -473,37 +665,63 @@ class BlitzTrader:
                     scan_result = self._market_data.get_strategy_signals()
                     new_sigs = scan_result.get("signals", [])
                     if new_sigs:
-                        pending_signals.extend(new_sigs)
+                        tradeable_sigs, blocked_sigs = self._filter_tradeable_signals(
+                            new_sigs,
+                            now,
+                            existing_pending=pending_signals,
+                        )
+                        if blocked_sigs:
+                            logger.info(
+                                "Scanner: %d signal(s) blocked by hard guardrails: %s",
+                                len(blocked_sigs),
+                                [
+                                    f"{s.get('symbol')} {s.get('strategy')}: {s.get('blocked_reason')}"
+                                    for s in blocked_sigs
+                                ],
+                            )
+                        pending_signals.extend(tradeable_sigs)
+                        if len(pending_signals) > MAX_PENDING_SIGNALS_PER_ITERATION:
+                            dropped = len(pending_signals) - MAX_PENDING_SIGNALS_PER_ITERATION
+                            pending_signals = pending_signals[-MAX_PENDING_SIGNALS_PER_ITERATION:]
+                            logger.warning(
+                                "Scanner signal queue capped at %d; dropped %d older signal(s)",
+                                MAX_PENDING_SIGNALS_PER_ITERATION,
+                                dropped,
+                            )
                         logger.info(
-                            f"Scanner: {len(new_sigs)} new signal(s) → "
-                            f"{[s['strategy'] + ' ' + s['direction'] for s in new_sigs]}"
+                            f"Scanner: {len(new_sigs)} new signal(s), "
+                            f"{len(tradeable_sigs)} queued for Gemini review → "
+                            f"{[s['strategy'] + ' ' + s['direction'] for s in tradeable_sigs]}"
                         )
                     if scan_result.get("notes"):
                         logger.debug(f"Scanner notes: {scan_result['notes']}")
                 except Exception:
                     logger.exception("Background scanner error (non-fatal)")
 
-            # ── LLM iteration: signal-triggered OR every 5 minutes ──
-            due_for_scheduled_llm = (
-                last_scheduled_at is None
-                or (now - last_scheduled_at).total_seconds() >= LOOP_INTERVAL_SECONDS
-            )
+            # ── LLM iteration: signal-triggered only ──
             due_for_signal_llm = bool(pending_signals) and (
-                # Don't fire signal-triggered LLM in the same 3-second tick as the
-                # scanner; scheduled baseline analysis should not be blocked by this.
+                # Don't fire signal-triggered LLM in the same 3-second tick as the scanner.
                 last_scan_at is None or (now - last_scan_at).total_seconds() >= 1
+            ) and (
+                last_signal_llm_at is None
+                or (now - last_signal_llm_at).total_seconds() >= SIGNAL_LLM_COOLDOWN_SECONDS
             )
-            if due_for_signal_llm or due_for_scheduled_llm:
+            if self._llm_disabled_reason and pending_signals:
+                logger.warning(
+                    "LLM disabled (%s); dropping %d pending signal(s) without Gemini.",
+                    self._llm_disabled_reason,
+                    len(pending_signals),
+                )
+                pending_signals.clear()
+
+            if not self._llm_disabled_reason and due_for_signal_llm:
                 iteration += 1
-                trigger = "signals" if pending_signals else "scheduled"
+                trigger = "signals"
                 logger.info(
                     f"--- Iteration {iteration} [{trigger}] "
                     f"({now.strftime('%H:%M:%S')} IST) "
                     f"pending_signals={len(pending_signals)} ---"
                 )
-                # Update timer BEFORE running — prevents re-entry if iteration is slow.
-                # Signals are preserved even if Gemini fails (cleared only on success below).
-                last_scheduled_at = now
 
                 try:
                     context = build_iteration_context(
@@ -518,7 +736,24 @@ class BlitzTrader:
                     # Captured here so that on failure the signals remain in
                     # pending_signals and will be included in the next iteration.
                     signals_this_iter = list(pending_signals)
-                    response = self._agent.run_iteration(context)
+                    model = GEMINI_DECISION_MODEL
+                    max_tokens = GEMINI_MAX_DECISION_TOKENS
+                    max_tool_rounds = 10
+                    last_signal_llm_at = now
+
+                    logger.info(
+                        "Gemini route: trigger=%s model=%s max_tokens=%s",
+                        trigger,
+                        model,
+                        max_tokens,
+                    )
+                    response = self._run_agent_iteration(
+                        context,
+                        model=model,
+                        max_tokens=max_tokens,
+                        max_tool_rounds=max_tool_rounds,
+                        phase=trigger,
+                    )
                     pending_signals.clear()  # success — safe to discard
                     logger.info(f"Iteration {iteration} response: {(response or '')[:200]}...")
 
@@ -572,6 +807,108 @@ class BlitzTrader:
 
             # ── Short sleep — stay responsive to Telegram ──
             time.sleep(TELEGRAM_POLL_INTERVAL_SECONDS)
+
+    def _filter_tradeable_signals(
+        self,
+        signals: list[dict],
+        now: datetime,
+        existing_pending: list[dict] | None = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """
+        Apply only non-judgmental hard guardrails before spending a Gemini call.
+
+        Python does not score setup quality here. It only filters candidates that
+        cannot legally be traded regardless of Gemini's opinion: paused state,
+        daily cap/loss, no-entry cutoff, max positions, unresolved futures, or
+        no-pyramiding conflicts.
+        """
+        state = self._state.get_state() if self._state else {}
+        positions = state.get("positions", []) or []
+        pending_orders = state.get("pending_orders", []) or []
+        trades = state.get("trades", []) or []
+
+        daily_entries = len(trades) + len(positions) + len(pending_orders)
+        blocked_reason = None
+        if state.get("is_paused"):
+            blocked_reason = "Trading paused by user command"
+        elif state.get("is_stopped"):
+            blocked_reason = "Trading stopped by daily-loss guardrail"
+        elif float(state.get("daily_pnl", 0) or 0) <= -MAX_DAILY_LOSS_AMOUNT:
+            blocked_reason = "Daily loss limit reached"
+        elif daily_entries >= MAX_DAILY_TRADES:
+            blocked_reason = f"Daily trade cap reached ({daily_entries}/{MAX_DAILY_TRADES})"
+        elif len(positions) >= MAX_POSITIONS:
+            blocked_reason = f"Maximum open positions reached ({len(positions)}/{MAX_POSITIONS})"
+        else:
+            cutoff_h, cutoff_m = map(int, NO_NEW_ENTRY_AFTER.split(":"))
+            cutoff = now.replace(hour=cutoff_h, minute=cutoff_m, second=0, microsecond=0)
+            if now >= cutoff:
+                blocked_reason = f"No new entries after {NO_NEW_ENTRY_AFTER} IST"
+
+        if blocked_reason:
+            blocked = []
+            for sig in signals:
+                sig_copy = dict(sig)
+                sig_copy["blocked_reason"] = blocked_reason
+                blocked.append(sig_copy)
+            return [], blocked
+
+        occupied = {
+            self._logical_instrument(pos.get("symbol", ""))
+            for pos in positions
+        }
+        occupied.update(
+            self._logical_instrument(order.get("symbol", ""))
+            for order in pending_orders
+        )
+        occupied.update(
+            self._logical_instrument(sig.get("symbol", ""))
+            for sig in (existing_pending or [])
+        )
+        occupied.discard(None)
+
+        tradeable = []
+        blocked = []
+        queued_instruments = set()
+        for sig in signals:
+            sig_copy = dict(sig)
+            instrument = self._logical_instrument(sig_copy.get("symbol", ""))
+            if not instrument:
+                sig_copy["blocked_reason"] = "Unknown signal instrument"
+                blocked.append(sig_copy)
+                continue
+            token_info = (self._active_tokens or {}).get(instrument, {})
+            if not token_info.get("tsym"):
+                sig_copy["blocked_reason"] = f"No resolved futures tsym for {instrument}"
+                blocked.append(sig_copy)
+                continue
+            if instrument in occupied:
+                sig_copy["blocked_reason"] = f"No pyramiding: {instrument} already open or pending"
+                blocked.append(sig_copy)
+                continue
+            if instrument in queued_instruments:
+                sig_copy["blocked_reason"] = f"Duplicate {instrument} candidate already queued this scan"
+                blocked.append(sig_copy)
+                continue
+
+            sig_copy["execution_symbol"] = token_info["tsym"]
+            sig_copy["lot_size"] = token_info.get("lot_size")
+            tradeable.append(sig_copy)
+            queued_instruments.add(instrument)
+
+        return tradeable, blocked
+
+    @staticmethod
+    def _logical_instrument(symbol: str) -> str | None:
+        """Map logical names and futures tsyms to the base instrument."""
+        sym = (symbol or "").upper()
+        if "BANKNIFTY" in sym:
+            return "BANKNIFTY"
+        if "FINNIFTY" in sym:
+            return "FINNIFTY"
+        if "NIFTY" in sym:
+            return "NIFTY"
+        return None
 
     # ──────────────────────────────────────────────────────────
     #   SHUTDOWN

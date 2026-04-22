@@ -18,17 +18,52 @@ class VirtualLedger:
     All calculations are deterministic — no hallucination risk.
     """
 
-    # Lot sizes for NIFTY/BANKNIFTY (NSE standard)
-    LOT_SIZES = {
-        "NIFTY": 25,
+    # Fallback lot sizes. Live sessions override these from Shoonya's contract
+    # metadata when available because NSE lot sizes can change.
+    DEFAULT_LOT_SIZES = {
         "BANKNIFTY": 15,
+        "FINNIFTY": 60,
+        "NIFTY": 25,
     }
 
-    # Approximate margin per lot (for virtual margin calculation)
-    MARGIN_PER_LOT = {
-        "NIFTY": 100_000,
+    # Fallback margin per lot. Live order-entry margin is fetched from Shoonya
+    # RMS by OrderExecutionTools; this is retained for tests/offline fallback.
+    DEFAULT_MARGIN_PER_LOT = {
         "BANKNIFTY": 100_000,
+        "FINNIFTY": 100_000,
+        "NIFTY": 100_000,
     }
+
+    def __init__(self, lot_sizes: Optional[dict] = None, margin_per_lot: Optional[dict] = None):
+        self.LOT_SIZES = dict(self.DEFAULT_LOT_SIZES)
+        if lot_sizes:
+            for symbol, lot_size in lot_sizes.items():
+                try:
+                    parsed = int(lot_size)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring invalid lot size for %s: %r", symbol, lot_size)
+                    continue
+                if parsed > 0:
+                    self.LOT_SIZES[symbol.upper()] = parsed
+
+        self.MARGIN_PER_LOT = dict(self.DEFAULT_MARGIN_PER_LOT)
+        if margin_per_lot:
+            for symbol, margin in margin_per_lot.items():
+                try:
+                    parsed_margin = float(margin)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring invalid margin for %s: %r", symbol, margin)
+                    continue
+                if parsed_margin > 0:
+                    self.MARGIN_PER_LOT[symbol.upper()] = parsed_margin
+
+    def _logical_instrument(self, symbol: str) -> Optional[str]:
+        """Classify symbols without mistaking FINNIFTY/BANKNIFTY for NIFTY."""
+        symbol_upper = symbol.upper()
+        for index in ("BANKNIFTY", "FINNIFTY", "NIFTY"):
+            if index in symbol_upper:
+                return index
+        return None
 
     def execute_market_fill(
         self,
@@ -59,7 +94,7 @@ class VirtualLedger:
             fill_price = round(best_ask - spread * 0.6, 2)  # Slight slippage toward bid
 
         cost = fill_price * quantity
-        margin_required = self._estimate_margin(symbol, quantity)
+        margin_required = self.estimate_margin(symbol, quantity)
 
         fill = {
             "order_id": str(uuid.uuid4())[:8],
@@ -111,7 +146,7 @@ class VirtualLedger:
         Called when check_limit_fill() returns True.
         """
         cost = limit_price * quantity
-        margin_required = self._estimate_margin(symbol, quantity)
+        margin_required = self.estimate_margin(symbol, quantity)
 
         fill = {
             "order_id": str(uuid.uuid4())[:8],
@@ -204,11 +239,17 @@ class VirtualLedger:
                 )
         return True, "Position size OK"
 
-    def _estimate_margin(self, symbol: str, quantity: int) -> float:
+    def get_lot_size(self, symbol: str) -> Optional[int]:
+        """Return the futures lot size for a supported symbol, if known."""
+        index = self._logical_instrument(symbol)
+        return self.LOT_SIZES.get(index) if index else None
+
+    def estimate_margin(self, symbol: str, quantity: int) -> float:
         """
         Estimate margin required for a position.
-        For options: margin = premium * quantity
-        For futures: use approximate SPAN margin
+        Live order-entry margin is fetched from Shoonya RMS before fills.
+        This method is a fallback used by the virtual ledger when no broker
+        margin has been injected by the caller.
         """
         # Determine if it's options (CE/PE) or futures (FUT)
         symbol_upper = symbol.upper()
@@ -218,9 +259,9 @@ class VirtualLedger:
             # Margin is just the cost (handled by the fill)
             return 0.0  # Premium is the cost, not margin
         else:
-            # Futures: approximate margin per lot
-            for index, lot_size in self.LOT_SIZES.items():
-                if index in symbol_upper:
-                    lots = quantity / lot_size
-                    return lots * self.MARGIN_PER_LOT.get(index, 100_000)
+            index = self._logical_instrument(symbol)
+            if index:
+                lot_size = self.LOT_SIZES[index]
+                lots = quantity / lot_size
+                return lots * self.MARGIN_PER_LOT.get(index, 100_000)
             return quantity * 100  # Fallback

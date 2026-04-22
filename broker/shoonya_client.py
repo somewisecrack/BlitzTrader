@@ -113,6 +113,7 @@ class ShoonyaClient:
             logger.info(f"OAuth login SUCCESS for user: {userid}, actid: {actid}")
             self._logged_in = True
             self._user_id = user_id
+            self._account_id = actid or user_id
             return True, "Login successful"
 
         except Exception as e:
@@ -218,6 +219,104 @@ class ShoonyaClient:
         return self._api
 
     # ──────────────────────────────────────────────────────────
+    #   RMS / MARGIN
+    # ──────────────────────────────────────────────────────────
+
+    def get_limits(
+        self,
+        product_type: str = None,
+        segment: str = None,
+        exchange: str = None,
+    ) -> Optional[dict]:
+        """
+        Fetch Shoonya RMS limits via /NorenWClientAPI/Limits.
+
+        The API response includes cash, marginused, span/expo breakup, MTM,
+        collateral, and related risk fields. This is broker/RMS truth and is
+        used for audit/context rather than approximating available margin.
+        """
+        if not self._api:
+            logger.error("Cannot get_limits: not logged in")
+            return None
+        try:
+            resp = self._api.get_limits(
+                product_type=product_type,
+                segment=segment,
+                exchange=exchange,
+            )
+            if resp and resp.get("stat") == "Ok":
+                return resp
+            logger.warning(f"get_limits failed: {resp}")
+            return resp
+        except Exception:
+            logger.exception("Exception in get_limits")
+        return None
+
+    def get_order_margin(
+        self,
+        exchange: str,
+        tradingsymbol: str,
+        quantity: int,
+        price: float,
+        transaction_type: str,
+        product: str = "M",
+        price_type: str = "LMT",
+        trigger_price: float = None,
+    ) -> Optional[dict]:
+        """
+        Fetch actual Shoonya RMS margin for a proposed order.
+
+        API doc: POST /NorenWClientAPI/GetOrderMargin with uid, actid, exch,
+        tsym, qty, prc, prd, trantype, prctyp, etc. For virtual MARKET entries
+        we intentionally ask as a LMT order at the intended entry price because
+        the doc's margin endpoint formally lists LMT / SL-LMT.
+        """
+        payload = {
+            "uid": self._user_id,
+            "actid": getattr(self, "_account_id", self._user_id),
+            "exch": exchange,
+            "tsym": tradingsymbol,
+            "qty": str(int(quantity)),
+            "prc": str(round(float(price or 0), 2)),
+            "prd": product,
+            "trantype": transaction_type,
+            "prctyp": price_type,
+        }
+        if trigger_price is not None:
+            payload["trgprc"] = str(round(float(trigger_price), 2))
+        return self._post_private("GetOrderMargin", payload)
+
+    def _post_private(self, endpoint: str, payload: dict) -> Optional[dict]:
+        """POST a private Shoonya Noren endpoint using OAuth headers when available."""
+        if not self._api:
+            logger.error("Cannot call %s: not logged in", endpoint)
+            return None
+
+        headers = getattr(self._api, "_NorenApi__OAuthHeaders", None)
+        jkey = getattr(self, "_jkey", None) or getattr(self._api, "_NorenApi__susertoken", None)
+        if not headers and not jkey:
+            logger.error("Cannot call %s: missing OAuth headers and jKey/susertoken", endpoint)
+            return None
+
+        try:
+            data = "jData=" + json.dumps(payload)
+            if not headers:
+                data += "&jKey=" + jkey
+            resp = self._session.post(
+                f"{BASE_URL}/{endpoint}",
+                data=data,
+                headers=headers,
+                timeout=15,
+            )
+            result = json.loads(resp.text)
+            if result.get("stat") != "Ok":
+                logger.warning("%s returned %s", endpoint, result)
+            return result
+        except Exception:
+            logger.exception("Exception calling %s", endpoint)
+        return None
+
+    # ──────────────────────────────────────────────────────────
     #   REST QUOTES
     # ──────────────────────────────────────────────────────────
 
@@ -296,12 +395,12 @@ class ShoonyaClient:
 
     def get_front_month_futures_token(self, symbol: str) -> Optional[dict]:
         """
-        Find the front-month FUTIDX contract for an index (NIFTY or BANKNIFTY).
+        Find the front-month FUTIDX contract for an index.
 
         Searches NFO for all FUTIDX contracts matching the symbol, picks the
         nearest expiry that has not yet expired, and returns:
             {"exchange": "NFO", "token": "66691", "tsym": "NIFTY28APR26F",
-             "expiry": "28-APR-2026", "name": "NIFTY"}
+             "expiry": "28-APR-2026", "name": "NIFTY", "lot_size": 25}
 
         Strict filtering rules (to avoid NIFTYNXT50, FINNIFTY, MIDCPNIFTY, etc.):
           - instname must be exactly "FUTIDX"
@@ -384,6 +483,20 @@ class ShoonyaClient:
 
         candidates.sort(key=lambda x: x[0])
         expiry, scrip = candidates[0]
+
+        lot_size = None
+        for key in ("ls", "lotsize", "lot_size"):
+            raw_lot_size = scrip.get(key)
+            if raw_lot_size is None:
+                continue
+            try:
+                lot_size = int(float(raw_lot_size))
+                break
+            except (TypeError, ValueError):
+                logger.debug(
+                    f"  Ignoring invalid lot size {raw_lot_size!r} from key {key!r}"
+                )
+
         info = {
             "exchange": "NFO",
             "token":    scrip["token"],
@@ -391,9 +504,12 @@ class ShoonyaClient:
             "expiry":   scrip.get("exd", ""),
             "name":     sym_upper,
         }
+        if lot_size:
+            info["lot_size"] = lot_size
         logger.info(
             f"Front-month futures: {sym_upper} → {info['tsym']} "
-            f"(token {info['token']}, expiry {info['expiry']})"
+            f"(token {info['token']}, expiry {info['expiry']}, "
+            f"lot_size {info.get('lot_size', 'unknown')})"
         )
         return info
 

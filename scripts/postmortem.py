@@ -18,6 +18,7 @@ Prints a summary: total trades, total P&L, symbol type breakdown.
 
 Usage:
     python3 scripts/postmortem.py --date 2026-04-10
+    python3 scripts/postmortem.py --date 2026-04-10 --project-root /path/to/vm-export
 """
 import argparse
 import csv
@@ -101,12 +102,17 @@ def read_journal_file(project_root: Path, target_date: date) -> str:
         return ""
 
 
-def find_csv_files(project_root: Path) -> list:
-    """Find all CSV files under data_exports/."""
-    data_dir = project_root / "data_exports"
+def find_csv_files(data_root: Path) -> list:
+    """Find all CSV files under a data root."""
+    data_dir = data_root / "data_exports"
     if not data_dir.exists():
         return []
     return sorted(data_dir.rglob("*.csv"))
+
+
+def find_data_export_dir(data_root: Path, target_date: date) -> Path:
+    """Return the per-day export dir for the target date if present."""
+    return data_root / "data_exports" / target_date.strftime("%Y%m%d")
 
 
 def extract_trades_from_state(state: dict, target_date: date) -> list:
@@ -231,10 +237,15 @@ def print_summary(trades: list):
 def main():
     parser = argparse.ArgumentParser(description="BlitzTrader post-mortem analysis")
     parser.add_argument("--date", required=True, help="Date to analyse (YYYY-MM-DD)")
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Optional alternate BlitzTrader project root or exported session bundle root",
+    )
     args = parser.parse_args()
 
     target_date = parse_date_arg(args.date)
-    project_root = Path(__file__).parent.parent
+    project_root = Path(args.project_root).expanduser().resolve() if args.project_root else Path(__file__).parent.parent
 
     print("=" * 60)
     print(f"BlitzTrader Post-Mortem: {target_date.isoformat()}")
@@ -263,6 +274,8 @@ def main():
     # ── Read sources ─────────────────────────────────────────────────────────
     state       = read_live_state(project_root)
     journal_txt = read_journal_file(project_root, target_date)
+
+    daily_export_dir = find_data_export_dir(project_root, target_date)
 
     # ── Extract trades ───────────────────────────────────────────────────────
     trades_from_state   = extract_trades_from_state(state, target_date)
@@ -299,6 +312,21 @@ def main():
             print(f"Journal file not found: {journal_path}")
         else:
             print(f"Journal file found ({len(journal_txt)} chars) but no trade records parsed.")
+
+        if daily_export_dir.exists():
+            csv_names = sorted(p.name for p in daily_export_dir.glob("*.csv"))
+            print(f"Daily export folder present     : {daily_export_dir}")
+            print(f"CSV files available             : {', '.join(csv_names) if csv_names else 'None'}")
+            signal_csv = daily_export_dir / "strategy_signals.csv"
+            if signal_csv.exists():
+                try:
+                    with open(signal_csv, newline="") as f:
+                        signal_count = max(sum(1 for _ in csv.DictReader(f)), 0)
+                    print(f"Scanner signal rows             : {signal_count}")
+                except Exception as e:
+                    print(f"Could not read strategy_signals.csv: {e}")
+        else:
+            print(f"Daily export folder not found   : {daily_export_dir}")
 
         return
 

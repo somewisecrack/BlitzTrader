@@ -56,6 +56,20 @@ def _optional_env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 
+def _optional_int_env(key: str, default: int) -> int:
+    """Get optional integer environment variable with safe fallback."""
+    raw = _optional_env(key, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logging.getLogger("BlitzTrader.Config").warning(
+            "Invalid integer for %s=%r; using default %s", key, raw, default
+        )
+        return default
+
+
 # ──────────────────────────────────────────────────────────────
 #   SHOONYA CREDENTIALS
 # ──────────────────────────────────────────────────────────────
@@ -82,6 +96,11 @@ TELEGRAM_AUTHORIZED_USER_ID = _optional_env("TELEGRAM_AUTHORIZED_USER_ID")
 
 GEMINI_API_KEY = _optional_env("GEMINI_API_KEY")
 GEMINI_MODEL = _optional_env("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_DECISION_MODEL = _optional_env("GEMINI_DECISION_MODEL", GEMINI_MODEL)
+GEMINI_SCHEDULED_MODEL = _optional_env("GEMINI_SCHEDULED_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MAX_DECISION_TOKENS = _optional_int_env("GEMINI_MAX_DECISION_TOKENS", 2048)
+GEMINI_MAX_SCHEDULED_TOKENS = _optional_int_env("GEMINI_MAX_SCHEDULED_TOKENS", 768)
+GEMINI_API_TIMEOUT_SECONDS = _optional_int_env("GEMINI_API_TIMEOUT_SECONDS", 45)
 
 # ──────────────────────────────────────────────────────────────
 #   DATA EXPORT / GOOGLE DRIVE
@@ -98,11 +117,13 @@ RCLONE_FOLDER = _optional_env("RCLONE_FOLDER", "BlitzTrader")
 #   TRADING PARAMETERS
 # ──────────────────────────────────────────────────────────────
 
-VIRTUAL_CAPITAL = 300_000  # ₹3,00,000
-MAX_POSITIONS = 2
+VIRTUAL_CAPITAL = 500_000  # ₹5,00,000
+TRADE_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY")
+MAX_POSITIONS = 3
+MAX_DAILY_TRADES = 10
 MAX_RISK_PCT = 0.05  # 5% of capital per trade
 MAX_DAILY_LOSS_PCT = 0.05  # 5% daily loss limit
-MAX_DAILY_LOSS_AMOUNT = VIRTUAL_CAPITAL * MAX_DAILY_LOSS_PCT  # ₹15,000
+MAX_DAILY_LOSS_AMOUNT = VIRTUAL_CAPITAL * MAX_DAILY_LOSS_PCT  # ₹25,000
 
 # Time constraints (IST)
 MARKET_OPEN = "09:15"
@@ -114,9 +135,11 @@ SESSION_END = "15:25"  # Buffer after market close for EOD
 # Agent loop
 # Python scanner (get_strategy_signals) runs every SCAN_INTERVAL_SECONDS — no LLM cost.
 SCAN_INTERVAL_SECONDS = 60
-# LLM (Gemini) is invoked every LOOP_INTERVAL_SECONDS baseline, OR immediately when the
-# scanner surfaces a new signal — whichever comes first.
-LOOP_INTERVAL_SECONDS = 300
+# Deprecated: market-analysis Gemini calls are no longer scheduled. Gemini is
+# invoked for scanner candidates, trader chat, startup, and EOD only.
+LOOP_INTERVAL_SECONDS = 900
+SIGNAL_LLM_COOLDOWN_SECONDS = 60
+MAX_PENDING_SIGNALS_PER_ITERATION = 8
 TELEGRAM_POLL_INTERVAL_SECONDS = 3   # How often to check for new Telegram messages
 LIMIT_ORDER_TIMEOUT_SECONDS = 300    # 5 minutes
 

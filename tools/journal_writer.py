@@ -22,7 +22,7 @@ class JournalWriter:
     One file per trading day: journals/YYYYMMDD.md
     """
 
-    def __init__(self, journals_dir: Path, virtual_capital: float = 300_000, state_manager=None):
+    def __init__(self, journals_dir: Path, virtual_capital: float = 500_000, state_manager=None):
         self._dir = journals_dir
         self._dir.mkdir(exist_ok=True)
         self._capital = virtual_capital

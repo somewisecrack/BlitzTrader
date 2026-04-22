@@ -42,7 +42,7 @@ class StateManager:
     Reads/writes live_state.json with atomic file operations.
     """
 
-    def __init__(self, state_file: Path, virtual_capital: float = 300_000):
+    def __init__(self, state_file: Path, virtual_capital: float = 500_000):
         self._state_file = state_file
         self._virtual_capital = virtual_capital
         self._state: dict = {}
@@ -111,6 +111,17 @@ class StateManager:
                 return removed
         return None
 
+    def remove_position_by_order_id(self, order_id: str) -> Optional[dict]:
+        """Remove and return a position by its unique entry order_id."""
+        positions = self._state["positions"]
+        for i, pos in enumerate(positions):
+            if pos.get("order_id") == order_id:
+                removed = positions.pop(i)
+                self._recalculate_margin()
+                self._save()
+                return removed
+        return None
+
     def get_open_positions(self) -> list[dict]:
         """Get all open positions."""
         return self._state.get("positions", [])
@@ -126,6 +137,15 @@ class StateManager:
         """Update fields of an existing position."""
         for pos in self._state.get("positions", []):
             if pos.get("symbol") == symbol:
+                pos.update(kwargs)
+                self._save()
+                return pos
+        return None
+
+    def update_position_by_order_id(self, order_id: str, **kwargs) -> Optional[dict]:
+        """Update fields of an existing position by unique entry order_id."""
+        for pos in self._state.get("positions", []):
+            if pos.get("order_id") == order_id:
                 pos.update(kwargs)
                 self._save()
                 return pos

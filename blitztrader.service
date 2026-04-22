@@ -11,6 +11,7 @@ WorkingDirectory=/opt/blitztrader
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/opt/blitztrader/.env
 
+ExecCondition=/opt/blitztrader/venv/bin/python scripts/is_trading_day.py
 ExecStart=/opt/blitztrader/venv/bin/python main.py
 
 # Graceful shutdown

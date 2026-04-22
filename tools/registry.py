@@ -5,10 +5,49 @@ Maps tool names to Python functions and provides
 Anthropic-compatible JSON schema for each tool.
 
 This is what Claude sees as its available tools.
+
+FUTURES-ONLY ENFORCEMENT
+------------------------
+get_tool_definitions()        — returned to the live LLM agent (FUTURES ONLY)
+get_legacy_tool_definitions() — NOT passed to the agent; available for manual/informational use only
+
+LIVE_TOOLS   — tool names exposed to the live agent
+LEGACY_TOOLS — tool names available only for manual use (never sent to the LLM)
 """
 import logging
 
 logger = logging.getLogger("BlitzTrader.ToolRegistry")
+
+# Tool names visible to the live LLM agent during trading
+LIVE_TOOLS = [
+    "get_spot_price",
+    "get_quote",
+    "get_candles",
+    "get_indicators",
+    "get_strategy_signals",
+    "get_vix",
+    "get_market_depth",
+    "get_open_positions",
+    "get_virtual_balance",
+    "get_todays_trades",
+    "get_daily_pnl",
+    "place_virtual_order",
+    "cancel_order",
+    "close_position",
+    "close_all_positions",
+    "get_past_journals",
+    "update_memory",
+    "set_session_goals",
+    "get_session_goals",
+    "get_strategy_docs",
+    "send_telegram",
+    "log_decision",
+]
+
+# Tool names available only for manual/informational use — NEVER sent to the live LLM agent
+LEGACY_TOOLS = [
+    "get_option_chain",
+]
 
 
 class ToolRegistry:
@@ -34,11 +73,11 @@ class ToolRegistry:
         self._memory = memory_reader
         self._goals = goal_manager
 
-        # Build the tool map
+        # Build the tool map — NOTE: get_option_chain is NOT in this map so the
+        # live agent cannot call it.  It lives in _legacy_tool_map only.
         self._tool_map = {
             # Market Data
             "get_spot_price": self._market_data.get_spot_price,
-            "get_option_chain": self._market_data.get_option_chain,
             "get_quote": self._market_data.get_quote,
             "get_candles": self._market_data.get_candles,
             "get_indicators": self._market_data.get_indicators,
@@ -66,6 +105,12 @@ class ToolRegistry:
             "send_telegram": self._telegram.send_telegram,
             # Journal
             "log_decision": self._journal.log_decision,
+        }
+
+        # Legacy tool map — available for manual/informational use ONLY.
+        # Never merged into _tool_map; the live LLM agent cannot invoke these.
+        self._legacy_tool_map = {
+            "get_option_chain": self._market_data.get_option_chain,
         }
 
     def execute(self, tool_name: str, tool_input: dict) -> dict:
@@ -108,14 +153,17 @@ class ToolRegistry:
 
     def get_tool_definitions(self) -> list[dict]:
         """
-        Return Anthropic-compatible tool definitions for Claude.
+        Return Anthropic-compatible tool definitions for the LIVE LLM agent.
+
+        FUTURES-ONLY: get_option_chain is NOT included here.
+        It lives in get_legacy_tool_definitions() and is never sent to the agent.
         """
         return [
-            # ── Market Data Tools ──
+            # ── Market Data Tools (FUTURES ONLY) ──
             {
                 "name": "get_spot_price",
                 "description": (
-                    "Get current spot price for NIFTY or BANKNIFTY. "
+                    "Get current spot/futures-resolved price for NIFTY, BANKNIFTY, or FINNIFTY. "
                     "Returns spot_price, change, change_pct, high, low, open."
                 ),
                 "input_schema": {
@@ -123,51 +171,29 @@ class ToolRegistry:
                     "properties": {
                         "index": {
                             "type": "string",
-                            "description": "Index name: 'NIFTY' or 'BANKNIFTY'",
-                            "enum": ["NIFTY", "BANKNIFTY"],
+                            "description": "Index name: 'NIFTY', 'BANKNIFTY', or 'FINNIFTY'",
+                            "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY"],
                         }
                     },
                     "required": ["index"],
                 },
             },
-            {
-                "name": "get_option_chain",
-                "description": (
-                    "LEGACY/INFORMATIONAL ONLY — removed from live agent tool list. "
-                    "Do not call this for trade entry. "
-                    "Get full option chain with strikes, LTP, bid, ask, OI for a given "
-                    "index and expiry. May be used manually for market context (e.g. checking IV, "
-                    "PCR, OI distribution) but has NO role in the live execution path. "
-                    "All orders use futures contracts directly via place_virtual_order()."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "index": {
-                            "type": "string",
-                            "description": "Index: 'NIFTY' or 'BANKNIFTY'",
-                            "enum": ["NIFTY", "BANKNIFTY"],
-                        },
-                        "expiry": {
-                            "type": "string",
-                            "description": "Expiry prefix, e.g. '27MAR' or '03APR'",
-                        },
-                    },
-                    "required": ["index", "expiry"],
-                },
-            },
+            # NOTE: get_option_chain is deliberately absent here.
+            # It is available only via get_legacy_tool_definitions() for manual use.
             {
                 "name": "get_quote",
                 "description": (
-                    "Get LTP, best bid, best ask for a specific trading symbol. "
-                    "Use this to check current price of a specific option or future."
+                    "Get LTP, best bid, best ask for a specific futures trading symbol. "
+                    "Use this to check the current price of an active futures contract "
+                    "(e.g. NIFTY28APR26F, BANKNIFTY28APR26F, FINNIFTY28APR26F). "
+                    "Do NOT use for option symbols — options are not used in live execution."
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Trading symbol, e.g. 'NIFTY27MAR24500CE'",
+                            "description": "Futures trading symbol, e.g. 'NIFTY28APR26F'",
                         }
                     },
                     "required": ["symbol"],
@@ -217,7 +243,7 @@ class ToolRegistry:
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Trading symbol e.g. 'NIFTY' or 'BANKNIFTY'",
+                            "description": "Trading symbol e.g. 'NIFTY', 'BANKNIFTY', or 'FINNIFTY'",
                         },
                         "interval": {
                             "type": "string",
@@ -232,7 +258,7 @@ class ToolRegistry:
             {
                 "name": "get_strategy_signals",
                 "description": (
-                    "Deterministically scan recent NIFTY/BANKNIFTY candles for approved "
+                    "Deterministically scan recent NIFTY/BANKNIFTY/FINNIFTY candles for approved "
                     "price-action, VSA/VPA confirmation, and daily first-hour strategy setups. "
                     "Use this every market-analysis iteration so entries are not missed by "
                     "manual LLM inspection. "
@@ -244,8 +270,8 @@ class ToolRegistry:
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "NIFTY, BANKNIFTY, or BOTH",
-                            "enum": ["NIFTY", "BANKNIFTY", "BOTH"],
+                            "description": "NIFTY, BANKNIFTY, FINNIFTY, or BOTH",
+                            "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "BOTH"],
                             "default": "BOTH",
                         },
                         "lookback_bars": {
@@ -323,8 +349,10 @@ class ToolRegistry:
                 "description": (
                     "Place a virtual FUTURES order. MARKET fills immediately at best bid/ask midpoint. "
                     "LIMIT fills only if LTP touches price within 5 minutes, else auto-cancels. "
-                    "Hard guardrails enforced: max 2 positions, no entry after 15:05 IST, "
-                    "daily loss limit, position size limit. "
+                    "Hard guardrails enforced: max 3 positions, no pyramiding "
+                    "(one open position per instrument), exactly 1 futures lot per trade, "
+                    "max 10 total daily entries, no entry after 15:05 IST, "
+                    "daily loss limit, margin limit. "
                     "FUTURES ONLY: symbol must be the futures tsym (e.g. NIFTY28APR26F). "
                     "Options (CE/PE) are BLOCKED — do not pass CE/PE symbols."
                 ),
@@ -342,7 +370,7 @@ class ToolRegistry:
                         },
                         "quantity": {
                             "type": "integer",
-                            "description": "Number of units (use lot size: NIFTY=25, BANKNIFTY=15)",
+                            "description": "Exactly 1 futures lot only. Use the resolved lot_size shown in ACTIVE FUTURES INSTRUMENTS.",
                         },
                         "order_type": {
                             "type": "string",
@@ -518,9 +546,10 @@ class ToolRegistry:
             {
                 "name": "log_decision",
                 "description": (
-                    "Log a trading decision to today's journal. You MUST call this "
-                    "after EVERY decision — including holds and skips. Always explain "
-                    "your reasoning clearly. For EOD entries, the system will auto-append "
+                    "Log a trading decision to today's journal. In signal-review iterations, "
+                    "call this for every scanner candidate you reject/skip and for executed "
+                    "entries/exits. Do not log routine HOLDs when no candidate exists. "
+                    "Always explain your reasoning clearly. For EOD entries, the system will auto-append "
                     "verified trade data from the state manager — do NOT fabricate trade "
                     "counts or P&L numbers in your reasoning text."
                 ),
@@ -529,7 +558,7 @@ class ToolRegistry:
                     "properties": {
                         "action": {
                             "type": "string",
-                            "description": "Decision type: ENTER_LONG, ENTER_SHORT, EXIT, HOLD, SKIP, STOP, ABORT",
+                            "description": "Decision type: ENTER_LONG, ENTER_SHORT, EXIT, HOLD, REJECT, SKIP, STOP, ABORT",
                         },
                         "symbol": {
                             "type": "string",

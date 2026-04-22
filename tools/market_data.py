@@ -42,7 +42,7 @@ class MarketDataTools:
         """
         Fetch previous trading day OHLC for a symbol using hourly candles.
 
-        :param symbol: Index name (NIFTY/BANKNIFTY) or trading symbol
+        :param symbol: Index name (NIFTY/BANKNIFTY/FINNIFTY) or trading symbol
         :returns: {high, low, close, open} or None on failure
         """
         import datetime
@@ -256,9 +256,9 @@ class MarketDataTools:
 
     def get_spot_price(self, index: str) -> dict:
         """
-        Get current spot price for NIFTY or BANKNIFTY.
+        Get current spot/futures-resolved price for NIFTY, BANKNIFTY, or FINNIFTY.
 
-        :param index: 'NIFTY' or 'BANKNIFTY'
+        :param index: 'NIFTY', 'BANKNIFTY', or 'FINNIFTY'
         :returns: {index, spot_price, change, change_pct, high, low, open}
         """
         exchange, token = self._resolve_token(index)
@@ -795,7 +795,7 @@ class MarketDataTools:
         lookback_bars: int = 5,
     ) -> dict:
         """
-        Deterministically scan recent NIFTY/BANKNIFTY candles for approved
+        Deterministically scan recent NIFTY/BANKNIFTY/FINNIFTY candles for approved
         price-action strategy setups. This is a guardrail against the LLM
         overlooking candle-pattern rules in raw OHLC data.
 
@@ -806,7 +806,11 @@ class MarketDataTools:
         import math
         import pytz
 
-        symbols = ["NIFTY", "BANKNIFTY"] if symbol.upper() == "BOTH" else [symbol.upper()]
+        default_symbols = [
+            sym for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY")
+            if sym in self._tokens
+        ]
+        symbols = default_symbols if symbol.upper() == "BOTH" else [symbol.upper()]
         intervals = ["3", "5", "15"]
         signals = []
         notes = []

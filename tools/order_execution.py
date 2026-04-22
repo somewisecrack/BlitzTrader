@@ -32,9 +32,10 @@ class OrderExecutionTools:
         virtual_ledger,
         live_feed,
         shoonya_client,
-        max_positions: int = 2,
-        max_risk_amount: float = 15000,  # 5% of 3L
-        max_daily_loss: float = 15000,  # 5% of 3L
+        max_positions: int = 3,
+        max_daily_trades: int = 10,
+        max_risk_amount: float = 25000,  # 5% of 5L
+        max_daily_loss: float = 25000,  # 5% of 5L
         no_entry_after: str = "15:05",
         active_tokens: dict = None,
     ):
@@ -43,6 +44,7 @@ class OrderExecutionTools:
         self._feed = live_feed
         self._client = shoonya_client
         self._max_positions = max_positions
+        self._max_daily_trades = max_daily_trades
         self._max_risk_amount = max_risk_amount
         self._max_daily_loss = max_daily_loss
         self._no_entry_after = no_entry_after
@@ -59,7 +61,7 @@ class OrderExecutionTools:
     #   GUARDRAILS (enforced before every order)
     # ──────────────────────────────────────────────────────────
 
-    def _check_guardrails(self, is_new_entry: bool = True) -> Optional[str]:
+    def _check_guardrails(self, is_new_entry: bool = True, symbol: str = "") -> Optional[str]:
         """
         Run all guardrail checks. Returns error message if blocked, None if OK.
         """
@@ -82,14 +84,45 @@ class OrderExecutionTools:
         if not is_new_entry:
             return None  # Exits are always allowed
 
-        # Check max positions
         open_positions = state.get("positions", [])
+        pending_orders = state.get("pending_orders", [])
+        completed_trades = state.get("trades", [])
+
+        # Check daily trade cap. Count completed trades plus open/pending entries
+        # so intraday restarts and still-open positions cannot bypass the limit.
+        daily_entries = len(completed_trades) + len(open_positions) + len(pending_orders)
+        if daily_entries >= self._max_daily_trades:
+            return (
+                f"BLOCKED: Daily trade cap reached ({daily_entries}/"
+                f"{self._max_daily_trades}). No more new entries allowed today. "
+                "Exits remain allowed."
+            )
+
+        # Check max positions
         if len(open_positions) >= self._max_positions:
             return (
                 f"BLOCKED: Already at maximum {self._max_positions} open positions. "
                 f"Close an existing position before opening a new one. "
                 f"Current positions: {[p['symbol'] for p in open_positions]}"
             )
+
+        instrument = self._logical_instrument(symbol)
+        if instrument:
+            for pos in open_positions:
+                if self._logical_instrument(pos.get("symbol", "")) == instrument:
+                    return (
+                        f"BLOCKED: No pyramiding. Already have an open {instrument} "
+                        f"position ({pos.get('direction')} {pos.get('quantity')}x "
+                        f"{pos.get('symbol')}). Close it before opening another "
+                        f"{instrument} position."
+                    )
+            for order in pending_orders:
+                if self._logical_instrument(order.get("symbol", "")) == instrument:
+                    return (
+                        f"BLOCKED: No pyramiding. Pending {instrument} order "
+                        f"{order.get('order_id')} already exists. Cancel or let it "
+                        f"expire before placing another {instrument} entry."
+                    )
 
         # Check time cutoff
         now_ist = datetime.now(IST)
@@ -153,7 +186,7 @@ class OrderExecutionTools:
         if quantity <= 0:
             return {"error": f"Invalid quantity: {quantity}. Must be positive."}
 
-        # Enforce Futures-Only Guardrail: only NIFTY/BANKNIFTY futures are allowed.
+        # Enforce Futures-Only Guardrail: only approved index futures are allowed.
         # Options (CE/PE) are NOT permitted for live execution.
         sym_up = symbol.upper().strip()
 
@@ -163,25 +196,44 @@ class OrderExecutionTools:
                 "error": (
                     f"BLOCKED: bare logical name '{symbol}' not accepted. "
                     f"Use the resolved futures tsym "
-                    f"(e.g. NIFTY28APR26F, BANKNIFTY28APR26F). "
+                    f"(e.g. NIFTY28APR26F, BANKNIFTY28APR26F, FINNIFTY28APR26F). "
                     f"Check the ACTIVE FUTURES INSTRUMENTS section in context for the correct tsym."
                 ),
                 "status": "REJECTED",
             }
 
-        if not (sym_up.startswith("NIFTY") or sym_up.startswith("BANKNIFTY")):
-            return {"error": "BLOCKED: Only NIFTY and BANKNIFTY instruments are allowed.", "status": "REJECTED"}
+        if not (sym_up.startswith("NIFTY") or sym_up.startswith("BANKNIFTY") or sym_up.startswith("FINNIFTY")):
+            return {
+                "error": "BLOCKED: Only NIFTY, BANKNIFTY, and FINNIFTY futures are allowed.",
+                "status": "REJECTED",
+            }
         if sym_up.endswith("CE") or sym_up.endswith("PE"):
             return {
                 "error": (
                     "BLOCKED: Options (CE/PE) are disabled for live execution. "
-                    "Use the resolved NIFTY/BANKNIFTY futures tsym (e.g. NIFTY28APR26F) instead."
+                    "Use the resolved NIFTY/BANKNIFTY/FINNIFTY futures tsym "
+                    "(e.g. NIFTY28APR26F) instead."
+                ),
+                "status": "REJECTED",
+            }
+
+        lot_size = self._ledger.get_lot_size(symbol)
+        if not lot_size:
+            return {
+                "error": f"BLOCKED: Cannot determine futures lot size for {symbol}.",
+                "status": "REJECTED",
+            }
+        if quantity != lot_size:
+            return {
+                "error": (
+                    f"BLOCKED: Only 1 lot allowed per trade for {symbol}. "
+                    f"Required quantity is exactly {lot_size}; requested {quantity}."
                 ),
                 "status": "REJECTED",
             }
 
         # Run state guardrails
-        guardrail_error = self._check_guardrails(is_new_entry=True)
+        guardrail_error = self._check_guardrails(is_new_entry=True, symbol=symbol)
         if guardrail_error:
             logger.warning(f"Guardrail blocked order: {guardrail_error}")
             return {"error": guardrail_error, "status": "REJECTED"}
@@ -197,6 +249,15 @@ class OrderExecutionTools:
 
         # Check risk
         entry_price = (best_bid + best_ask) / 2 if order_type == "MARKET" else price
+        direction_error = self._validate_exit_levels(
+            direction=direction,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            target=target,
+        )
+        if direction_error:
+            return {"error": f"BLOCKED: {direction_error}", "status": "REJECTED"}
+
         is_valid, reason = self._ledger.validate_position_size(
             entry_price=entry_price,
             quantity=quantity,
@@ -205,6 +266,16 @@ class OrderExecutionTools:
         )
         if not is_valid:
             return {"error": f"BLOCKED: {reason}", "status": "REJECTED"}
+
+        margin_required, margin_error = self._get_shoonya_order_margin(
+            symbol=symbol,
+            direction=direction,
+            quantity=quantity,
+            entry_price=entry_price,
+        )
+        if margin_error:
+            logger.warning(f"Guardrail blocked order: {margin_error}")
+            return {"error": margin_error, "status": "REJECTED"}
 
         if order_type == "MARKET":
             # Immediate fill
@@ -215,6 +286,7 @@ class OrderExecutionTools:
                 best_bid=best_bid,
                 best_ask=best_ask,
             )
+            fill["margin_used"] = margin_required
             fill["stop_loss"] = stop_loss
             fill["target"] = target
             return self._process_fill(fill)
@@ -289,6 +361,12 @@ class OrderExecutionTools:
         if not position:
             return {"error": f"No open position for {symbol}"}
 
+        return self._close_position_record(position)
+
+    def _close_position_record(self, position: dict) -> dict:
+        """Close a specific position record, preserving same-symbol positions."""
+        symbol = position["symbol"]
+
         # Get current price for exit
         bid_ask = self._get_bid_ask(symbol)
         if not bid_ask:
@@ -316,7 +394,19 @@ class OrderExecutionTools:
         )
 
         # Update state
-        self._state.remove_position(symbol)
+        order_id = position.get("order_id")
+        if order_id:
+            removed = self._state.remove_position_by_order_id(order_id)
+        else:
+            removed = self._state.remove_position(symbol)
+        if not removed:
+            return {
+                "error": (
+                    f"Position {symbol} could not be removed from state "
+                    f"(order_id={order_id or 'N/A'})."
+                ),
+                "status": "ERROR",
+            }
         self._state.update_daily_pnl(pnl)
         self._state.add_trade({
             "symbol": symbol,
@@ -328,6 +418,7 @@ class OrderExecutionTools:
             "pnl_pct": round(pnl / (position["entry_price"] * position["quantity"]) * 100, 2),
             "entry_time": position.get("entry_time"),
             "exit_time": time.time(),
+            "entry_order_id": order_id,
         })
 
         logger.info(f"CLOSED: {symbol} @ ₹{fill['fill_price']:.2f}, P&L: ₹{pnl:,.2f}")
@@ -356,7 +447,7 @@ class OrderExecutionTools:
 
         results = []
         for pos in list(positions):  # Copy list since we modify during iteration
-            result = self.close_position(pos["symbol"])
+            result = self._close_position_record(pos)
             results.append(result)
 
         # Cancel all pending orders too
@@ -465,12 +556,36 @@ class OrderExecutionTools:
             )
 
             if should_fill:
+                guardrail_error = self._check_guardrails(is_new_entry=True, symbol=order["symbol"])
+                if guardrail_error:
+                    self._state.remove_pending_order(order["order_id"])
+                    logger.warning(
+                        f"LIMIT ORDER CANCELLED BY GUARDRAIL: {order['order_id']} "
+                        f"({order['symbol']}): {guardrail_error}"
+                    )
+                    continue
+
+                margin_required, margin_error = self._get_shoonya_order_margin(
+                    symbol=order["symbol"],
+                    direction=order["direction"],
+                    quantity=order["quantity"],
+                    entry_price=order.get("limit_price"),
+                )
+                if margin_error:
+                    self._state.remove_pending_order(order["order_id"])
+                    logger.warning(
+                        f"LIMIT ORDER CANCELLED BY MARGIN GUARDRAIL: {order['order_id']} "
+                        f"({order['symbol']}): {margin_error}"
+                    )
+                    continue
+
                 fill = self._ledger.execute_limit_fill(
                     symbol=order["symbol"],
                     direction=order["direction"],
                     quantity=order["quantity"],
                     limit_price=order["limit_price"],
                 )
+                fill["margin_used"] = margin_required
                 fill["stop_loss"] = order.get("stop_loss")
                 fill["target"] = order.get("target")
                 self._state.remove_pending_order(order["order_id"])
@@ -501,6 +616,9 @@ class OrderExecutionTools:
             if current_price is None:
                 continue
 
+            self._apply_trailing_stop(pos, current_price)
+            sl = pos.get("stop_loss")
+
             direction = pos["direction"]
             reason = None
 
@@ -517,11 +635,82 @@ class OrderExecutionTools:
 
             if reason:
                 logger.info(f"AUTO-CLOSE {pos['symbol']}: {reason}")
-                result = self.close_position(pos["symbol"])
+                result = self._close_position_record(pos)
                 result["auto_close_reason"] = reason
                 auto_closed.append(result)
 
         return auto_closed
+
+    def _apply_trailing_stop(self, pos: dict, current_price: float) -> bool:
+        """
+        Deterministically ratchet stop-loss as profit expands.
+
+        Rule:
+        - At +0.5% favorable move, move SL to entry/breakeven.
+        - At +1.0% favorable move, lock +0.5%.
+        - At +2.0% favorable move, lock +1.0%.
+        - For every additional +1% favorable move, lock another +1%.
+        BUY entry 100: price 100.5 => SL 100, 101 => SL 100.5,
+        102 => SL 101, 103 => SL 102. SELL mirrors this.
+        The stop never moves backwards.
+        """
+        entry = float(pos.get("entry_price") or 0)
+        if entry <= 0:
+            return False
+
+        direction = pos.get("direction")
+        if direction == "BUY":
+            favorable_pct = (current_price - entry) / entry * 100
+        elif direction == "SELL":
+            favorable_pct = (entry - current_price) / entry * 100
+        else:
+            return False
+
+        if favorable_pct < 0.5:
+            return False
+
+        if favorable_pct < 1:
+            locked_pct = 0.0
+        elif favorable_pct < 2:
+            locked_pct = 0.5
+        else:
+            locked_pct = float(int(favorable_pct) - 1)
+
+        old_sl = pos.get("stop_loss")
+        if direction == "BUY":
+            new_sl = round(entry * (1 + locked_pct / 100), 2)
+            if old_sl is not None and new_sl <= float(old_sl):
+                return False
+        else:
+            new_sl = round(entry * (1 - locked_pct / 100), 2)
+            if old_sl is not None and new_sl >= float(old_sl):
+                return False
+
+        order_id = pos.get("order_id")
+        updates = {
+            "stop_loss": new_sl,
+            "trailing_stop_active": True,
+            "trailing_profit_pct": round(favorable_pct, 2),
+            "trailing_locked_pct": locked_pct,
+            "trailing_updated_at": time.time(),
+        }
+        updated = (
+            self._state.update_position_by_order_id(order_id, **updates)
+            if order_id else self._state.update_position(pos["symbol"], **updates)
+        )
+        if updated:
+            pos.update(updates)
+            locked_label = (
+                str(int(locked_pct)) if float(locked_pct).is_integer()
+                else str(locked_pct)
+            )
+            logger.info(
+                f"TRAILING STOP UPDATED {pos['symbol']} order_id={order_id or 'N/A'}: "
+                f"profit={favorable_pct:.2f}% locked={locked_label}% "
+                f"SL {old_sl if old_sl is not None else 'None'} -> {new_sl:.2f}"
+            )
+            return True
+        return False
 
     # ──────────────────────────────────────────────────────────
     #   INTERNAL HELPERS
@@ -541,6 +730,145 @@ class OrderExecutionTools:
         # REST fallback
         if token and exchange:
             return self._client.get_best_bid_ask_rest(exchange, token)
+
+        return None
+
+    def _logical_instrument(self, symbol: str) -> Optional[str]:
+        """Map a futures tsym to its logical instrument for no-pyramiding checks."""
+        sym = (symbol or "").upper()
+        if "BANKNIFTY" in sym:
+            return "BANKNIFTY"
+        if "FINNIFTY" in sym:
+            return "FINNIFTY"
+        if "NIFTY" in sym:
+            return "NIFTY"
+        return None
+
+    def _check_margin_capacity(self, margin_required: float) -> Optional[str]:
+        """Reject entries that would exceed virtual capital buying power."""
+        state = self._state.get_state()
+        capital = float(state.get("virtual_capital", 0) or 0)
+        daily_pnl = float(state.get("daily_pnl", 0) or 0)
+        margin_used = float(state.get("margin_used", 0) or 0)
+        available_margin = capital + daily_pnl - margin_used
+        if margin_required > available_margin:
+            return (
+                f"BLOCKED: Margin required ₹{margin_required:,.0f} exceeds "
+                f"available virtual margin ₹{available_margin:,.0f}. "
+                f"Capital ₹{capital:,.0f}, current margin used ₹{margin_used:,.0f}, "
+                f"daily P&L ₹{daily_pnl:,.0f}."
+            )
+        return None
+
+    def _get_shoonya_order_margin(
+        self,
+        symbol: str,
+        direction: str,
+        quantity: int,
+        entry_price: float,
+    ) -> tuple[Optional[float], Optional[str]]:
+        """
+        Ask Shoonya RMS for actual order margin before accepting a virtual fill.
+
+        Fail closed: if Shoonya cannot return margin, the simulator rejects the
+        trade rather than using an invented approximation.
+        """
+        if not self._client or not hasattr(self._client, "get_order_margin"):
+            return None, "BLOCKED: Shoonya margin API unavailable."
+
+        exchange = self._resolve_exchange(symbol)
+        trantype = "B" if direction == "BUY" else "S"
+        resp = self._client.get_order_margin(
+            exchange=exchange,
+            tradingsymbol=symbol,
+            quantity=quantity,
+            price=entry_price,
+            transaction_type=trantype,
+            product="M",
+            price_type="LMT",
+        )
+        if not resp:
+            return None, "BLOCKED: Shoonya margin API returned no response."
+
+        stat = resp.get("stat")
+        remarks = str(resp.get("remarks", ""))
+        emsg = str(resp.get("emsg", ""))
+        if stat != "Ok":
+            reason = emsg or remarks or "unknown Shoonya margin rejection"
+            return None, f"BLOCKED: Shoonya margin check failed: {reason}"
+
+        if "insufficient" in remarks.lower():
+            shortfall = resp.get("marginused")
+            return None, (
+                "BLOCKED: Shoonya margin check says Insufficient Balance"
+                + (f" (shortfall/additional margin ₹{shortfall})" if shortfall else "")
+            )
+
+        raw_margin = resp.get("ordermargin")
+        if raw_margin in (None, ""):
+            raw_margin = resp.get("marginused")
+        try:
+            margin_required = float(raw_margin)
+        except (TypeError, ValueError):
+            return None, (
+                "BLOCKED: Shoonya margin response did not contain numeric "
+                f"ordermargin/marginused: {resp}"
+            )
+
+        capacity_error = self._check_margin_capacity(margin_required)
+        if capacity_error:
+            return None, capacity_error
+
+        logger.info(
+            "Shoonya margin OK: %s %s %sx %s @ %.2f margin=₹%,.2f remarks=%s",
+            trantype,
+            exchange,
+            quantity,
+            symbol,
+            entry_price,
+            margin_required,
+            remarks or "n/a",
+        )
+        return margin_required, None
+
+    @staticmethod
+    def _validate_exit_levels(
+        direction: str,
+        entry_price: float,
+        stop_loss: Optional[float],
+        target: Optional[float],
+    ) -> Optional[str]:
+        """
+        Validate that SL/target are on the correct side of entry.
+
+        This prevents pathological fills like a SELL with target above entry,
+        which can be auto-closed as a "target hit" while still losing money.
+        """
+        if entry_price is None:
+            return "Cannot validate stop/target without an entry price."
+
+        if direction == "BUY":
+            if stop_loss is not None and stop_loss >= entry_price:
+                return (
+                    f"BUY stop_loss must be below entry. "
+                    f"entry={entry_price:.2f}, stop_loss={stop_loss:.2f}"
+                )
+            if target is not None and target <= entry_price:
+                return (
+                    f"BUY target must be above entry. "
+                    f"entry={entry_price:.2f}, target={target:.2f}"
+                )
+        elif direction == "SELL":
+            if stop_loss is not None and stop_loss <= entry_price:
+                return (
+                    f"SELL stop_loss must be above entry. "
+                    f"entry={entry_price:.2f}, stop_loss={stop_loss:.2f}"
+                )
+            if target is not None and target >= entry_price:
+                return (
+                    f"SELL target must be below entry. "
+                    f"entry={entry_price:.2f}, target={target:.2f}"
+                )
 
         return None
 
@@ -567,11 +895,14 @@ class OrderExecutionTools:
         2. In-memory token cache (from previous searches)
         3. search_scrip API (NFO first, then NSE)
         """
+        sym_up = symbol.upper().strip()
+        if sym_up in _BARE_LOGICAL_NAMES:
+            return None
+
         if symbol in self._token_cache:
             return self._token_cache[symbol]
 
         # Check active_tokens map first (handles futures tsym lookups like NIFTY28APR26F)
-        sym_up = symbol.upper()
         for logical, info in self._active_tokens.items():
             tsym = info.get("tsym", "")
             if tsym and tsym.upper() == sym_up:
@@ -579,13 +910,6 @@ class OrderExecutionTools:
                 if token:
                     self._token_cache[symbol] = token
                     return token
-            # Also allow bare logical name (e.g. "NIFTY") to resolve to futures token
-            if logical.upper() == sym_up:
-                token = str(info.get("token", ""))
-                if token:
-                    self._token_cache[symbol] = token
-                    return token
-
         results = self._client.search_scrip("NFO", symbol)
         if not results:
             results = self._client.search_scrip("NSE", symbol)
@@ -600,8 +924,7 @@ class OrderExecutionTools:
 
         Futures tsyms (e.g. NIFTY28APR26F, BANKNIFTY28APR26F) end with 'F'
         and contain month-year digits; they trade on NFO.
-        Options (CE/PE suffixes) also trade on NFO.
-        Bare index names (NIFTY, BANKNIFTY) are on NSE.
+        Bare index names (NIFTY, BANKNIFTY, FINNIFTY) are on NSE when present.
         """
         sym = symbol.upper()
         if any(x in sym for x in ["CE", "PE"]):
@@ -628,12 +951,6 @@ class OrderExecutionTools:
             "target": fill.get("target"),
         }
         self._state.add_position(position)
-
-        # Deduct cost from balance (for option buys = premium)
-        if fill["direction"] == "BUY":
-            self._state.update_balance(-fill["cost"])
-        else:
-            self._state.update_balance(fill["cost"])
 
         return {
             "order_id": fill["order_id"],

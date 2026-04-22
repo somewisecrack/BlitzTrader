@@ -16,13 +16,20 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _make_scrip(tsym: str, instname: str, exd: str, token: str = "99999") -> dict:
+def _make_scrip(
+    tsym: str,
+    instname: str,
+    exd: str,
+    token: str = "99999",
+    lot_size: int = 25,
+) -> dict:
     """Helper to build a minimal scrip dict as returned by search_scrip."""
     return {
         "tsym": tsym,
         "instname": instname,
         "exd": exd,
         "token": token,
+        "ls": str(lot_size),
         "symname": tsym.split("2")[0] if "2" in tsym else tsym,
     }
 
@@ -126,6 +133,27 @@ class TestBankniftyResolvesCorrectly(unittest.TestCase):
         result = client.get_front_month_futures_token("BANKNIFTY")
         self.assertIsNotNone(result)
         self.assertEqual(result["tsym"], "BANKNIFTY28APR26F")
+
+
+class TestFinniftyResolvesCorrectly(unittest.TestCase):
+    """FINNIFTY is a supported front-month FUTIDX instrument."""
+
+    def test_finnifty_resolves_to_finnifty_not_nifty(self):
+        """FINNIFTY query must select FINNIFTY and preserve Shoonya lot size."""
+        expiry = _future_expiry(18)
+        scrips = [
+            _make_scrip("NIFTY28APR26F", "FUTIDX", expiry, token="11111", lot_size=25),
+            _make_scrip("FINNIFTY28APR26F", "FUTIDX", expiry, token="33333", lot_size=60),
+        ]
+        client = _build_client(scrips)
+        result = client.get_front_month_futures_token("FINNIFTY")
+
+        self.assertIsNotNone(result, "Should resolve to FINNIFTY front-month futures")
+        self.assertEqual(result["tsym"], "FINNIFTY28APR26F")
+        self.assertEqual(result["token"], "33333")
+        self.assertEqual(result["name"], "FINNIFTY")
+        self.assertEqual(result["exchange"], "NFO")
+        self.assertEqual(result["lot_size"], 60)
 
 
 class TestNoMatchReturnsNone(unittest.TestCase):
