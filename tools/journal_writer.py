@@ -105,7 +105,7 @@ class JournalWriter:
             entry += f"**Reasoning:** {reason}\n"
 
         # Auto-append ground truth for EOD/STOP/summary entries
-        if action.upper() in ("EOD", "STOP", "ABORT", "END") and self._state_manager:
+        if action.upper() in ("EOD", "EOD_SUMMARY", "STOP", "ABORT", "END") and self._state_manager:
             state = self._state_manager.get_state()
             trades = state.get("trades", [])
             pnl = state.get("daily_pnl", 0)

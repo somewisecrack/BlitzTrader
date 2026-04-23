@@ -797,13 +797,6 @@ class OrderExecutionTools:
             reason = emsg or remarks or "unknown Shoonya margin rejection"
             return None, f"BLOCKED: Shoonya margin check failed: {reason}"
 
-        if "insufficient" in remarks.lower():
-            shortfall = resp.get("marginused")
-            return None, (
-                "BLOCKED: Shoonya margin check says Insufficient Balance"
-                + (f" (shortfall/additional margin ₹{shortfall})" if shortfall else "")
-            )
-
         raw_margin = resp.get("ordermargin")
         if raw_margin in (None, ""):
             raw_margin = resp.get("marginused")
@@ -829,6 +822,13 @@ class OrderExecutionTools:
             margin_required,
             remarks or "n/a",
         )
+        if remarks and "insufficient" in remarks.lower():
+            logger.warning(
+                "Shoonya margin response included remarks=%r despite stat=Ok. "
+                "Using numeric ordermargin=%s for virtual-capacity checks.",
+                remarks,
+                f"₹{margin_required:,.2f}",
+            )
         return margin_required, None
 
     @staticmethod

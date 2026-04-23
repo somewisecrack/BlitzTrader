@@ -333,6 +333,36 @@ class TestExecutionEnforcement(unittest.TestCase):
         self.assertEqual(result.get("status"), "REJECTED")
         self.assertIn("Shoonya margin check failed", result.get("error", ""))
 
+    def test_shoonya_ok_margin_is_accepted_even_if_remarks_say_insufficient(self):
+        """
+        Some Shoonya responses return stat=Ok and numeric ordermargin while also
+        setting remarks='Insufficient Balance' because account cash is 0 in the
+        broker account. The simulator must use the numeric ordermargin and apply
+        its own virtual-capital check instead of hard-blocking on remarks text.
+        """
+        self.executor._state.get_state.return_value.update({
+            "virtual_capital": 1_000_000,
+            "daily_pnl": 0.0,
+            "margin_used": 0.0,
+        })
+        self.executor._client.get_order_margin.return_value = {
+            "stat": "Ok",
+            "remarks": "Insufficient Balance",
+            "cash": "0.00",
+            "ordermargin": "188473.52",
+            "marginused": "188473.52",
+            "marginusedprev": "0.00",
+        }
+        result = self.executor.place_virtual_order(
+            symbol="NIFTY28APR26F",
+            direction="BUY",
+            quantity=25,
+            stop_loss=23900.0,
+        )
+        self.assertEqual(result.get("status"), "FILLED", result)
+        added_position = self.executor._state.add_position.call_args.args[0]
+        self.assertEqual(added_position["margin_used"], 188473.52)
+
     def test_rejects_sell_target_above_entry(self):
         """A SELL target above entry would create a losing 'target hit' and must be blocked."""
         self.executor._feed.get_best_bid_ask.return_value = (23995.0, 24005.0)
@@ -623,6 +653,51 @@ class TestExecutionEnforcement(unittest.TestCase):
         )
         live_names = {tool["name"] for tool in registry.get_tool_definitions()}
         self.assertNotIn("get_option_chain", live_names)
+
+    def test_registry_suppresses_fake_enter_after_rejected_order(self):
+        """ENTER logs must not be written if the order tool just rejected the trade."""
+        from tools.registry import ToolRegistry
+
+        order_exec = MagicMock()
+        order_exec.place_virtual_order.return_value = {
+            "status": "REJECTED",
+            "error": "BLOCKED: Shoonya margin check says Insufficient Balance",
+            "symbol": "NIFTY28APR26F",
+            "direction": "SELL",
+        }
+        journal = MagicMock()
+        journal.log_decision.return_value = {"status": "logged"}
+        registry = ToolRegistry(
+            market_data=MagicMock(),
+            order_execution=order_exec,
+            telegram=MagicMock(),
+            journal=journal,
+            strategy_reader=MagicMock(),
+            memory_reader=MagicMock(),
+            goal_manager=MagicMock(),
+        )
+
+        place = registry.execute("place_virtual_order", {
+            "symbol": "NIFTY28APR26F",
+            "direction": "SELL",
+            "quantity": 25,
+            "stop_loss": 24300.0,
+            "target": 24100.0,
+        })
+        self.assertEqual(place["status"], "REJECTED")
+
+        registry.execute("log_decision", {
+            "action": "ENTER_SHORT",
+            "symbol": "NIFTY28APR26F",
+            "strategy_applied": "VP-05 3EMA Trend",
+            "market_context_summary": "Bearish setup",
+            "reason": "Approved by model",
+        })
+
+        journal.log_decision.assert_called_once()
+        kwargs = journal.log_decision.call_args.kwargs
+        self.assertEqual(kwargs["action"], "REJECT")
+        self.assertIn("Latest order result", kwargs["reason"])
 
     def test_daily_trade_cap_blocks_eleventh_entry(self):
         """Completed + open + pending entries must not exceed daily cap."""

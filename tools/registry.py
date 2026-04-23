@@ -72,6 +72,7 @@ class ToolRegistry:
         self._strategy = strategy_reader
         self._memory = memory_reader
         self._goals = goal_manager
+        self._pending_entry_log = None
 
         # Build the tool map — NOTE: get_option_chain is NOT in this map so the
         # live agent cannot call it.  It lives in _legacy_tool_map only.
@@ -90,7 +91,7 @@ class ToolRegistry:
             "get_todays_trades": self._order_exec.get_todays_trades,
             "get_daily_pnl": self._order_exec.get_daily_pnl,
             # Order Execution
-            "place_virtual_order": self._order_exec.place_virtual_order,
+            "place_virtual_order": self._place_virtual_order_tracked,
             "cancel_order": self._order_exec.cancel_order,
             "close_position": self._order_exec.close_position,
             "close_all_positions": self._order_exec.close_all_positions,
@@ -104,7 +105,7 @@ class ToolRegistry:
             # Communication
             "send_telegram": self._telegram.send_telegram,
             # Journal
-            "log_decision": self._journal.log_decision,
+            "log_decision": self._log_decision_guarded,
         }
 
         # Legacy tool map — available for manual/informational use ONLY.
@@ -150,6 +151,77 @@ class ToolRegistry:
         except Exception as e:
             logger.exception(f"Tool {tool_name} failed")
             return {"error": f"Tool {tool_name} failed: {e}"}
+
+    def _place_virtual_order_tracked(self, **tool_input) -> dict:
+        """Track the latest order result so fake ENTER logs can be suppressed."""
+        result = self._order_exec.place_virtual_order(**tool_input)
+        symbol = str(tool_input.get("symbol") or result.get("symbol") or "").upper()
+        direction = str(tool_input.get("direction") or result.get("direction") or "").upper()
+        self._pending_entry_log = {
+            "symbol": symbol,
+            "direction": direction,
+            "status": str(result.get("status", "")).upper(),
+            "result": result,
+        }
+        return result
+
+    def _log_decision_guarded(
+        self,
+        action: str,
+        symbol: str = "",
+        reason: str = "",
+        strategy_applied: str = "",
+        market_context_summary: str = "",
+    ) -> dict:
+        """
+        Prevent misleading ENTER logs unless a matching order actually succeeded.
+        """
+        action_up = (action or "").upper()
+        symbol_up = (symbol or "").upper()
+
+        if action_up in ("ENTER_LONG", "ENTER_SHORT"):
+            expected_direction = "BUY" if action_up == "ENTER_LONG" else "SELL"
+            pending = self._pending_entry_log or {}
+            pending_status = str(pending.get("status", "")).upper()
+            pending_symbol = str(pending.get("symbol", "")).upper()
+            pending_direction = str(pending.get("direction", "")).upper()
+
+            if (
+                pending_status not in ("FILLED", "PENDING")
+                or pending_symbol != symbol_up
+                or pending_direction != expected_direction
+            ):
+                failure = pending.get("result", {}) if isinstance(pending.get("result"), dict) else {}
+                failure_reason = failure.get("error") or failure.get("message") or "No successful order placement was recorded."
+                logger.warning(
+                    "Suppressing misleading %s journal entry for %s. "
+                    "Latest matching order result was status=%s error=%r",
+                    action_up,
+                    symbol_up or "(no symbol)",
+                    pending_status or "NONE",
+                    failure.get("error"),
+                )
+                self._pending_entry_log = None
+                return self._journal.log_decision(
+                    action="REJECT",
+                    symbol=symbol,
+                    strategy_applied=strategy_applied,
+                    market_context_summary=market_context_summary,
+                    reason=(
+                        "Entry was not executed. "
+                        f"Latest order result: {failure_reason}"
+                    ),
+                )
+
+            self._pending_entry_log = None
+
+        return self._journal.log_decision(
+            action=action,
+            symbol=symbol,
+            reason=reason,
+            strategy_applied=strategy_applied,
+            market_context_summary=market_context_summary,
+        )
 
     def get_tool_definitions(self) -> list[dict]:
         """
