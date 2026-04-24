@@ -451,21 +451,43 @@ class BlitzTrader:
         if not self._telegram or not self._state:
             return False
         text = " ".join((m.get("text") or "").lower() for m in chat_messages)
+        wants_capital = any(
+            phrase in text
+            for phrase in (
+                "capital",
+                "balance",
+                "available balance",
+                "available funds",
+                "margin available",
+                "virtual capital",
+            )
+        )
         wants_status = any(
             word in text
             for word in ("pnl", "p&l", "profit", "loss", "position", "positions", "status")
         )
-        if not wants_status:
+        if not wants_status and not wants_capital:
             return False
 
         state = self._state.get_state()
         pnl = float(state.get("daily_pnl", 0) or 0)
         pnl_pct = float(state.get("daily_pnl_pct", 0) or 0)
+        capital = float(state.get("virtual_capital", 0) or 0)
+        available_balance = float(state.get("available_balance", 0) or 0)
+        margin_used = float(state.get("margin_used", 0) or 0)
         positions = self._order_exec.get_open_positions() if self._order_exec else {"positions": []}
-        lines = [
-            f"Current P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)",
-            f"Open positions: {positions.get('count', 0)}",
-        ]
+        lines = []
+        if wants_capital:
+            lines.extend([
+                f"Virtual capital: ₹{capital:,.2f}",
+                f"Available balance: ₹{available_balance:,.2f}",
+                f"Margin used: ₹{margin_used:,.2f}",
+            ])
+        if wants_status or not wants_capital:
+            lines.extend([
+                f"Current P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)",
+                f"Open positions: {positions.get('count', 0)}",
+            ])
         for pos in positions.get("positions", []):
             lines.append(
                 f"- {pos.get('direction')} {pos.get('symbol')} "
