@@ -2,9 +2,9 @@
 context_builder.py — Assembles context packets for each agent iteration.
 
 Three types of context:
-  1. Startup    — reads memory, sets goals, plans the session
-  2. Signal     — Gemini approves/rejects scanner-detected candidates
-  3. Chat       — immediate response to a Telegram message
+  1. Startup    — legacy helper (live startup is deterministic in Python)
+  2. Chat       — immediate response to a Telegram message
+  3. EOD        — Gemini-only end-of-day reflection and summary
 """
 import logging
 from datetime import datetime
@@ -29,13 +29,12 @@ def build_system_prompt(
     max_daily_loss_amount = virtual_capital * max_daily_loss_pct
     return f"""You are BlitzTrader, an autonomous intraday trading agent for NIFTY, BANKNIFTY, and FINNIFTY FUTURES on NSE India. You have been given {_fmt_inr(virtual_capital)} in virtual capital.
 
-You are a true autonomous agent. You have persistent memory across sessions, you set your own session goals, and you respond immediately to the trader on Telegram. You are not executing a script — you are thinking, learning, and adapting.
+You are BlitzTrader's reporting and reflection layer. The live trading engine is deterministic Python. You do not decide entries or exits during the session unless the trader explicitly asks you to analyze/report.
 
 Your job:
-- During market hours (9:15 AM to 3:15 PM IST): the Python scanner watches every 60 seconds; you are invoked ONLY when there are actionable trade candidates, or when the trader sends a chat message. Be silent unless you have an ACTION to take (buy/sell/close) or a candidate to approve/reject.
-- Immediately when the trader messages you on Telegram: respond conversationally and helpfully with send_telegram()
-- At session start: read your memory, review past journals, set goals for today
-- At session end: reflect honestly on the day, update your memory with lessons
+- When the trader messages you on Telegram: respond conversationally and helpfully with send_telegram()
+- At session end: reflect honestly on the day, update memory with lessons, and write the EOD summary
+- Never claim you approved or rejected a live trade unless the user is explicitly asking for post-trade analysis
 
 ═══════════════════════════════════════
 EXECUTION MODE: FUTURES ONLY
@@ -60,8 +59,8 @@ HARD CONSTRAINTS (never override)
 - Daily loss -{max_daily_loss_pct * 100:.0f}% ({_fmt_inr(max_daily_loss_amount)}) → close all and stop
 - 3:15 PM IST → close ALL positions regardless of P&L
 - Do not invent quantity. Quantity must equal the resolved futures lot_size for that instrument.
-- Notify trader via send_telegram() ONLY on actual trades (entries and exits), NOT on observations
-- For signal-review iterations, log each candidate outcome via log_decision(): ENTER_* if traded, REJECT/SKIP if not traded. Do not log routine HOLDs when no candidate exists.
+- The Python engine owns live trade execution, guardrails, and intraday journaling
+- Do not fabricate discretionary trade approvals that never happened in Python
 
 ═══════════════════════════════════════
 SESSION PHASES (IST)
@@ -149,7 +148,7 @@ The system auto-appends verified data to your messages. The trader cross-checks.
 Available tools: get_spot_price, get_quote, get_candles, get_indicators, get_strategy_signals, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, place_virtual_order, cancel_order, close_position, close_all_positions, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision
 
 NOTE: The live tool list is futures-only. Trade entry and execution must stay on the active futures contracts shown in context.
-ROLE BOUNDARY: Python detects candidate setups and enforces hard risk guardrails. You are the qualitative gatekeeper. Do not assume a scanner candidate is valid just because it appears in context; approve or reject it based on strategy rules, current indicators, market phase, VIX/regime, and risk quality."""
+ROLE BOUNDARY: Python owns live trade decisions, execution, and guardrails. You are used for trader-facing reporting, diagnostics, and EOD reflection."""
 
 
 SYSTEM_PROMPT = build_system_prompt()

@@ -1,8 +1,7 @@
 """
 tests/test_event_driven_gatekeeper.py
 -------------------------------------
-Proves Python only performs hard guardrail filtering before Gemini review.
-It must not score or approve strategy quality.
+Proves Python is the live decision engine for signal execution.
 """
 import os
 import sys
@@ -90,7 +89,7 @@ def _signal(symbol="NIFTY", strategy="VP-05 3EMA Trend", direction="BUY"):
 
 class TestEventDrivenGatekeeper(unittest.TestCase):
 
-    def test_tradeable_signal_is_enriched_for_gemini_without_scoring(self):
+    def test_tradeable_signal_is_enriched_without_scoring(self):
         bot = _bot_with_state(_state())
         tradeable, blocked = bot._filter_tradeable_signals(
             [_signal()],
@@ -104,7 +103,7 @@ class TestEventDrivenGatekeeper(unittest.TestCase):
         self.assertNotIn("score", tradeable[0])
         self.assertNotIn("approved", tradeable[0])
 
-    def test_same_instrument_open_position_blocks_gemini_cost(self):
+    def test_same_instrument_open_position_blocks_duplicate_entry(self):
         bot = _bot_with_state(_state(
             positions=[{"symbol": "NIFTY28APR26F", "direction": "BUY"}],
         ))
@@ -148,6 +147,86 @@ class TestEventDrivenGatekeeper(unittest.TestCase):
 
         self.assertEqual(tradeable, [])
         self.assertIn("No new entries after", blocked[0]["blocked_reason"])
+
+    def test_python_review_rejects_finnifty_vp01(self):
+        bot = _bot_with_state(_state())
+        bot._market_data = MagicMock()
+        bot._market_data.get_indicators.return_value = {
+            "current_price": 26200.0,
+            "ema20": 26220.0,
+            "adx14": 25.0,
+            "rsi14": 42.0,
+            "avg_volume_20": 1000.0,
+            "ema_stacked_bull": False,
+            "ema_stacked_bear": True,
+        }
+
+        approved, _context, reason = bot._review_signal_python({
+            "symbol": "FINNIFTY",
+            "interval": "5",
+            "strategy": "VP-01 Counter Bull Trap",
+            "direction": "SELL",
+            "stop_loss": 26250.0,
+            "target": 26100.0,
+        })
+
+        self.assertFalse(approved)
+        self.assertIn("not allowed on FINNIFTY", reason)
+
+    def test_python_review_accepts_valid_nifty_signal(self):
+        bot = _bot_with_state(_state())
+        bot._market_data = MagicMock()
+        bot._market_data.get_indicators.return_value = {
+            "current_price": 24000.0,
+            "ema20": 24020.0,
+            "adx14": 28.0,
+            "rsi14": 39.0,
+            "avg_volume_20": 50000.0,
+            "ema_stacked_bull": False,
+            "ema_stacked_bear": True,
+        }
+
+        approved, context, reason = bot._review_signal_python({
+            "symbol": "NIFTY",
+            "interval": "5",
+            "strategy": "VP-01 Counter Bull Trap",
+            "direction": "SELL",
+            "stop_loss": 24040.0,
+            "target": 23920.0,
+        })
+
+        self.assertTrue(approved)
+        self.assertIn("NIFTY 5m", context)
+        self.assertIn("Python approved", reason)
+
+    def test_python_review_enforces_volume_confirmation(self):
+        bot = _bot_with_state(_state())
+        bot._market_data = MagicMock()
+        bot._market_data.get_indicators.return_value = {
+            "current_price": 56000.0,
+            "ema20": 56100.0,
+            "adx14": 24.0,
+            "rsi14": 33.0,
+            "avg_volume_20": 12000.0,
+            "ema_stacked_bull": False,
+            "ema_stacked_bear": True,
+        }
+        bot._market_data.get_candles.return_value = {
+            "candles": [{"volume": 5000}, {"volume": 7000}],
+        }
+
+        approved, _context, reason = bot._review_signal_python({
+            "symbol": "BANKNIFTY",
+            "interval": "3",
+            "strategy": "VP-07 Wicks Pullback",
+            "direction": "SELL",
+            "stop_loss": 56150.0,
+            "target": 55850.0,
+            "requires_volume_confirmation": True,
+        })
+
+        self.assertFalse(approved)
+        self.assertIn("below avg_volume_20", reason)
 
 
 if __name__ == "__main__":
