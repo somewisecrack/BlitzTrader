@@ -107,15 +107,6 @@ class BlitzTrader:
         self._active_tokens = None
         self._llm_disabled_reason = None
         self._llm_disabled_notified = False
-        self._strategy_constraints = {
-            "VP-01 Counter Bull Trap": {"symbols": {"NIFTY", "BANKNIFTY"}, "intervals": {"3", "5", "15"}},
-            "VP-02 Counter Bear Trap": {"symbols": {"NIFTY"}, "intervals": {"3"}},
-            "VP-07 Wicks Pullback": {"symbols": {"NIFTY", "BANKNIFTY"}, "intervals": {"3", "5", "15"}},
-            "VP-20 CPR Reversal": {"symbols": {"BANKNIFTY"}, "intervals": {"3"}},
-            "VP-22 Supply Zone Reversal": {"symbols": {"NIFTY"}, "intervals": {"3", "15"}},
-            "VP-24 Pivot Bounce": {"symbols": {"BANKNIFTY"}, "intervals": {"3", "5"}},
-            "VP-24 Pivot Rejection": {"symbols": {"BANKNIFTY"}, "intervals": {"3", "5"}},
-        }
 
     def run(self):
         """Run the full trading session."""
@@ -891,15 +882,6 @@ class BlitzTrader:
         interval = str(signal.get("interval", ""))
         direction = str(signal.get("direction", "")).upper()
         strategy = str(signal.get("strategy", ""))
-        constraints = self._strategy_constraints.get(strategy)
-
-        if constraints:
-            allowed_symbols = constraints.get("symbols") or set()
-            allowed_intervals = constraints.get("intervals") or set()
-            if allowed_symbols and symbol not in allowed_symbols:
-                return False, "", f"{strategy} is not allowed on {symbol}. Allowed instruments: {sorted(allowed_symbols)}"
-            if allowed_intervals and interval not in allowed_intervals:
-                return False, "", f"{strategy} is not allowed on {interval}m. Allowed intervals: {sorted(allowed_intervals)}"
 
         indicators = self._market_data.get_indicators(symbol=symbol, interval=interval)
         if not isinstance(indicators, dict) or indicators.get("error"):

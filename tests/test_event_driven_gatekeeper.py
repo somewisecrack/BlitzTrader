@@ -148,7 +148,7 @@ class TestEventDrivenGatekeeper(unittest.TestCase):
         self.assertEqual(tradeable, [])
         self.assertIn("No new entries after", blocked[0]["blocked_reason"])
 
-    def test_python_review_rejects_finnifty_vp01(self):
+    def test_python_review_allows_finnifty_vp01_when_indicators_align(self):
         bot = _bot_with_state(_state())
         bot._market_data = MagicMock()
         bot._market_data.get_indicators.return_value = {
@@ -170,8 +170,8 @@ class TestEventDrivenGatekeeper(unittest.TestCase):
             "target": 26100.0,
         })
 
-        self.assertFalse(approved)
-        self.assertIn("not allowed on FINNIFTY", reason)
+        self.assertTrue(approved)
+        self.assertIn("Python approved", reason)
 
     def test_python_review_accepts_valid_nifty_signal(self):
         bot = _bot_with_state(_state())
