@@ -5,6 +5,7 @@ ALL financial math happens here — deterministic, no LLM involvement.
 Claude never does arithmetic on fills or balances.
 """
 import logging
+import math
 import time
 import uuid
 from typing import Optional
@@ -72,26 +73,30 @@ class VirtualLedger:
         quantity: int,
         best_bid: float,
         best_ask: float,
+        bids: Optional[list[dict]] = None,
+        asks: Optional[list[dict]] = None,
     ) -> dict:
         """
-        Simulate a MARKET order fill at bid/ask midpoint.
+        Simulate a MARKET order fill by sweeping the visible order book.
 
         :param symbol:    Trading symbol (e.g., 'NIFTY27MAR24500CE')
         :param direction: 'BUY' or 'SELL'
         :param quantity:  Number of units
         :param best_bid:  Current best bid price
         :param best_ask:  Current best ask price
+        :param bids:      Visible bid levels, highest first
+        :param asks:      Visible ask levels, lowest first
         :returns: Fill confirmation dict
         """
-        fill_price = round((best_bid + best_ask) / 2, 2)
-
-        # Simulate realistic slippage:
-        # BUY fills closer to ask, SELL fills closer to bid
-        spread = best_ask - best_bid
-        if direction == "BUY":
-            fill_price = round(best_bid + spread * 0.6, 2)  # Slight slippage toward ask
-        else:
-            fill_price = round(best_ask - spread * 0.6, 2)  # Slight slippage toward bid
+        preview = self.preview_market_fill(
+            direction=direction,
+            quantity=quantity,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            bids=bids,
+            asks=asks,
+        )
+        fill_price = preview["fill_price"]
 
         cost = fill_price * quantity
         margin_required = self.estimate_margin(symbol, quantity)
@@ -107,15 +112,146 @@ class VirtualLedger:
             "margin_used": margin_required,
             "best_bid": best_bid,
             "best_ask": best_ask,
+            "levels_consumed": preview["levels_consumed"],
+            "unfilled_qty": preview["unfilled_qty"],
+            "book_side": preview["book_side"],
             "fill_time": time.time(),
             "status": "FILLED",
         }
 
         logger.info(
             f"MARKET FILL: {direction} {quantity}x {symbol} @ ₹{fill_price:.2f} "
-            f"(bid={best_bid:.2f}, ask={best_ask:.2f})"
+            f"(bid={best_bid:.2f}, ask={best_ask:.2f}, "
+            f"levels={preview['levels_consumed']}, unfilled={preview['unfilled_qty']})"
         )
         return fill
+
+    def preview_market_fill(
+        self,
+        direction: str,
+        quantity: int,
+        best_bid: float,
+        best_ask: float,
+        bids: Optional[list[dict]] = None,
+        asks: Optional[list[dict]] = None,
+    ) -> dict:
+        """
+        Estimate a MARKET order fill by consuming the visible book.
+
+        BUY orders sweep asks from lowest to highest.
+        SELL orders sweep bids from highest to lowest.
+        If visible depth is insufficient, the remainder is filled beyond the
+        visible book one inferred tick at a time to stay conservative.
+        """
+        direction = direction.upper()
+        if direction not in ("BUY", "SELL"):
+            raise ValueError(f"Invalid direction for market fill preview: {direction}")
+        if quantity <= 0:
+            raise ValueError(f"Invalid market fill quantity: {quantity}")
+
+        raw_side = asks if direction == "BUY" else bids
+        side = self._normalize_book_side(raw_side, direction=direction)
+        fallback_price = best_ask if direction == "BUY" else best_bid
+        tick_size = self._infer_tick_size(side, best_bid, best_ask)
+
+        remaining = int(quantity)
+        total_cost = 0.0
+        levels_consumed = []
+
+        for level in side:
+            if remaining <= 0:
+                break
+            level_qty = int(level["qty"])
+            if level_qty <= 0:
+                continue
+            take_qty = min(remaining, level_qty)
+            level_price = float(level["price"])
+            total_cost += level_price * take_qty
+            levels_consumed.append({
+                "price": round(level_price, 2),
+                "qty": take_qty,
+            })
+            remaining -= take_qty
+
+        if remaining > 0:
+            last_visible_price = side[-1]["price"] if side else fallback_price
+            overflow_price = self._price_beyond_book(
+                last_visible_price=last_visible_price,
+                tick_size=tick_size,
+                steps=1,
+                direction=direction,
+            )
+            total_cost += overflow_price * remaining
+            levels_consumed.append({
+                "price": round(overflow_price, 2),
+                "qty": remaining,
+                "synthetic": True,
+            })
+            remaining = 0
+
+        avg_fill = round(total_cost / quantity, 2)
+        return {
+            "fill_price": avg_fill,
+            "levels_consumed": levels_consumed,
+            "unfilled_qty": remaining,
+            "book_side": "asks" if direction == "BUY" else "bids",
+            "tick_size": tick_size,
+        }
+
+    def _normalize_book_side(self, levels: Optional[list[dict]], direction: str) -> list[dict]:
+        """
+        Clean and sort book levels for deterministic execution.
+        """
+        cleaned = []
+        for level in levels or []:
+            try:
+                price = float(level.get("price", 0))
+                qty = int(level.get("qty", 0))
+            except (TypeError, ValueError):
+                continue
+            if price > 0 and qty > 0:
+                cleaned.append({"price": price, "qty": qty})
+
+        reverse = direction.upper() == "SELL"
+        cleaned.sort(key=lambda item: item["price"], reverse=reverse)
+        return cleaned
+
+    def _infer_tick_size(
+        self,
+        side: list[dict],
+        best_bid: float,
+        best_ask: float,
+    ) -> float:
+        """
+        Infer a conservative tick size from visible depth or spread.
+        """
+        positive_diffs = []
+        for idx in range(1, len(side)):
+            diff = abs(float(side[idx]["price"]) - float(side[idx - 1]["price"]))
+            if diff > 0:
+                positive_diffs.append(diff)
+
+        spread = abs(float(best_ask) - float(best_bid))
+        if positive_diffs:
+            return round(min(positive_diffs), 2)
+        if spread > 0:
+            return round(spread, 2)
+        return 0.05
+
+    def _price_beyond_book(
+        self,
+        last_visible_price: float,
+        tick_size: float,
+        steps: int,
+        direction: str,
+    ) -> float:
+        """
+        Move beyond the visible book in the unfavorable direction.
+        """
+        move = tick_size * max(1, int(steps))
+        if direction.upper() == "BUY":
+            return round(last_visible_price + move, 2)
+        return round(max(0.01, last_visible_price - move), 2)
 
     def check_limit_fill(
         self,

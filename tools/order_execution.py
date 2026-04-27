@@ -238,17 +238,29 @@ class OrderExecutionTools:
             logger.warning(f"Guardrail blocked order: {guardrail_error}")
             return {"error": guardrail_error, "status": "REJECTED"}
 
-        # Get live bid/ask
-        bid_ask = self._get_bid_ask(symbol)
-        if not bid_ask:
+        # Get order book snapshot for realistic market-order simulation.
+        book = self._get_order_book(symbol)
+        if not book:
             return {
-                "error": f"Cannot get bid/ask for {symbol}. Market data unavailable.",
+                "error": f"Cannot get order book for {symbol}. Market data unavailable.",
                 "status": "REJECTED",
             }
-        best_bid, best_ask = bid_ask
+        best_bid = book["best_bid"]
+        best_ask = book["best_ask"]
 
         # Check risk
-        entry_price = (best_bid + best_ask) / 2 if order_type == "MARKET" else price
+        if order_type == "MARKET":
+            preview = self._ledger.preview_market_fill(
+                direction=direction,
+                quantity=quantity,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                bids=book.get("bids"),
+                asks=book.get("asks"),
+            )
+            entry_price = preview["fill_price"]
+        else:
+            entry_price = price
         direction_error = self._validate_exit_levels(
             direction=direction,
             entry_price=entry_price,
@@ -285,6 +297,8 @@ class OrderExecutionTools:
                 quantity=quantity,
                 best_bid=best_bid,
                 best_ask=best_ask,
+                bids=book.get("bids"),
+                asks=book.get("asks"),
             )
             fill["margin_used"] = margin_required
             fill["stop_loss"] = stop_loss
@@ -368,11 +382,12 @@ class OrderExecutionTools:
         symbol = position["symbol"]
 
         # Get current price for exit
-        bid_ask = self._get_bid_ask(symbol)
-        if not bid_ask:
-            return {"error": f"Cannot get price to close {symbol}. Try again."}
+        book = self._get_order_book(symbol)
+        if not book:
+            return {"error": f"Cannot get order book to close {symbol}. Try again."}
 
-        best_bid, best_ask = bid_ask
+        best_bid = book["best_bid"]
+        best_ask = book["best_ask"]
 
         # Exit direction is opposite of entry
         exit_direction = "SELL" if position["direction"] == "BUY" else "BUY"
@@ -383,6 +398,8 @@ class OrderExecutionTools:
             quantity=position["quantity"],
             best_bid=best_bid,
             best_ask=best_ask,
+            bids=book.get("bids"),
+            asks=book.get("asks"),
         )
 
         # Calculate realized P&L
@@ -732,6 +749,81 @@ class OrderExecutionTools:
             return self._client.get_best_bid_ask_rest(exchange, token)
 
         return None
+
+    def _get_order_book(self, symbol: str) -> Optional[dict]:
+        """
+        Get a market-depth snapshot for realistic market-order simulation.
+
+        Prefers REST get_quotes() because Shoonya exposes up to 5 levels there.
+        Falls back to top-of-book from the live feed when only bp1/sp1 is available.
+        """
+        token = self._resolve_token(symbol)
+        exchange = self._resolve_exchange(symbol)
+        live_quote = self._feed.get_live_quote(token) if token and self._feed else None
+
+        bids: list[dict] = []
+        asks: list[dict] = []
+        best_bid = best_ask = None
+
+        if token and exchange and self._client and hasattr(self._client, "get_quotes"):
+            resp = self._client.get_quotes(exchange, token)
+            if resp:
+                for i in range(1, 6):
+                    bp = resp.get(f"bp{i}")
+                    bq = resp.get(f"bq{i}")
+                    sp = resp.get(f"sp{i}")
+                    sq = resp.get(f"sq{i}")
+                    if bp is not None and bq is not None:
+                        try:
+                            bid_price = float(bp)
+                            bid_qty = int(bq)
+                        except (TypeError, ValueError):
+                            bid_price = bid_qty = 0
+                        if bid_price > 0 and bid_qty > 0:
+                            bids.append({"price": bid_price, "qty": bid_qty})
+                    if sp is not None and sq is not None:
+                        try:
+                            ask_price = float(sp)
+                            ask_qty = int(sq)
+                        except (TypeError, ValueError):
+                            ask_price = ask_qty = 0
+                        if ask_price > 0 and ask_qty > 0:
+                            asks.append({"price": ask_price, "qty": ask_qty})
+                if bids and asks:
+                    best_bid = bids[0]["price"]
+                    best_ask = asks[0]["price"]
+
+        if (best_bid is None or best_ask is None) and live_quote:
+            live_bid = live_quote.get("best_bid")
+            live_ask = live_quote.get("best_ask")
+            live_bq = live_quote.get("bid_qty") or 0
+            live_aq = live_quote.get("ask_qty") or 0
+            if live_bid and live_ask:
+                best_bid = float(live_bid)
+                best_ask = float(live_ask)
+                if not bids and live_bq:
+                    bids = [{"price": best_bid, "qty": int(live_bq)}]
+                if not asks and live_aq:
+                    asks = [{"price": best_ask, "qty": int(live_aq)}]
+
+        if best_bid is None or best_ask is None:
+            bid_ask = self._get_bid_ask(symbol)
+            if not bid_ask:
+                return None
+            best_bid, best_ask = bid_ask
+            if not bids:
+                bids = [{"price": best_bid, "qty": 1}]
+            if not asks:
+                asks = [{"price": best_ask, "qty": 1}]
+
+        return {
+            "symbol": symbol,
+            "best_bid": float(best_bid),
+            "best_ask": float(best_ask),
+            "bids": bids,
+            "asks": asks,
+            "source": "rest_depth" if len(bids) > 1 or len(asks) > 1 else "top_of_book",
+        }
 
     def _logical_instrument(self, symbol: str) -> Optional[str]:
         """Map a futures tsym to its logical instrument for no-pyramiding checks."""

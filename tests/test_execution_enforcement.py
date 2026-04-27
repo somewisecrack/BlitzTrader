@@ -45,6 +45,23 @@ def _make_executor():
     ledger.get_lot_size.side_effect = lot_size_for
     ledger.estimate_margin.return_value = 100_000
     ledger.validate_position_size.return_value = (True, "")
+    def preview_market_fill(**kwargs):
+        direction = kwargs["direction"]
+        quantity = kwargs["quantity"]
+        if direction == "BUY":
+            price = float(kwargs["best_ask"])
+            side = "asks"
+        else:
+            price = float(kwargs["best_bid"])
+            side = "bids"
+        return {
+            "fill_price": price,
+            "levels_consumed": [{"price": price, "qty": quantity}],
+            "unfilled_qty": 0,
+            "book_side": side,
+            "tick_size": 0.05,
+        }
+    ledger.preview_market_fill.side_effect = preview_market_fill
     ledger.execute_market_fill.return_value = {
         "symbol": "NIFTY28APR26F",
         "direction": "BUY",
@@ -62,6 +79,55 @@ def _make_executor():
     client = MagicMock()
     client.get_best_bid_ask_rest.return_value = (23995.0, 24005.0)
     client.search_scrip.return_value = [{"token": "66691"}]
+    def get_quotes(exchange, token):
+        if token == "66688":
+            return {
+                "stat": "Ok",
+                "bp1": "56010",
+                "bq1": "200",
+                "bp2": "56009",
+                "bq2": "300",
+                "bp3": "56008",
+                "bq3": "500",
+                "sp1": "56020",
+                "sq1": "150",
+                "sp2": "56021",
+                "sq2": "300",
+                "sp3": "56022",
+                "sq3": "500",
+            }
+        if token == "66689":
+            return {
+                "stat": "Ok",
+                "bp1": "24010",
+                "bq1": "200",
+                "bp2": "24009.5",
+                "bq2": "300",
+                "bp3": "24009",
+                "bq3": "500",
+                "sp1": "24020",
+                "sq1": "150",
+                "sp2": "24020.5",
+                "sq2": "300",
+                "sp3": "24021",
+                "sq3": "500",
+            }
+        return {
+            "stat": "Ok",
+            "bp1": "23995",
+            "bq1": "200",
+            "bp2": "23994.5",
+            "bq2": "300",
+            "bp3": "23994",
+            "bq3": "500",
+            "sp1": "24005",
+            "sq1": "150",
+            "sp2": "24005.5",
+            "sq2": "300",
+            "sp3": "24006",
+            "sq3": "500",
+        }
+    client.get_quotes.side_effect = get_quotes
     client.get_order_margin.return_value = {
         "stat": "Ok",
         "remarks": "Order Success",
@@ -211,6 +277,36 @@ class TestExecutionEnforcement(unittest.TestCase):
                          f"Futures tsym should not be blocked by bare-name check: {result}")
         self.assertNotIn("BLOCKED: Options", error_msg,
                          f"Futures tsym should not be blocked by CE/PE check: {result}")
+
+    def test_market_entry_uses_orderbook_preview_for_risk(self):
+        self.executor._ledger.preview_market_fill.side_effect = None
+        self.executor._ledger.preview_market_fill.return_value = {
+            "fill_price": 24012.0,
+            "levels_consumed": [{"price": 24005.0, "qty": 10}, {"price": 24012.0, "qty": 15}],
+            "unfilled_qty": 0,
+            "book_side": "asks",
+            "tick_size": 0.5,
+        }
+        self.executor.place_virtual_order(
+            symbol="NIFTY28APR26F",
+            direction="BUY",
+            quantity=25,
+            stop_loss=23900.0,
+        )
+        kwargs = self.executor._ledger.validate_position_size.call_args.kwargs
+        self.assertEqual(kwargs["entry_price"], 24012.0)
+
+    def test_market_entry_passes_depth_to_fill_engine(self):
+        self.executor.place_virtual_order(
+            symbol="NIFTY28APR26F",
+            direction="BUY",
+            quantity=25,
+            stop_loss=23900.0,
+        )
+        kwargs = self.executor._ledger.execute_market_fill.call_args.kwargs
+        self.assertIn("bids", kwargs)
+        self.assertIn("asks", kwargs)
+        self.assertGreaterEqual(len(kwargs["asks"]), 1)
 
     def test_valid_banknifty_futures_tsym_accepted(self):
         """BANKNIFTY28APR26F must not be blocked at the symbol-check level."""
@@ -974,6 +1070,40 @@ class TestVirtualLedgerSizing(unittest.TestCase):
         # Backward-compatible fallback when price is unavailable.
         self.assertEqual(ledger.estimate_margin("BANKNIFTY28APR26F", 15), 100_000)
         self.assertEqual(ledger.estimate_margin("BANKNIFTY28APR26F", 30), 200_000)
+
+    def test_market_fill_sweeps_ask_side_for_buy(self):
+        from tools.virtual_ledger import VirtualLedger
+
+        ledger = VirtualLedger()
+        fill = ledger.execute_market_fill(
+            symbol="NIFTY28APR26F",
+            direction="BUY",
+            quantity=25,
+            best_bid=23995.0,
+            best_ask=24000.0,
+            bids=[{"price": 23995.0, "qty": 100}],
+            asks=[{"price": 24000.0, "qty": 10}, {"price": 24001.0, "qty": 15}],
+        )
+        self.assertEqual(fill["fill_price"], 24000.6)
+        self.assertEqual(fill["levels_consumed"][0]["qty"], 10)
+        self.assertEqual(fill["levels_consumed"][1]["qty"], 15)
+
+    def test_market_fill_sweeps_bid_side_for_sell(self):
+        from tools.virtual_ledger import VirtualLedger
+
+        ledger = VirtualLedger()
+        fill = ledger.execute_market_fill(
+            symbol="BANKNIFTY28APR26F",
+            direction="SELL",
+            quantity=15,
+            best_bid=54820.0,
+            best_ask=54840.0,
+            bids=[{"price": 54820.0, "qty": 5}, {"price": 54819.0, "qty": 10}],
+            asks=[{"price": 54840.0, "qty": 100}],
+        )
+        self.assertEqual(fill["fill_price"], 54819.33)
+        self.assertEqual(fill["levels_consumed"][0]["qty"], 5)
+        self.assertEqual(fill["levels_consumed"][1]["qty"], 10)
 
 
 if __name__ == "__main__":
