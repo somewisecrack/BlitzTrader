@@ -1,16 +1,17 @@
 """
-tools/data_recorder.py - Markdown audit recorder for market data and indicators.
+tools/data_recorder.py - Compact audit recorder for market data and indicators.
 
-Writes every live-feed tick, indicator payload, and deterministic strategy
-signal the agent sees into append-only Markdown files. At EOD it can copy the
-daily export folder to a mounted Google Drive path or use an rclone remote if
-configured.
+High-volume live-feed ticks are stored in compressed JSONL so they do not fill
+the VM disk during the session. Lower-volume indicator snapshots and strategy
+signals remain in human-readable Markdown.
 """
+import gzip
 import json
 import logging
 import shutil
 import subprocess
 import threading
+from errno import ENOSPC
 from datetime import datetime
 from pathlib import Path
 
@@ -21,7 +22,10 @@ IST = pytz.timezone("Asia/Kolkata")
 
 
 class DataRecorder:
-    """Thread-safe Markdown recorder for feed ticks, indicators, and scanner signals."""
+    """Thread-safe recorder for feed ticks, indicators, and scanner signals."""
+
+    MIN_FREE_BYTES_FOR_FEED = 512 * 1024 * 1024
+    MIN_FREE_BYTES_FOR_ANY_EXPORT = 128 * 1024 * 1024
 
     FEED_FIELDS = [
         "recorded_at",
@@ -88,6 +92,8 @@ class DataRecorder:
 
         self._lock = threading.Lock()
         self._uploaded = False
+        self._disabled_reason = ""
+        self._feed_disabled_reason = ""
         self._date = datetime.now(IST).strftime("%Y%m%d")
         self._day_dir = self._base_dir / self._date
         self._day_dir.mkdir(parents=True, exist_ok=True)
@@ -108,13 +114,22 @@ class DataRecorder:
         return self._day_dir
 
     def record_feed_tick(self, token: str, quote: dict) -> None:
-        """Append one live-feed tick/merged quote to feed_ticks.md.
+        """Append one live-feed tick/merged quote to feed_ticks.jsonl.gz.
 
         Each record includes:
           symbol:         logical name (NIFTY / BANKNIFTY / FINNIFTY / INDIA VIX)
           tradingsymbol:  actual futures tsym (e.g. NIFTY28APR26F) — blank for index tokens
           token:          numeric Shoonya token
         """
+        if self._disabled_reason or self._feed_disabled_reason:
+            return
+        if not self._has_free_space(self.MIN_FREE_BYTES_FOR_FEED):
+            self._feed_disabled_reason = (
+                f"Free disk below {self.MIN_FREE_BYTES_FOR_FEED // (1024 * 1024)}MB; "
+                "disabling feed tick recording to protect trading state/journal files."
+            )
+            logger.warning(self._feed_disabled_reason)
+            return
         try:
             tok_str = str(token)
             row = {
@@ -134,19 +149,16 @@ class DataRecorder:
                 "low": quote.get("low"),
                 "prev_close": quote.get("prev_close"),
                 "feed_timestamp": quote.get("timestamp"),
+                "raw": quote,
             }
-            self._append_markdown_record(
-                self._day_dir / "feed_ticks.md",
-                "Feed Ticks",
-                "Feed Tick",
-                row,
-                raw_payload=quote,
-            )
+            self._append_jsonl_gz(self._day_dir / "feed_ticks.jsonl.gz", row)
         except Exception:
             logger.exception("Failed to record feed tick")
 
     def record_indicators(self, symbol: str, interval: str, indicators: dict) -> None:
         """Append one indicator snapshot to indicators.md."""
+        if self._disabled_reason:
+            return
         try:
             flat = {
                 key: value for key, value in indicators.items()
@@ -170,6 +182,8 @@ class DataRecorder:
 
     def record_strategy_signals(self, result: dict) -> None:
         """Append each emitted deterministic strategy signal to strategy_signals.md."""
+        if self._disabled_reason:
+            return
         try:
             for signal in result.get("signals", []):
                 row = {
@@ -211,7 +225,7 @@ class DataRecorder:
 
         result = {"status": "no_destination_configured", "local_dir": str(self._day_dir)}
         if self._drive_dir:
-            dest = self._drive_dir / "BlitzTrader" / self._date
+            dest = self._drive_dir / self._date
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 shutil.rmtree(dest)
@@ -219,6 +233,7 @@ class DataRecorder:
             result = {"status": "uploaded", "method": "copy", "destination": str(dest), "local_dir": str(self._day_dir)}
             with self._lock:
                 self._uploaded = True
+            self._prune_old_local_exports()
             logger.info(f"Markdown export copied to Google Drive folder: {dest}")
             return result
 
@@ -226,11 +241,12 @@ class DataRecorder:
             remote_path = f"{self._rclone_remote}:"
             if self._rclone_folder:
                 remote_path += f"{self._rclone_folder}/"
-            remote_path += f"BlitzTrader/{self._date}"
+            remote_path += f"{self._date}"
             subprocess.run(["rclone", "copy", str(self._day_dir), remote_path], check=True)
             result = {"status": "uploaded", "method": "rclone", "destination": remote_path, "local_dir": str(self._day_dir)}
             with self._lock:
                 self._uploaded = True
+            self._prune_old_local_exports()
             logger.info(f"Markdown export uploaded via rclone: {remote_path}")
             return result
 
@@ -247,25 +263,79 @@ class DataRecorder:
         fields: dict,
         raw_payload: dict | None = None,
     ) -> None:
+        if not self._has_free_space(self.MIN_FREE_BYTES_FOR_ANY_EXPORT):
+            self._disabled_reason = (
+                f"Free disk below {self.MIN_FREE_BYTES_FOR_ANY_EXPORT // (1024 * 1024)}MB; "
+                "disabling non-critical export recording."
+            )
+            logger.warning(self._disabled_reason)
+            return
         with self._lock:
             needs_title = not path.exists() or path.stat().st_size == 0
-            with path.open("a", encoding="utf-8") as f:
-                if needs_title:
-                    f.write(f"# {document_title} - {self._date}\n\n")
-                    f.write("Append-only trading audit generated by BlitzTrader.\n\n")
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    if needs_title:
+                        f.write(f"# {document_title} - {self._date}\n\n")
+                        f.write("Append-only trading audit generated by BlitzTrader.\n\n")
 
-                recorded_at = fields.get("recorded_at") or self._now()
-                f.write(f"## {recorded_at} - {record_title}\n\n")
-                f.write("| Field | Value |\n")
-                f.write("|---|---|\n")
-                for key, value in fields.items():
-                    f.write(f"| {self._md(key)} | {self._md(value)} |\n")
-                if raw_payload is not None:
-                    f.write("\n<details><summary>Raw JSON</summary>\n\n")
-                    f.write("```json\n")
-                    f.write(self._json(raw_payload))
-                    f.write("\n```\n\n</details>\n")
-                f.write("\n")
+                    recorded_at = fields.get("recorded_at") or self._now()
+                    f.write(f"## {recorded_at} - {record_title}\n\n")
+                    f.write("| Field | Value |\n")
+                    f.write("|---|---|\n")
+                    for key, value in fields.items():
+                        f.write(f"| {self._md(key)} | {self._md(value)} |\n")
+                    if raw_payload is not None:
+                        f.write("\n<details><summary>Raw JSON</summary>\n\n")
+                        f.write("```json\n")
+                        f.write(self._json(raw_payload))
+                        f.write("\n```\n\n</details>\n")
+                    f.write("\n")
+            except OSError as exc:
+                self._handle_disk_error(exc, context=f"markdown export {path.name}")
+
+    def _append_jsonl_gz(self, path: Path, row: dict) -> None:
+        with self._lock:
+            try:
+                with gzip.open(path, "at", encoding="utf-8") as f:
+                    f.write(self._json(row))
+                    f.write("\n")
+            except OSError as exc:
+                self._handle_disk_error(exc, context=f"feed export {path.name}", feed_only=True)
+
+    def _handle_disk_error(self, exc: OSError, context: str, feed_only: bool = False) -> None:
+        if exc.errno == ENOSPC:
+            message = (
+                f"No disk space left while writing {context}; "
+                f"{'disabling feed tick recording' if feed_only else 'disabling export recorder'}."
+            )
+            if feed_only:
+                self._feed_disabled_reason = message
+            else:
+                self._disabled_reason = message
+            logger.warning(message)
+            return
+        raise exc
+
+    def _has_free_space(self, min_free_bytes: int) -> bool:
+        try:
+            usage = shutil.disk_usage(self._base_dir)
+            return usage.free >= min_free_bytes
+        except Exception:
+            return True
+
+    def _prune_old_local_exports(self, keep_latest: int = 2) -> None:
+        try:
+            export_dirs = sorted(
+                [p for p in self._base_dir.iterdir() if p.is_dir() and p.name.isdigit()]
+            )
+            stale = export_dirs[:-keep_latest]
+            for path in stale:
+                shutil.rmtree(path, ignore_errors=True)
+            test_dir = self._base_dir / "test_upload"
+            if test_dir.exists():
+                shutil.rmtree(test_dir, ignore_errors=True)
+        except Exception:
+            logger.exception("Failed to prune old local exports")
 
     @staticmethod
     def _now() -> str:

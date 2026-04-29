@@ -90,30 +90,42 @@ class ShoonyaClient:
             # Save jKey for WebSocket auth (server requires old-style t:c format)
             self._jkey = jkey
 
-            # ── Step 2: GetAuthCode ──
-            logger.info("Step 2: GetAuthCode...")
-            code, err = self._get_auth_code(jkey, vendor_code)
-            if not code:
-                return False, f"GetAuthCode failed: {err}"
-            logger.info(f"Got auth code: {code[:8]}...")
+            # NorenRestApiPy differs across environments. Some builds expose
+            # getAccessToken() for the OAuth completion step; others only
+            # support the classic jKey session path. Support both so the
+            # deployed VM can trade regardless of package variant.
+            if hasattr(self._api, "getAccessToken"):
+                # ── Step 2: GetAuthCode ──
+                logger.info("Step 2: GetAuthCode...")
+                code, err = self._get_auth_code(jkey, vendor_code)
+                if not code:
+                    return False, f"GetAuthCode failed: {err}"
+                logger.info(f"Got auth code: {code[:8]}...")
 
-            # ── Step 3: GenAcsTok ──
-            logger.info("Step 3: GenAcsTok...")
-            result = self._api.getAccessToken(
-                authcode=code,
-                Secret_Code=secret_code,
-                client_id=vendor_code,
-                UID=user_id,
-            )
+                # ── Step 3: GenAcsTok ──
+                logger.info("Step 3: GenAcsTok...")
+                result = self._api.getAccessToken(
+                    authcode=code,
+                    Secret_Code=secret_code,
+                    client_id=vendor_code,
+                    UID=user_id,
+                )
 
-            if result is None:
-                return False, "GenAcsTok returned None — auth code may be invalid"
+                if result is None:
+                    return False, "GenAcsTok returned None — auth code may be invalid"
 
-            access_token, userid, refresh_token, actid = result
-            logger.info(f"OAuth login SUCCESS for user: {userid}, actid: {actid}")
+                access_token, userid, refresh_token, actid = result
+                logger.info(f"OAuth login SUCCESS for user: {userid}, actid: {actid}")
+                self._account_id = actid or user_id
+            else:
+                logger.warning(
+                    "NorenRestApiPy has no getAccessToken(); using jKey session fallback"
+                )
+                self._api.set_session(user_id, password, jkey)
+                self._account_id = user_id
+
             self._logged_in = True
             self._user_id = user_id
-            self._account_id = actid or user_id
             return True, "Login successful"
 
         except Exception as e:

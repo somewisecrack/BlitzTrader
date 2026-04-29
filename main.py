@@ -995,7 +995,7 @@ class BlitzTrader:
         logger.info("BlitzTrader session ended")
 
     def _upload_data_export(self):
-        """Upload today's feed/indicator CSV exports once."""
+        """Upload today's audit exports once."""
         if not self._data_recorder:
             return
         now = datetime.now(IST)
@@ -1008,18 +1008,18 @@ class BlitzTrader:
             logger.info(f"Data export result: {result}")
             if self._telegram and result.get("status") == "uploaded":
                 self._telegram.send_telegram(
-                    f"📊 Data CSV export uploaded to Google Drive.\n"
+                    f"📊 Data export uploaded to Google Drive.\n"
                     f"Destination: {result.get('destination')}"
                 )
             elif self._telegram and result.get("status") == "no_destination_configured":
                 self._telegram.send_telegram(
-                    "⚠️ Data CSV export saved locally but not uploaded. "
+                    "⚠️ Data export saved locally but not uploaded. "
                     "Set GOOGLE_DRIVE_UPLOAD_DIR or RCLONE_REMOTE."
                 )
         except Exception as e:
             logger.exception("Failed to upload data export")
             if self._telegram:
-                self._telegram.send_telegram(f"⚠️ Failed to upload data CSV export: {str(e)[:200]}")
+                self._telegram.send_telegram(f"⚠️ Failed to upload data export: {str(e)[:200]}")
 
     def _signal_handler(self, signum, frame):
         """Handle SIGINT/SIGTERM gracefully."""
