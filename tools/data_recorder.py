@@ -70,12 +70,14 @@ class DataRecorder:
         google_drive_upload_dir: str = "",
         rclone_remote: str = "",
         rclone_folder: str = "",
+        direct_drive_mode: bool = False,
     ):
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._drive_dir = Path(google_drive_upload_dir).expanduser() if google_drive_upload_dir else None
         self._rclone_remote = rclone_remote.strip()
         self._rclone_folder = rclone_folder.strip().strip("/")
+        self._direct_drive_mode = direct_drive_mode
 
         # Build two lookup maps from token:
         #   token → logical symbol name  (e.g. "66691" → "NIFTY")
@@ -222,6 +224,17 @@ class DataRecorder:
         with self._lock:
             if self._uploaded:
                 return {"status": "already_uploaded", "local_dir": str(self._day_dir)}
+
+        if self._direct_drive_mode:
+            with self._lock:
+                self._uploaded = True
+            logger.info("Runtime storage is already on Google Drive; skipping export copy")
+            return {
+                "status": "already_on_drive",
+                "method": "mounted_drive",
+                "destination": str(self._day_dir),
+                "local_dir": str(self._day_dir),
+            }
 
         result = {"status": "no_destination_configured", "local_dir": str(self._day_dir)}
         if self._drive_dir:

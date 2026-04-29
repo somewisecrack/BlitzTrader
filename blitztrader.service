@@ -2,6 +2,8 @@
 Description=BlitzTrader Autonomous Trading Agent
 After=network-online.target
 Wants=network-online.target
+Requires=rclone-blitztrader-drive.service
+After=rclone-blitztrader-drive.service
 
 [Service]
 Type=simple
@@ -22,8 +24,8 @@ TimeoutStopSec=30
 Restart=no
 
 # Logging
-StandardOutput=append:/opt/blitztrader/logs/systemd.log
-StandardError=append:/opt/blitztrader/logs/systemd.log
+StandardOutput=append:/mnt/blitztrader-drive/logs/systemd.log
+StandardError=append:/mnt/blitztrader-drive/logs/systemd.log
 
 [Install]
 WantedBy=multi-user.target

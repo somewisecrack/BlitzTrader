@@ -13,17 +13,7 @@ from dotenv import load_dotenv
 # ──────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent
-JOURNALS_DIR = BASE_DIR / "journals"
-LOGS_DIR = BASE_DIR / "logs"
-DATA_EXPORTS_DIR = BASE_DIR / "data_exports"
-STATE_FILE = BASE_DIR / "live_state.json"
 STRATEGIES_DIR = BASE_DIR / "strategies"
-
-# Ensure directories exist
-JOURNALS_DIR.mkdir(exist_ok=True)
-LOGS_DIR.mkdir(exist_ok=True)
-DATA_EXPORTS_DIR.mkdir(exist_ok=True)
-STRATEGIES_DIR.mkdir(exist_ok=True)
 
 # ──────────────────────────────────────────────────────────────
 #   ENV LOADING
@@ -69,6 +59,29 @@ def _optional_int_env(key: str, default: int) -> int:
         )
         return default
 
+
+# ──────────────────────────────────────────────────────────────
+#   RUNTIME STORAGE
+# ──────────────────────────────────────────────────────────────
+
+RUNTIME_STORAGE_DIR = Path(
+    _optional_env("RUNTIME_STORAGE_DIR", str(BASE_DIR))
+).expanduser()
+
+JOURNALS_DIR = RUNTIME_STORAGE_DIR / "journals"
+LOGS_DIR = RUNTIME_STORAGE_DIR / "logs"
+DATA_EXPORTS_DIR = RUNTIME_STORAGE_DIR / "data_exports"
+STATE_FILE = RUNTIME_STORAGE_DIR / "live_state.json"
+
+# Ensure directories exist
+JOURNALS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+DATA_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+STRATEGIES_DIR.mkdir(exist_ok=True)
+
+LIVE_DRIVE_MODE = _optional_env("LIVE_DRIVE_MODE", "").lower() in {
+    "1", "true", "yes", "on"
+}
 
 # ──────────────────────────────────────────────────────────────
 #   SHOONYA CREDENTIALS

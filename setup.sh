@@ -53,7 +53,7 @@ if ! command -v gcloud &>/dev/null; then
 else
     PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
 
-    declare -a SECRETS=(
+declare -a SECRETS=(
         SHOONYA_USER_ID
         SHOONYA_PASSWORD
         SHOONYA_TOTP_SECRET
@@ -70,6 +70,8 @@ else
         GOOGLE_DRIVE_UPLOAD_DIR
         RCLONE_REMOTE
         RCLONE_FOLDER
+        RUNTIME_STORAGE_DIR
+        LIVE_DRIVE_MODE
     )
 
     ENV_FILE="$APP_DIR/.env"
@@ -101,8 +103,11 @@ fi
 echo "[7/8] Installing systemd service..."
 cp "$APP_DIR/blitztrader.service" /etc/systemd/system/
 cp "$APP_DIR/blitztrader.timer" /etc/systemd/system/
+cp "$APP_DIR/rclone-blitztrader-drive.service" /etc/systemd/system/
 systemctl daemon-reload
+systemctl enable rclone-blitztrader-drive.service
 systemctl enable blitztrader.timer
+systemctl start rclone-blitztrader-drive.service
 systemctl start blitztrader.timer
 
 # ──────────────────────────────────────────────────────────

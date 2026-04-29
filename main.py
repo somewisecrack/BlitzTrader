@@ -32,6 +32,7 @@ from config import (
     GEMINI_SCHEDULED_MODEL,
     DATA_EXPORTS_DIR,
     GOOGLE_DRIVE_UPLOAD_DIR,
+    LIVE_DRIVE_MODE,
     JOURNALS_DIR,
     LOGS_DIR,
     SCAN_INTERVAL_SECONDS,
@@ -216,6 +217,7 @@ class BlitzTrader:
             google_drive_upload_dir=GOOGLE_DRIVE_UPLOAD_DIR,
             rclone_remote=RCLONE_REMOTE,
             rclone_folder=RCLONE_FOLDER,
+            direct_drive_mode=LIVE_DRIVE_MODE,
         )
         logger.info(f"✓ Data recorder initialized at {self._data_recorder.day_dir}")
 
@@ -1009,6 +1011,11 @@ class BlitzTrader:
             if self._telegram and result.get("status") == "uploaded":
                 self._telegram.send_telegram(
                     f"📊 Data export uploaded to Google Drive.\n"
+                    f"Destination: {result.get('destination')}"
+                )
+            elif self._telegram and result.get("status") == "already_on_drive":
+                self._telegram.send_telegram(
+                    f"📊 Data already stored directly on Google Drive.\n"
                     f"Destination: {result.get('destination')}"
                 )
             elif self._telegram and result.get("status") == "no_destination_configured":
