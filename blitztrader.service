@@ -23,9 +23,10 @@ TimeoutStopSec=30
 # Restart only on unexpected failures (not normal exit)
 Restart=no
 
-# Logging
-StandardOutput=append:/mnt/blitztrader-drive/logs/systemd.log
-StandardError=append:/mnt/blitztrader-drive/logs/systemd.log
+# Keep service-manager logs local. App/runtime artifacts can still use
+# the configured runtime storage path and upload/export flow separately.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
