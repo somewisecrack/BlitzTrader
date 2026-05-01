@@ -1,15 +1,17 @@
 # BlitzTrader
 
-An autonomous AI trading agent for NSE intraday **FUTURES** (NIFTY / BANKNIFTY / FINNIFTY), powered by Gemini 2.5 Flash and deployed on Google Cloud Platform.
+An autonomous intraday **futures** trading bot for NSE index futures (`NIFTY`, `BANKNIFTY`, `FINNIFTY`), deployed on Google Cloud Platform.
 
 ## What it does
 
 - Runs every trading day via a systemd timer on a GCP VM
 - Logs into Shoonya (Finvasia) broker API at session start
 - Resolves front-month NIFTY, BANKNIFTY, and FINNIFTY futures contracts at startup
-- Uses Python to detect candidate setups, then Gemini approves/rejects candidate **futures trades only**
-- Sends real-time alerts and responds to commands via a Telegram bot
+- Uses Python to scan, select, execute, and manage **futures trades only**
+- Uses the live bid/ask book for simulated market-order fills
+- Sends real-time alerts and responds via a Telegram bot
 - Writes a daily trading journal and maintains cross-session memory so it learns from past sessions
+- Uses Gemini only for free-form Telegram chat and end-of-day summarization
 
 ## Architecture
 
@@ -19,34 +21,35 @@ systemd timer (9:00 AM IST, Mon–Fri)
         ▼
     main.py
     ├── Startup phase      — login, resolve futures tokens, load memory, set session goals
-    ├── Trading loop       — background scanner every 60s + event-driven signal LLM + Telegram poll
-    │     ├── AgentLoop    — Gemini 2.5 Flash ReAct (Reason → Tool → Observe)
-    │     ├── ToolRegistry — market data, order execution, journaling, Telegram
+    ├── Trading loop       — Python scanner every 60s + deterministic execution + Telegram poll
+    │     ├── MarketData   — signal scanner, indicators, cache
+    │     ├── OrderExec    — Python guardrails, fills, SL/target/trailing, EOD close
     │     └── LiveFeed     — WebSocket price stream from Shoonya
-    └── EOD phase          — close positions, write journal, update memory
+    └── EOD phase          — close positions, write journal, Gemini summary
 ```
 
 ## Key features
 
 | Feature | Detail |
 |---|---|
-| Model | `gemini-2.5-flash` |
+| Trading engine | Python-only |
+| Gemini role | Free-form chat + EOD summary only |
 | Broker | Shoonya (Finvasia) via `NorenRestApiPy` |
 | Exchange | NFO — NIFTY, BANKNIFTY, and FINNIFTY front-month futures |
-| Capital | ₹5,00,000 virtual tracked |
-| Risk | Exactly 1 futures lot per trade, 5% per trade (₹25,000 max), 5% daily stop (₹25,000) |
+| Capital | ₹10,00,000 virtual tracked |
+| Risk | Exactly 1 futures lot per trade, 5% per trade (₹50,000 max), 5% daily stop (₹50,000) |
 | Margin | Shoonya RMS `GetOrderMargin` is queried before virtual entries; returned broker margin is stored on positions |
 | Instruments | NIFTY, BANKNIFTY, and FINNIFTY futures; exact lot size resolved from Shoonya contract metadata at startup |
 | Position caps | Max 3 open positions; no pyramiding, one open position per instrument |
 | Daily trade cap | Max 10 total entries/day; completed trades + open positions + pending entries count |
 | Execution | Futures-only guardrail: CE/PE and bare index names are hard-blocked |
 | Trading window | 9:15 AM – 3:05 PM IST (CAUTION in first 15 min) |
-| Telegram | Real-time alerts + conversational Q&A |
+| Telegram | Real-time alerts + simple status replies + Gemini chat fallback |
 | Memory | Cross-session `journals/memory.md` |
 
 ## Execution enforcement
 
-BlitzTrader is **futures-only**. Two hard guardrails are enforced in Python (not LLM-side):
+BlitzTrader is **futures-only**. Two hard guardrails are enforced in Python:
 
 1. `place_virtual_order()` rejects any symbol ending in `CE` or `PE`.
 2. `place_virtual_order()` rejects bare logical names (`NIFTY`, `BANKNIFTY`, etc.) — the agent must use the resolved futures tsym (e.g. `NIFTY28APR26F`).
@@ -131,14 +134,15 @@ GEMINI_API_KEY
 | `/abort` | Emergency stop — close all positions immediately |
 | _(any message)_ | Gemini responds conversationally |
 
-## Cost
+## Gemini usage
 
-Cost controls:
+Gemini is intentionally kept off the trading path:
 
-- Python scanner still runs every 60 seconds with no Gemini call.
-- Gemini market-review calls are event-driven: no scanner candidate means no market-analysis Gemini call.
-- Actionable scanner signals use `GEMINI_DECISION_MODEL` (default `gemini-2.5-flash`) for approve/reject.
-- `GEMINI_SCHEDULED_MODEL` is retained for lightweight Telegram chat responses, not routine market scanning.
+- Python scanner runs every 60 seconds with **no Gemini call**
+- Python decides whether to enter, reject, trail, or close
+- Gemini is used only for:
+  - free-form Telegram chat
+  - end-of-day summary / reflection
 
 ## Disclaimer
 
