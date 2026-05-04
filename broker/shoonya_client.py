@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import time
+import urllib.parse
 import uuid
 from typing import Optional
 
@@ -90,18 +91,19 @@ class ShoonyaClient:
             # Save jKey for WebSocket auth (server requires old-style t:c format)
             self._jkey = jkey
 
+            # ── Step 2: GetAuthCode ──
+            logger.info("Step 2: GetAuthCode...")
+            code, err = self._get_auth_code(jkey, vendor_code)
+            if not code:
+                return False, f"GetAuthCode failed: {err}"
+            logger.info(f"Got auth code: {code[:8]}...")
+
             # NorenRestApiPy differs across environments. Some builds expose
             # getAccessToken() for the OAuth completion step; others only
-            # support the classic jKey session path. Support both so the
-            # deployed VM can trade regardless of package variant.
+            # support the classic jKey path, which Shoonya now rejects for
+            # private REST endpoints. In that case we complete GenAcsTok
+            # ourselves and inject Bearer headers.
             if hasattr(self._api, "getAccessToken"):
-                # ── Step 2: GetAuthCode ──
-                logger.info("Step 2: GetAuthCode...")
-                code, err = self._get_auth_code(jkey, vendor_code)
-                if not code:
-                    return False, f"GetAuthCode failed: {err}"
-                logger.info(f"Got auth code: {code[:8]}...")
-
                 # ── Step 3: GenAcsTok ──
                 logger.info("Step 3: GenAcsTok...")
                 result = self._api.getAccessToken(
@@ -119,13 +121,32 @@ class ShoonyaClient:
                 self._account_id = actid or user_id
             else:
                 logger.warning(
-                    "NorenRestApiPy has no getAccessToken(); using jKey session fallback"
+                    "NorenRestApiPy has no getAccessToken(); using raw OAuth GenAcsTok fallback"
                 )
-                self._api.set_session(user_id, password, jkey)
-                self._account_id = user_id
+                result = self._get_access_token(
+                    auth_code=code,
+                    secret_code=secret_code,
+                    client_id=vendor_code,
+                    user_id=user_id,
+                )
+                if result is None:
+                    return False, "GenAcsTok returned None — auth code may be invalid"
+                access_token, userid, refresh_token, actid, susertoken = result
+                self._inject_oauth_session(
+                    access_token=access_token,
+                    user_id=userid or user_id,
+                    account_id=actid or userid or user_id,
+                    susertoken=susertoken or jkey,
+                )
+                logger.info(
+                    "Raw OAuth login SUCCESS for user: %s, actid: %s",
+                    userid,
+                    actid,
+                )
+                self._account_id = actid or userid or user_id
 
             self._logged_in = True
-            self._user_id = user_id
+            self._user_id = getattr(self, "_user_id", user_id) or user_id
             return True, "Login successful"
 
         except Exception as e:
@@ -247,6 +268,66 @@ class ShoonyaClient:
         except Exception as e:
             return None, str(e)
 
+    def _get_access_token(
+        self,
+        auth_code: str,
+        secret_code: str,
+        client_id: str,
+        user_id: str,
+    ) -> Optional[tuple[str, str, str, str, str]]:
+        """Complete Shoonya OAuth without relying on NorenRestApiPy.getAccessToken()."""
+        try:
+            checksum = hashlib.sha256(
+                (client_id + secret_code + auth_code).encode("utf-8")
+            ).hexdigest()
+            payload = {
+                "code": auth_code,
+                "checksum": checksum,
+                "uid": user_id,
+            }
+            resp = self._session.post(
+                f"{BASE_URL}/GenAcsTok",
+                data="jData=" + json.dumps(payload),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+            )
+            result = json.loads(resp.text)
+            if "access_token" not in result:
+                logger.error("GenAcsTok failed: %s", result)
+                return None
+            return (
+                result.get("access_token", ""),
+                result.get("USERID", user_id),
+                result.get("refresh_token", ""),
+                result.get("actid", user_id),
+                result.get("susertoken", ""),
+            )
+        except Exception:
+            logger.exception("Exception during raw GenAcsTok")
+        return None
+
+    def _inject_oauth_session(
+        self,
+        access_token: str,
+        user_id: str,
+        account_id: str,
+        susertoken: str = "",
+    ) -> None:
+        """Populate private NorenApi fields so raw REST and WS share one session."""
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        setattr(self._api, "_NorenApi__OAuthHeaders", headers)
+        setattr(self._api, "_NorenApi__access_token", access_token)
+        setattr(self._api, "_NorenApi__username", user_id)
+        setattr(self._api, "_NorenApi__accountid", account_id)
+        if susertoken:
+            setattr(self._api, "_NorenApi__susertoken", susertoken)
+            self._jkey = susertoken
+        self._user_id = user_id
+        self._account_id = account_id
+
     @property
     def is_logged_in(self) -> bool:
         return self._logged_in
@@ -277,11 +358,17 @@ class ShoonyaClient:
             logger.error("Cannot get_limits: not logged in")
             return None
         try:
-            resp = self._api.get_limits(
-                product_type=product_type,
-                segment=segment,
-                exchange=exchange,
-            )
+            payload = {
+                "uid": self._user_id,
+                "actid": getattr(self, "_account_id", self._user_id),
+            }
+            if product_type is not None:
+                payload["prd"] = product_type
+            if segment is not None:
+                payload["seg"] = segment
+            if exchange is not None:
+                payload["exch"] = exchange
+            resp = self._post_private("Limits", payload)
             if resp and resp.get("stat") == "Ok":
                 return resp
             logger.warning(f"get_limits failed: {resp}")
@@ -367,7 +454,10 @@ class ShoonyaClient:
             logger.error("Cannot get_quotes: not logged in")
             return None
         try:
-            resp = self._api.get_quotes(exchange=exchange, token=token)
+            resp = self._post_private(
+                "GetQuotes",
+                {"uid": self._user_id, "exch": exchange, "token": token},
+            )
             if resp and resp.get("stat") == "Ok":
                 return resp
             err = resp.get("emsg", "Unknown") if resp else "None response"
@@ -417,13 +507,17 @@ class ShoonyaClient:
             logger.error("Cannot get_time_price_series: not logged in")
             return None
         try:
-            resp = self._api.get_time_price_series(
-                exchange=exchange,
-                token=token,
-                starttime=int(starttime),
-                endtime=int(endtime) if endtime else int(time.time()),
-                interval=interval,
-            )
+            payload = {
+                "ordersource": "API",
+                "uid": self._user_id,
+                "exch": exchange,
+                "token": token,
+                "st": str(int(starttime)),
+                "intrv": str(interval),
+            }
+            if endtime is not None:
+                payload["et"] = str(int(endtime))
+            resp = self._post_private("TPSeries", payload)
             if isinstance(resp, list):
                 return resp
             logger.warning(f"get_time_price_series returned non-list: {resp}")
@@ -559,7 +653,14 @@ class ShoonyaClient:
             logger.error("Cannot search_scrip: not logged in")
             return None
         try:
-            resp = self._api.searchscrip(exchange=exchange, searchtext=searchtext)
+            resp = self._post_private(
+                "SearchScrip",
+                {
+                    "uid": self._user_id,
+                    "exch": exchange,
+                    "stext": urllib.parse.quote_plus(searchtext),
+                },
+            )
             if resp and resp.get("stat") == "Ok":
                 return resp.get("values", [])
             logger.warning(f"search_scrip({exchange}, {searchtext}): {resp}")
@@ -578,11 +679,15 @@ class ShoonyaClient:
             logger.error("Cannot get_option_chain: not logged in")
             return None
         try:
-            resp = self._api.get_option_chain(
-                exchange=exchange,
-                tradingsymbol=tradingsymbol,
-                strikeprice=str(strikeprice),
-                count=count,
+            resp = self._post_private(
+                "GetOptionChain",
+                {
+                    "uid": self._user_id,
+                    "exch": exchange,
+                    "tsym": urllib.parse.quote_plus(tradingsymbol),
+                    "strprc": str(strikeprice),
+                    "cnt": str(count),
+                },
             )
             if resp and resp.get("stat") == "Ok":
                 return resp
