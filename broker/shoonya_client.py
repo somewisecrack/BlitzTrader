@@ -143,45 +143,66 @@ class ShoonyaClient:
         POST to QuickAuth with credentials.
         Returns (jKey, None) on success or (None, error_message).
         """
-        try:
-            # Wait for a fresh TOTP window (avoid using code with < 3s remaining)
-            remaining = 30 - (int(time.time()) % 30)
-            if remaining < 3:
-                logger.debug(f"Waiting {remaining + 1}s for fresh TOTP window...")
-                time.sleep(remaining + 1)
+        last_err = "unknown error"
+        for attempt in range(1, 4):
+            try:
+                # Wait for a fresh TOTP window (avoid using code with < 3s remaining)
+                remaining = 30 - (int(time.time()) % 30)
+                if remaining < 3:
+                    logger.debug(f"Waiting {remaining + 1}s for fresh TOTP window...")
+                    time.sleep(remaining + 1)
 
-            pwd = hashlib.sha256(password.encode()).hexdigest()
-            appkey = hashlib.sha256(
-                (user_id + "|" + _INTERNAL_SECRET).encode()
-            ).hexdigest()
-            totp = pyotp.TOTP(totp_secret).now()
+                pwd = hashlib.sha256(password.encode()).hexdigest()
+                appkey = hashlib.sha256(
+                    (user_id + "|" + _INTERNAL_SECRET).encode()
+                ).hexdigest()
+                totp = pyotp.TOTP(totp_secret).now()
 
-            payload = {
-                "apkversion": "W2_20250926",
-                "uid": user_id,
-                "pwd": pwd,
-                "factor2": totp,
-                "appkey": appkey,
-                "imei": str(uuid.uuid4()),
-                "addldivinf": "BlitzTrader/1.0",
-                "source": "API",
-                "vc": "NOREN_API",
-                "app_key": vendor_code,
-            }
+                payload = {
+                    "apkversion": "W2_20250926",
+                    "uid": user_id,
+                    "pwd": pwd,
+                    "factor2": totp,
+                    "appkey": appkey,
+                    "imei": str(uuid.uuid4()),
+                    "addldivinf": "BlitzTrader/1.0",
+                    "source": "API",
+                    "vc": "NOREN_API",
+                    "app_key": vendor_code,
+                }
 
-            resp = self._session.post(
-                f"{BASE_URL}/QuickAuth",
-                data="jData=" + json.dumps(payload),
-                timeout=15,
-            )
-            result = json.loads(resp.text)
+                resp = self._session.post(
+                    f"{BASE_URL}/QuickAuth",
+                    data="jData=" + json.dumps(payload),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=15,
+                )
 
-            if result.get("stat") == "Ok":
-                return result.get("susertoken"), None
-            return None, result.get("emsg", "unknown error")
+                if resp.status_code >= 500:
+                    last_err = f"HTTP {resp.status_code} from QuickAuth"
+                    logger.warning("QuickAuth attempt %s failed: %s", attempt, last_err)
+                    time.sleep(attempt)
+                    continue
 
-        except Exception as e:
-            return None, str(e)
+                try:
+                    result = json.loads(resp.text)
+                except Exception:
+                    body = (resp.text or "").strip().replace("\n", " ")
+                    last_err = f"Non-JSON QuickAuth response HTTP {resp.status_code}: {body[:160]}"
+                    logger.warning("QuickAuth attempt %s failed: %s", attempt, last_err)
+                    time.sleep(attempt)
+                    continue
+
+                if result.get("stat") == "Ok":
+                    return result.get("susertoken"), None
+                return None, result.get("emsg", "unknown error")
+
+            except Exception as e:
+                last_err = str(e)
+                logger.warning("QuickAuth attempt %s exception: %s", attempt, last_err)
+                time.sleep(attempt)
+
+        return None, last_err
 
     def _get_auth_code(
         self, jkey: str, vendor_code: str
@@ -197,9 +218,13 @@ class ShoonyaClient:
             resp = self._session.post(
                 f"{BASE_URL}/GetAuthCode",
                 data="jData=" + auth_payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=15,
                 allow_redirects=False,
             )
+
+            if resp.status_code >= 500:
+                return None, f"HTTP {resp.status_code} from GetAuthCode"
 
             # Response body contains the auth code as JSON
             try:
@@ -216,7 +241,8 @@ class ShoonyaClient:
                 if code:
                     return code, None
 
-            return None, f"Could not extract auth code from response: {resp.text[:200]}"
+            body = (resp.text or "").strip().replace("\n", " ")
+            return None, f"Could not extract auth code from response HTTP {resp.status_code}: {body[:200]}"
 
         except Exception as e:
             return None, str(e)
