@@ -208,7 +208,7 @@ class ShoonyaClient:
                     f"{BASE_URL}/QuickAuth",
                     data="jData=" + json.dumps(payload),
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    timeout=15,
+                    timeout=30,
                 )
 
                 if resp.status_code >= 500:
@@ -252,7 +252,7 @@ class ShoonyaClient:
                 f"{BASE_URL}/GetAuthCode",
                 data="jData=" + auth_payload,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=15,
+                timeout=30,
                 allow_redirects=False,
             )
 
@@ -301,7 +301,7 @@ class ShoonyaClient:
                 f"{BASE_URL}/GenAcsTok",
                 data="jData=" + json.dumps(payload),
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=15,
+                timeout=30,
             )
             result = json.loads(resp.text)
             if "access_token" not in result:
@@ -443,7 +443,7 @@ class ShoonyaClient:
                 f"{BASE_URL}/{endpoint}",
                 data=data,
                 headers=headers,
-                timeout=15,
+                timeout=30,
             )
             result = json.loads(resp.text)
             if result.get("stat") != "Ok":
