@@ -28,11 +28,23 @@ BASE_URL = "https://trade.shoonya.com/NorenWClientAPI"
 WS_URL = "wss://api.shoonya.com/NorenWS/"
 
 NFO_EXCHANGE = "NFO"
+CLIENT_APP = "BlitzTrader"
+SUPPORTS_BLITZ_LOGIN_AUTH_CODE = True
 
 # Internal web-app API secret (decoded from Shoonya OAuth portal JS)
 # Xa = new Uint8Array([83,50,97,114,110,46,27,93]) → each char = byte + index
 _K = [83, 50, 97, 114, 110, 46, 27, 93]
 _INTERNAL_SECRET = "".join(chr(b + i) for i, b in enumerate(_K))  # "S3cur3!d"
+
+
+def assert_client_identity(expected_app: str) -> None:
+    """Fail fast if a deployment copied another app's Shoonya client here."""
+    if CLIENT_APP != expected_app:
+        raise RuntimeError(
+            f"Wrong Shoonya client loaded: expected {expected_app}, got {CLIENT_APP}"
+        )
+    if expected_app == "BlitzTrader" and not SUPPORTS_BLITZ_LOGIN_AUTH_CODE:
+        raise RuntimeError("Wrong Shoonya client loaded: Blitz auth_code interface missing")
 
 
 class ShoonyaClient:

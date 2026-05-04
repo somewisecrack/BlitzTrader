@@ -63,7 +63,7 @@ from config import (
     VIRTUAL_CAPITAL,
     setup_logging,
 )
-from broker.shoonya_client import ShoonyaClient
+from broker.shoonya_client import ShoonyaClient, assert_client_identity
 from broker.live_feed import LiveFeedManager
 from tools.state_manager import StateManager
 from tools.virtual_ledger import VirtualLedger
@@ -86,6 +86,8 @@ from context_builder import (
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger("BlitzTrader.Main")
+
+assert_client_identity("BlitzTrader")
 
 
 class BlitzTrader:
