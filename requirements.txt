@@ -18,3 +18,10 @@ pytz>=2024.1
 
 # Logging / misc
 requests>=2.31.0
+
+# Pairs trading — statistical analysis
+numpy>=1.26.0
+pandas>=2.2.0
+scipy>=1.13.0
+statsmodels>=0.14.0
+yfinance>=0.2.40

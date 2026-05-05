@@ -323,6 +323,7 @@ def build_chat_context(
     chat_messages: list[dict],
     state_manager,
     order_execution,
+    pairs_summary: str = "",
 ) -> str:
     """
     Lightweight context for an immediate Telegram chat response.
@@ -344,10 +345,13 @@ def build_chat_context(
 
     messages_text = "\n".join(f"  • {m['text']}" for m in chat_messages)
 
-    return f"""Current time: {now.strftime('%H:%M:%S')} IST
-Session P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)
-Open positions: {pos_summary}
+    pairs_section = ""
+    if pairs_summary:
+        pairs_section = f"\nPAIRS TRADING STATUS:\n{pairs_summary}\n"
 
+    return f"""Current time: {now.strftime('%H:%M:%S')} IST
+Session futures P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)
+Open futures positions: {pos_summary}{pairs_section}
 The trader has sent you a message on Telegram:
 {messages_text}
 
@@ -360,14 +364,36 @@ IMPORTANT: If the trader asks about trades, P&L, or positions — call get_today
 get_daily_pnl(), or get_open_positions() FIRST and reply with ONLY the data they return.
 If the trader asks about capital, balance, available funds, or margin — call
 get_virtual_balance() FIRST and reply with ONLY the data it returns.
-The P&L and position data shown above is ground truth from the system — never contradict it."""
+The P&L and position data shown above is ground truth from the system — never contradict it.
+Pairs state is for reporting only — do not place or modify pairs orders."""
 
 
-def build_eod_context() -> str:
+def build_pairs_scan_summary(candidates: list, scan_done: bool) -> str:
+    """
+    One-line pairs scan status for Gemini context.
+    Gemini sees this for reporting — it does NOT trade pairs.
+    """
+    if not scan_done:
+        return "Pairs scan: not yet run."
+    if not candidates:
+        return "Pairs scan: completed, 0 candidates found."
+    top = candidates[:5]
+    lines = [f"Pairs scan: {len(candidates)} candidate(s)."]
+    for c in top:
+        lines.append(
+            f"  {c.x_symbol}/{c.y_symbol} "
+            f"tf={c.timeframe} P={c.prob_profit:.1f}% z={c.z_score:+.2f} hl={c.half_life}d"
+        )
+    return "\n".join(lines)
+
+
+def build_eod_context(pairs_summary: str = "") -> str:
     """Context for the end-of-day sequence."""
     now = datetime.now(IST)
-    return f"""Current time: {now.strftime('%H:%M:%S')} IST
-
+    pairs_section = ""
+    if pairs_summary:
+        pairs_section = f"\nPAIRS TRADING EOD STATE (for reporting only — Python closed these):\n{pairs_summary}\n"
+    return f"""Current time: {now.strftime('%H:%M:%S')} IST{pairs_section}
 It is 3:15 PM IST. Market hours are over. Work through these steps IN EXACT ORDER:
 
 1. Call close_all_positions() to close any remaining positions.

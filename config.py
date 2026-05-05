@@ -133,6 +133,64 @@ RCLONE_FOLDER = _optional_env("RCLONE_FOLDER", "BlitzTrader")
 VIRTUAL_CAPITAL = 1_000_000  # ₹10,00,000
 TRADE_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY")
 MAX_POSITIONS = 3
+
+# ──────────────────────────────────────────────────────────────
+#   PAIRS TRADING PARAMETERS
+# ──────────────────────────────────────────────────────────────
+
+# Capital (independent pool — does not share with VIRTUAL_CAPITAL)
+PAIRS_CAPITAL = 1_000_000            # ₹10,00,000
+MAX_OPEN_PAIRS = 10
+PER_PAIR_CAPITAL = PAIRS_CAPITAL / MAX_OPEN_PAIRS  # ₹1,00,000 per pair slot
+
+PAIRS_STATE_FILE = RUNTIME_STORAGE_DIR / "pairs_state.json"
+PAIRS_EXCHANGE = "NSE"
+PAIRS_PRODUCT = "I"          # Shoonya MIS (intraday) product code
+
+# Pairs session times (IST)
+PAIR_SCAN_TIME  = "08:30"    # yfinance pre-market scan
+PAIR_ENTRY_TIME = "09:15"    # open positions at market open
+PAIR_EXIT_TIME  = "15:15"    # forced EOD close
+
+PAIR_INTERVALS = ("15m", "30m", "1h")
+INTERVAL_PERIODS = {
+    "15m": "60d",
+    "30m": "60d",
+    "1h":  "1y",
+}
+
+# NIFTY 50 universe for the pairs scanner (yfinance base symbols, no .NS suffix)
+NIFTY50_SYMBOLS = [
+    "ADANIENT",   "ADANIPORTS",  "APOLLOHOSP",  "ASIANPAINT",  "AXISBANK",
+    "BAJAJ-AUTO", "BAJAJFINSV",  "BAJFINANCE",  "BEL",         "BHARTIARTL",
+    "BPCL",       "BRITANNIA",   "CIPLA",       "COALINDIA",   "DRREDDY",
+    "EICHERMOT",  "GRASIM",      "HCLTECH",     "HDFCBANK",    "HDFCLIFE",
+    "HEROMOTOCO", "HINDALCO",    "HINDUNILVR",  "ICICIBANK",   "INDUSINDBK",
+    "INFY",       "ITC",         "JSWSTEEL",    "KOTAKBANK",   "LT",
+    "M&M",        "MARUTI",      "NESTLEIND",   "NTPC",        "ONGC",
+    "POWERGRID",  "RELIANCE",    "SBILIFE",     "SBIN",        "SHRIRAMFIN",
+    "SUNPHARMA",  "TATACONSUM",  "TATAMOTORS",  "TATASTEEL",   "TCS",
+    "TECHM",      "TITAN",       "TRENT",       "ULTRACEMCO",  "WIPRO",
+]
+
+# Pairs scanner statistical thresholds
+ADF_PVALUE_LIMIT     = 0.05
+BATCH_SIZE           = 10
+BLOCK_LEN_FACTOR     = 0.5
+ENSEMBLE_M           = 50
+HURST_LIMIT          = 0.5
+MAX_TOTAL_SIMS       = 10_000
+MIN_BARS             = 100
+RNG_SEED             = 42
+SIMS_PER_DRAW        = 50
+USE_BOOTSTRAP_RESID  = True
+Z_SCORE_LIMIT        = 1.5
+
+# ──────────────────────────────────────────────────────────────
+#   DISK GUARD
+# ──────────────────────────────────────────────────────────────
+
+MIN_FREE_DISK_MB = 2048   # abort if less than 2 GB free
 MAX_DAILY_TRADES = 10
 MAX_RISK_PCT = 0.05  # 5% of capital per trade
 MAX_DAILY_LOSS_PCT = 0.05  # 5% daily loss limit

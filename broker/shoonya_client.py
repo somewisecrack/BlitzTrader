@@ -17,6 +17,7 @@ import logging
 import time
 import urllib.parse
 import uuid
+from dataclasses import dataclass
 from typing import Optional
 
 import pyotp
@@ -35,6 +36,14 @@ SUPPORTS_BLITZ_LOGIN_AUTH_CODE = True
 # Xa = new Uint8Array([83,50,97,114,110,46,27,93]) → each char = byte + index
 _K = [83, 50, 97, 114, 110, 46, 27, 93]
 _INTERNAL_SECRET = "".join(chr(b + i) for i, b in enumerate(_K))  # "S3cur3!d"
+
+
+@dataclass
+class ResolvedScrip:
+    """Minimal resolved NSE equity scrip (symbol, trading symbol, token)."""
+    symbol: str
+    tradingsymbol: str
+    token: str
 
 
 def assert_client_identity(expected_app: str) -> None:
@@ -660,6 +669,10 @@ class ShoonyaClient:
     def search_scrip(self, exchange: str, searchtext: str) -> Optional[list]:
         """
         Search for a scrip by name. Returns list of scrip dicts, or None.
+
+        Uses the raw OAuth REST path (_post_private) rather than the
+        NorenRestApiPy helper — the package's searchscrip() uses a jKey
+        path that fails after the April-2026 Shoonya OAuth migration.
         """
         if not self._api:
             logger.error("Cannot search_scrip: not logged in")
@@ -668,7 +681,7 @@ class ShoonyaClient:
             resp = self._post_private(
                 "SearchScrip",
                 {
-                    "uid": self._user_id,
+                    "uid": getattr(self, "_user_id", ""),
                     "exch": exchange,
                     "stext": urllib.parse.quote_plus(searchtext),
                 },
@@ -679,6 +692,55 @@ class ShoonyaClient:
         except Exception:
             logger.exception(f"Exception in search_scrip({exchange}, {searchtext})")
         return None
+
+    def resolve_equity_symbol(self, symbol: str) -> Optional["ResolvedScrip"]:
+        """
+        Resolve an NSE equity symbol to a ResolvedScrip (tradingsymbol + token).
+
+        Prefers the exact-EQ series (e.g. INFY-EQ) then any NSE match.
+        Returns None if no scrip found.
+        """
+        sym = symbol.upper().replace(".NS", "")
+        candidates = self.search_scrip("NSE", sym)
+        if not candidates:
+            logger.warning("resolve_equity_symbol(%s): no results", sym)
+            return None
+
+        exact_tsyms = {sym, f"{sym}-EQ"}
+        chosen = None
+        for item in candidates:
+            tsym = str(item.get("tsym", "")).upper()
+            if tsym in exact_tsyms:
+                chosen = item
+                break
+        if chosen is None:
+            for item in candidates:
+                tsym = str(item.get("tsym", "")).upper()
+                if tsym.startswith(sym):
+                    chosen = item
+                    break
+        if chosen is None:
+            logger.warning(
+                "resolve_equity_symbol(%s): no suitable match in %d candidates",
+                sym,
+                len(candidates),
+            )
+            return None
+
+        token = str(chosen.get("token", ""))
+        tsym = str(chosen.get("tsym", sym))
+        logger.debug("resolve_equity_symbol(%s) → tsym=%s token=%s", sym, tsym, token)
+        return ResolvedScrip(symbol=sym, tradingsymbol=tsym, token=token)
+
+    def get_best_bid_ask(
+        self, exchange: str, token: str
+    ) -> Optional[tuple[float, float]]:
+        """Fetch best bid/ask via REST. Returns (bid, ask) or None."""
+        return self.get_best_bid_ask_rest(exchange, token)
+
+    def get_last_price(self, exchange: str, token: str) -> Optional[float]:
+        """Fetch current last-traded price via REST."""
+        return self.get_ltp(exchange, token)
 
     def get_option_chain(
         self, exchange: str, tradingsymbol: str, strikeprice: float, count: int = 2

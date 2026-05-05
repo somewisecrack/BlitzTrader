@@ -47,16 +47,22 @@ def _past_expiry(days_ago: int = 5) -> str:
 
 
 def _build_client(scrips: list) -> "ShoonyaClient-mock":
-    """Return a ShoonyaClient with search_scrip mocked to return scrips."""
+    """
+    Return a ShoonyaClient with search_scrip mocked to return scrips.
+
+    search_scrip uses _post_private (raw OAuth REST path), so we mock
+    _post_private directly rather than _api.searchscrip, which is the
+    old NorenRestApiPy jKey path that broke after April-2026 OAuth migration.
+    """
     from broker.shoonya_client import ShoonyaClient
     client = ShoonyaClient.__new__(ShoonyaClient)
     client._api = MagicMock()
     client._logged_in = True
     client._session = MagicMock()
-
-    # Mock search_scrip to return the given scrips (stat=Ok)
-    mock_api = client._api
-    mock_api.searchscrip.return_value = {"stat": "Ok", "values": scrips}
+    client._user_id = "TESTUSER"
+    client._jkey = "testjkey"
+    # Mock at the _post_private level — search_scrip calls _post_private("SearchScrip", ...)
+    client._post_private = MagicMock(return_value={"stat": "Ok", "values": scrips})
     return client
 
 
