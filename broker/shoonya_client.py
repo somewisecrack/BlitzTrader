@@ -487,9 +487,17 @@ class ShoonyaClient:
                 timeout=30,
             )
             result = json.loads(resp.text)
-            if result.get("stat") != "Ok":
-                logger.warning("%s returned %s", endpoint, result)
-            return result
+            # TPSeries may return a list directly on success
+            if isinstance(result, list):
+                return result
+            # For dict responses, check stat field
+            if isinstance(result, dict):
+                if result.get("stat") != "Ok":
+                    logger.warning("%s returned %s", endpoint, result.get("emsg", "No error message"))
+                return result
+            # Non-list, non-dict response
+            logger.warning("%s returned unexpected type: %s", endpoint, type(result))
+            return None
         except Exception:
             logger.exception("Exception calling %s", endpoint)
         return None

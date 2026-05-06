@@ -181,6 +181,9 @@ class BlitzTrader:
         # 0a. Disk guard — abort before doing anything if disk is critically low
         self._check_disk_space()
 
+        # 0b. Storage mount health check — ensure Google Drive is accessible
+        self._check_storage_mount()
+
         self._telegram.send_telegram(
             "🤖 BlitzTrader starting up...\nWaiting for Shoonya API to come online."
         )
@@ -405,6 +408,14 @@ class BlitzTrader:
             GEMINI_MAX_SCHEDULED_TOKENS,
         )
         logger.info("All components initialized successfully")
+
+        # Log startup configuration for verification
+        logger.info(
+            "STARTUP CONFIG: "
+            f"Futures capital ₹{VIRTUAL_CAPITAL:,.0f} | "
+            f"Pairs capital ₹{PAIRS_CAPITAL:,.0f} | "
+            f"State file: {STATE_FILE}"
+        )
 
     def _run_agent_iteration(
         self,
@@ -1028,6 +1039,30 @@ class BlitzTrader:
             raise
         except Exception:
             logger.exception("Disk space check failed — proceeding with caution")
+
+    def _check_storage_mount(self) -> None:
+        """Verify storage mount is healthy before trading starts."""
+        try:
+            # Check if path exists and is accessible
+            if not RUNTIME_STORAGE_DIR.exists():
+                raise RuntimeError(f"Storage path does not exist: {RUNTIME_STORAGE_DIR}")
+
+            # Try to list directory contents
+            list(RUNTIME_STORAGE_DIR.iterdir())
+            logger.info(f"✓ Storage mount healthy: {RUNTIME_STORAGE_DIR}")
+
+        except RuntimeError:
+            raise
+        except Exception as e:
+            msg = (
+                f"⚠️ STORAGE MOUNT ISSUE: Cannot access {RUNTIME_STORAGE_DIR}. "
+                f"Error: {str(e)[:100]}. "
+                "Journaling may not work reliably. Fix mount and restart."
+            )
+            logger.critical(msg)
+            if self._telegram:
+                self._telegram.send_telegram(msg)
+            raise RuntimeError(msg)
 
     # ──────────────────────────────────────────────────────────
     #   PAIRS LIFECYCLE HELPERS

@@ -617,6 +617,10 @@ class OrderExecutionTools:
         Check all open positions for stop-loss or target breach.
         Closes positions deterministically when thresholds are hit.
 
+        Uses EXECUTABLE sides for trigger checks:
+        - BUY/LONG closing: checks best_bid (where you actually sell)
+        - SELL/SHORT closing: checks best_ask (where you actually buy)
+
         :returns: List of auto-closed position dicts (symbol, reason, pnl)
         """
         positions = self._state.get_open_positions()
@@ -629,26 +633,34 @@ class OrderExecutionTools:
             if sl is None and tgt is None:
                 continue
 
-            current_price = self._get_current_price(pos["symbol"])
-            if current_price is None:
+            # Get executable sides (not just LTP)
+            book = self._get_order_book(pos["symbol"])
+            if not book:
                 continue
 
-            self._apply_trailing_stop(pos, current_price)
+            best_bid = book.get("best_bid")
+            best_ask = book.get("best_ask")
+            if best_bid is None or best_ask is None:
+                continue
+
+            self._apply_trailing_stop(pos, best_bid if pos["direction"] == "BUY" else best_ask)
             sl = pos.get("stop_loss")
 
             direction = pos["direction"]
             reason = None
 
             if direction == "BUY":
-                if sl is not None and current_price <= sl:
-                    reason = f"Stop-loss hit: price {current_price:.2f} <= SL {sl:.2f}"
-                elif tgt is not None and current_price >= tgt:
-                    reason = f"Target hit: price {current_price:.2f} >= target {tgt:.2f}"
+                # Closing LONG = sell at best_bid
+                if sl is not None and best_bid <= sl:
+                    reason = f"Stop-loss hit: bid {best_bid:.2f} <= SL {sl:.2f}"
+                elif tgt is not None and best_bid >= tgt:
+                    reason = f"Target hit: bid {best_bid:.2f} >= target {tgt:.2f}"
             elif direction == "SELL":
-                if sl is not None and current_price >= sl:
-                    reason = f"Stop-loss hit: price {current_price:.2f} >= SL {sl:.2f}"
-                elif tgt is not None and current_price <= tgt:
-                    reason = f"Target hit: price {current_price:.2f} <= target {tgt:.2f}"
+                # Closing SHORT = buy at best_ask
+                if sl is not None and best_ask >= sl:
+                    reason = f"Stop-loss hit: ask {best_ask:.2f} >= SL {sl:.2f}"
+                elif tgt is not None and best_ask <= tgt:
+                    reason = f"Target hit: ask {best_ask:.2f} <= target {tgt:.2f}"
 
             if reason:
                 logger.info(f"AUTO-CLOSE {pos['symbol']}: {reason}")

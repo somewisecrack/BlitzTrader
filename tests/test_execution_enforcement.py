@@ -996,6 +996,13 @@ class TestTrailingStops(unittest.TestCase):
                         return self.positions.pop(i)
                 return None
 
+            def update_position_by_order_id(self, order_id, **kwargs):
+                for pos in self.positions:
+                    if pos["order_id"] == order_id:
+                        pos.update(kwargs)
+                        return pos
+                return None
+
             def remove_position(self, symbol):
                 raise AssertionError("remove_position(symbol) should not be used for auto-close")
 
@@ -1022,7 +1029,9 @@ class TestTrailingStops(unittest.TestCase):
         feed = MagicMock()
         feed.get_ltp.return_value = 54835.8
         feed.get_best_bid_ask.return_value = (54820.0, 54840.0)
+        feed.get_live_quote.return_value = None
         client = MagicMock()
+        client.get_quotes.return_value = None
 
         executor = OrderExecutionTools(
             state_manager=state,
