@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from itertools import combinations
 
@@ -25,6 +26,7 @@ from config import (
     MIN_BARS,
     NIFTY50_SYMBOLS,
     PAIR_INTERVALS,
+    PAIR_SCREEN_TOP_N,
     RNG_SEED,
     SIMS_PER_DRAW,
     USE_BOOTSTRAP_RESID,
@@ -32,6 +34,7 @@ from config import (
 )
 
 logger = logging.getLogger("BlitzTrader.PairsScanner")
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
 @dataclass
@@ -87,37 +90,83 @@ class PairScanner:
         period = INTERVAL_PERIODS[interval]
         batches = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
         frames: list[pd.DataFrame] = []
-        for batch in batches:
-            try:
-                raw = yf.download(
-                    batch,
-                    period=period,
-                    interval=interval,
-                    auto_adjust=False,
-                    progress=False,
-                    threads=False,
-                )
-            except Exception as exc:
-                logger.warning("yfinance batch failed for %s %s: %s", interval, batch[:3], exc)
-                continue
+        base_kwargs = {
+            "period": period,
+            "interval": interval,
+            "auto_adjust": False,
+            "progress": False,
+        }
+
+        for batch_idx, batch in enumerate(batches):
+            if batch_idx > 0:
+                time.sleep(1.5)
+
+            raw = pd.DataFrame()
+            for attempt in range(3):
+                if attempt > 0:
+                    time.sleep(3 * attempt)
+                try:
+                    raw = yf.download(batch, **base_kwargs)
+                    if not raw.empty:
+                        break
+                except Exception as exc:
+                    logger.warning(
+                        "yfinance batch %s attempt %s failed for %s %s: %s",
+                        batch_idx + 1,
+                        attempt + 1,
+                        interval,
+                        batch[:3],
+                        exc,
+                    )
+                    raw = pd.DataFrame()
+
             if raw.empty:
+                logger.warning(
+                    "yfinance batch %s returned no data for %s after retries",
+                    batch_idx + 1,
+                    interval,
+                )
                 continue
+
             if isinstance(raw.columns, pd.MultiIndex):
-                close = raw["Adj Close"] if "Adj Close" in raw.columns.get_level_values(0) else raw["Close"]
+                if "Adj Close" not in raw.columns.get_level_values(0):
+                    logger.warning("yfinance batch %s missing Adj Close for %s", batch_idx + 1, interval)
+                    continue
+                close = raw["Adj Close"]
             else:
-                close = raw[["Adj Close"]] if "Adj Close" in raw.columns else raw[["Close"]]
+                if "Adj Close" not in raw.columns:
+                    logger.warning("yfinance batch %s missing Adj Close for %s", batch_idx + 1, interval)
+                    continue
+                close = raw[["Adj Close"]]
                 close.columns = [batch[0]]
+
             if isinstance(close, pd.Series):
                 close = close.to_frame(name=batch[0])
-            frames.append(close.dropna(axis=1, how="all"))
+
+            valid = close.dropna(axis=1, how="all")
+            if valid.empty:
+                logger.warning("yfinance batch %s all Adj Close columns empty for %s", batch_idx + 1, interval)
+                continue
+            frames.append(valid)
+            logger.info(
+                "yfinance batch %s for %s: got %s/%s tickers",
+                batch_idx + 1,
+                interval,
+                len(valid.columns),
+                len(batch),
+            )
+
         if not frames:
             return pd.DataFrame()
+
         combined = pd.concat(frames, axis=1)
-        combined = combined.loc[:, ~combined.columns.duplicated()].sort_index()
+        combined = combined.loc[:, ~combined.columns.duplicated()]
+        combined = combined.dropna(axis=1, thresh=int(len(combined) * 0.9))
         combined = combined.ffill().bfill()
         combined = combined.loc[~combined.index.duplicated(keep="last")]
-        combined = combined.dropna(axis=1, thresh=int(len(combined) * 0.9))
-        return combined
+        combined = combined.sort_index()
+        active = [ticker for ticker in tickers if ticker in combined.columns]
+        return combined[active]
 
     @staticmethod
     def hurst(ts: np.ndarray) -> float:
@@ -372,10 +421,28 @@ class PairScanner:
                 continue
             active = [ticker for ticker in tickers if ticker in prices.columns]
             logger.info("Scanning %s interval with %s active symbols", interval, len(active))
+            screened_for_interval: list[ScreenedPair] = []
             for x_sym, y_sym in combinations(active, 2):
                 screened = self.screen_pair(x_sym, y_sym, prices, interval)
                 if not screened:
                     continue
+                screened_for_interval.append(screened)
+                logger.info(
+                    "Cointegrated pair for %s: %s/%s (%s)",
+                    interval,
+                    x_sym,
+                    y_sym,
+                    screened.method,
+                )
+                if len(screened_for_interval) >= PAIR_SCREEN_TOP_N:
+                    break
+
+            logger.info(
+                "Found %s screened pairs for %s. Running ensemble MC...",
+                len(screened_for_interval),
+                interval,
+            )
+            for screened in screened_for_interval:
                 candidate = self.run_ensemble_mc(screened)
                 key = candidate.pair_key
                 existing = merged.get(key)

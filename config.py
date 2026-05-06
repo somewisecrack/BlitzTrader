@@ -174,17 +174,18 @@ NIFTY50_SYMBOLS = [
 ]
 
 # Pairs scanner statistical thresholds
-ADF_PVALUE_LIMIT     = 0.05
-BATCH_SIZE           = 10
-BLOCK_LEN_FACTOR     = 0.5
-ENSEMBLE_M           = 50
-HURST_LIMIT          = 0.5
-MAX_TOTAL_SIMS       = 10_000
+ADF_PVALUE_LIMIT     = 0.1
+BATCH_SIZE           = 20
+BLOCK_LEN_FACTOR     = 0.25
+ENSEMBLE_M           = 80
+HURST_LIMIT          = 0.45
+MAX_TOTAL_SIMS       = 400_000
 MIN_BARS             = 100
+PAIR_SCREEN_TOP_N    = 50
 RNG_SEED             = 42
-SIMS_PER_DRAW        = 50
+SIMS_PER_DRAW        = 2000
 USE_BOOTSTRAP_RESID  = True
-Z_SCORE_LIMIT        = 1.5
+Z_SCORE_LIMIT        = 2.0
 
 # ──────────────────────────────────────────────────────────────
 #   DISK GUARD
