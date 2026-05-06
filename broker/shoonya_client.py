@@ -16,7 +16,6 @@ import json
 import logging
 import time
 import urllib.parse
-import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -105,7 +104,9 @@ class ShoonyaClient:
 
             # ── Step 1: QuickAuth ──
             logger.info(f"Step 1: QuickAuth for {user_id}...")
-            jkey, err = self._quickauth(user_id, password, totp_secret, vendor_code, api_key)
+            jkey, err = self._quickauth(
+                user_id, password, totp_secret, vendor_code, api_key, imei
+            )
             if not jkey:
                 return False, f"QuickAuth failed: {err}"
             logger.info("QuickAuth success — got jKey")
@@ -181,6 +182,7 @@ class ShoonyaClient:
         totp_secret: str,
         vendor_code: str,
         api_key: str,
+        imei: str,
     ) -> tuple[Optional[str], Optional[str]]:
         """
         POST to QuickAuth with credentials.
@@ -209,7 +211,7 @@ class ShoonyaClient:
                         "appkey": hashlib.sha256(
                             f"{user_id}|{api_key}".encode("utf-8")
                         ).hexdigest(),
-                        "imei": str(uuid.uuid4()),
+                        "imei": imei,
                     },
                     {
                         # Legacy web QuickAuth fallback retained only for
@@ -221,7 +223,7 @@ class ShoonyaClient:
                         "appkey": hashlib.sha256(
                             (user_id + "|" + _INTERNAL_SECRET).encode()
                         ).hexdigest(),
-                        "imei": str(uuid.uuid4()),
+                        "imei": imei,
                         "addldivinf": "BlitzTrader/1.0",
                         "source": "API",
                         "vc": "NOREN_API",
