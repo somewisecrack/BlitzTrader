@@ -1,16 +1,18 @@
 # BlitzTrader
 
-An autonomous intraday **futures** trading bot for NSE index futures (`NIFTY`, `BANKNIFTY`, `FINNIFTY`), deployed on Google Cloud Platform.
+An autonomous intraday trading bot for NSE index **futures** and **statistical arbitrage pairs**, deployed on Google Cloud Platform. Runs deterministic Python-only decision loops with optional Gemini integration for chat and EOD analysis.
 
 ## What it does
 
 - Runs every trading day via a systemd timer on a GCP VM
 - Logs into Shoonya (Finvasia) broker API at session start
 - Resolves front-month NIFTY, BANKNIFTY, and FINNIFTY futures contracts at startup
-- Uses Python to scan, select, execute, and manage **futures trades only**
-- Uses the live bid/ask book for simulated market-order fills
-- Sends real-time alerts and responds via a Telegram bot
-- Writes a daily trading journal and maintains cross-session memory so it learns from past sessions
+- **Futures trading**: Scans, selects, executes, and manages intraday index futures trades (₹10L capital)
+- **Pairs trading**: Detects cointegrated pairs via Johansen test, monitors z-score mean-reversion, scales positions with Kalman filter hedging (₹5L base capital with 2x leverage = ₹10L gross)
+- Uses Python scanners (60s interval) with deterministic execution guardrails — no LLM in trade decisions
+- Uses the live bid/ask book for executable market-order fills
+- Sends real-time alerts and responds via Telegram bot
+- Writes a daily trading journal and maintains cross-session memory
 - Uses Gemini only for free-form Telegram chat and end-of-day summarization
 
 ## Architecture
@@ -20,43 +22,83 @@ systemd timer (9:00 AM IST, Mon–Fri)
         │
         ▼
     main.py
-    ├── Startup phase      — login, resolve futures tokens, load memory, set session goals
-    ├── Trading loop       — Python scanner every 60s + deterministic execution + Telegram poll
-    │     ├── MarketData   — signal scanner, indicators, cache
-    │     ├── OrderExec    — Python guardrails, fills, SL/target/trailing, EOD close
-    │     └── LiveFeed     — WebSocket price stream from Shoonya
-    └── EOD phase          — close positions, write journal, Gemini summary
+    ├── Startup phase
+    │     ├── Login + resolve futures tokens
+    │     ├── Load cross-session memory
+    │     └── Pairs scanner (yfinance + cointegration test)
+    ├── Trading loop (every 60s)
+    │     ├── Futures signals    — technical scanner + Python entry/exit logic
+    │     ├── Pairs signals      — z-score monitoring + position scaling + trailing stops
+    │     ├── OrderExecution    — simultaneous futures + pairs, RMS margin checks
+    │     ├── WebSocket feed    — live Shoonya price stream
+    │     └── Telegram polling  — user commands + alerts
+    └── EOD phase
+          ├── Force close all positions (3:15 PM IST)
+          ├── Reconcile P&L for futures + pairs independently
+          └── Write journal + Gemini reflection
 ```
 
 ## Key features
 
+### Futures Trading
 | Feature | Detail |
 |---|---|
-| Trading engine | Python-only |
-| Gemini role | Free-form chat + EOD summary only |
-| Broker | Shoonya (Finvasia) via `NorenRestApiPy` |
-| Exchange | NFO — NIFTY, BANKNIFTY, and FINNIFTY front-month futures |
-| Capital | ₹10,00,000 virtual tracked |
-| Risk | Exactly 1 futures lot per trade, 5% per trade (₹50,000 max), 5% daily stop (₹50,000) |
-| Margin | Shoonya RMS `GetOrderMargin` is queried before virtual entries; returned broker margin is stored on positions |
-| Instruments | NIFTY, BANKNIFTY, and FINNIFTY futures; exact lot size resolved from Shoonya contract metadata at startup |
-| Position caps | Max 3 open positions; no pyramiding, one open position per instrument |
-| Daily trade cap | Max 10 total entries/day; completed trades + open positions + pending entries count |
-| Execution | Futures-only guardrail: CE/PE and bare index names are hard-blocked |
-| Trading window | 9:15 AM – 3:05 PM IST (CAUTION in first 15 min) |
-| Telegram | Real-time alerts + simple status replies + Gemini chat fallback |
+| Engine | Python-only (no LLM in decisions) |
+| Capital | ₹10,00,000 virtual |
+| Risk | 1 lot/trade, 5% per trade (₹50k max), 5% daily stop |
+| Instruments | NIFTY, BANKNIFTY, FINNIFTY futures (front-month) |
+| Position caps | Max 3 open; no pyramiding |
+| Daily trade cap | Max 10 entries |
+| Execution | CE/PE hard-blocked; bare names hard-blocked |
+
+### Pairs Trading (Statistical Arbitrage)
+| Feature | Detail |
+|---|---|
+| Capital | ₹5,00,000 base (2x leverage = ₹10,00,000 gross) |
+| Universe | NIFTY 50 (yfinance: 50 symbols, 2,450 pairs tested daily) |
+| Cointegration | Johansen test + CADF validation |
+| Signals | Z-score mean-reversion (threshold: abs(z) > 2.0) + Hurst < 0.45 |
+| Position scaling | Up to 10 pairs concurrent, ₹1,00,000 gross per pair |
+| Hedging | Kalman filter beta for leg ratio balancing |
+| Exits | Target/SL on z-score thresholds + trailing stops + EOD forced close |
+
+### General
+| Feature | Detail |
+|---|---|
+| Broker | Shoonya (Finvasia) |
+| Margin | RMS `GetOrderMargin` queried before entries |
+| Trading window | 9:15 AM – 3:05 PM IST |
+| Telegram | Real-time alerts + commands + Gemini chat |
 | Memory | Cross-session `journals/memory.md` |
+| Gemini | Free-form chat + EOD summary only |
 
 ## Execution enforcement
 
-BlitzTrader is **futures-only**. Two hard guardrails are enforced in Python:
+**Futures module** — Two hard guardrails in Python:
 
 1. `place_virtual_order()` rejects any symbol ending in `CE` or `PE`.
-2. `place_virtual_order()` rejects bare logical names (`NIFTY`, `BANKNIFTY`, etc.) — the agent must use the resolved futures tsym (e.g. `NIFTY28APR26F`).
+2. `place_virtual_order()` rejects bare logical names (`NIFTY`, `BANKNIFTY`, etc.) — must use resolved futures tsym (e.g. `NIFTY28APR26F`).
 
-The active futures tsym is resolved at startup via `get_front_month_futures_token()` and surfaced in every iteration context under `ACTIVE FUTURES INSTRUMENTS`.
+**Pairs module** — Independent capital pool (₹5L base, 2x leverage = ₹10L gross) with separate P&L tracking. No cross-contamination with futures capital.
 
-## Strategies
+## Pairs Trading: Statistical Arbitrage
+
+The pairs module scans NIFTY 50 daily for cointegrated pairs using:
+
+1. **Johansen cointegration test** — 0-lag Johansen on recent price history (60–365 days by interval)
+2. **CADF validation** — Augmented Dickey-Fuller confirmation on the spread (p-value < 0.1)
+3. **Z-score filtering** — abs(z_score) > 2.0 and Hurst exponent < 0.45 (mean-reversion signal)
+4. **Half-life ranking** — Monte Carlo ensemble to estimate spread mean-reversion half-life
+
+Selected pairs are ranked by win probability; top 10 are opened at 9:15 AM IST with:
+
+- **Hedging**: Kalman filter estimated beta for ratio balancing (e.g., 1 INFY long : 0.8 TCS short)
+- **Position sizing**: ₹1,00,000 gross notional per pair = ₹50,000 base + ₹50,000 leveraged hedge
+- **Exits**: Z-score target thresholds (±1.0), 0.5% trailing stop, 3:15 PM forced EOD close
+
+All pairs decisions are **Python-only** — no Gemini in the scanner or trade logic. Position P&L is tracked independently from futures.
+
+## Futures Strategies
 
 All intraday, executed on NIFTY / BANKNIFTY / FINNIFTY futures:
 
