@@ -173,33 +173,34 @@ class TestCapitalAllocation:
     """Allocation logic: 10 pairs vs fewer than 10."""
 
     def test_allocation_with_10_pairs(self):
-        from config import PAIRS_CAPITAL, PER_PAIR_CAPITAL, MAX_OPEN_PAIRS
+        from config import PAIRS_GROSS_CAPITAL, PER_PAIR_CAPITAL, MAX_OPEN_PAIRS
         num_pairs = 10
         assert num_pairs >= MAX_OPEN_PAIRS
         per_pair = float(PER_PAIR_CAPITAL)
-        assert per_pair == PAIRS_CAPITAL / 10
+        assert per_pair == 100_000
+        assert per_pair == PAIRS_GROSS_CAPITAL / MAX_OPEN_PAIRS
         total_allocated = per_pair * num_pairs
-        assert math.isclose(total_allocated, PAIRS_CAPITAL)
+        assert math.isclose(total_allocated, PAIRS_GROSS_CAPITAL)
 
     def test_allocation_with_fewer_than_10_pairs(self):
-        from config import PAIRS_CAPITAL
+        from config import PAIRS_GROSS_CAPITAL
         num_pairs = 6
-        per_pair = PAIRS_CAPITAL / num_pairs
-        assert math.isclose(per_pair * num_pairs, PAIRS_CAPITAL)
+        per_pair = PAIRS_GROSS_CAPITAL / num_pairs
+        assert math.isclose(per_pair * num_pairs, PAIRS_GROSS_CAPITAL)
         # Each pair gets more than the standard ₹1L
         assert per_pair > 100_000
 
     def test_allocation_with_1_pair(self):
-        from config import PAIRS_CAPITAL
+        from config import PAIRS_GROSS_CAPITAL
         num_pairs = 1
-        per_pair = PAIRS_CAPITAL / num_pairs
-        assert math.isclose(per_pair, PAIRS_CAPITAL)
+        per_pair = PAIRS_GROSS_CAPITAL / num_pairs
+        assert math.isclose(per_pair, PAIRS_GROSS_CAPITAL)
 
     def test_capital_pools_are_separate(self):
         from config import VIRTUAL_CAPITAL, PAIRS_CAPITAL
-        # Both are ₹10L but defined independently
+        # Futures: ₹10L, Pairs base: ₹5L (with 2x leverage = ₹10L gross)
         assert VIRTUAL_CAPITAL == 1_000_000
-        assert PAIRS_CAPITAL == 1_000_000
+        assert PAIRS_CAPITAL == 500_000
         # Neither is derived from the other at module level — they don't share a pool
 
 

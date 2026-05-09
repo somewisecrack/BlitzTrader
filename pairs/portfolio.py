@@ -11,6 +11,7 @@ from config import (
     JOURNALS_DIR,
     MAX_OPEN_PAIRS,
     PAIRS_CAPITAL,
+    PAIRS_GROSS_CAPITAL,
     PAIRS_EXCHANGE,
     PAIRS_PRODUCT,
     PAIRS_STATE_FILE,
@@ -60,7 +61,7 @@ class PairPosition:
 class PairPortfolio:
     def __init__(self, state_file: Path = PAIRS_STATE_FILE):
         self._state_file = state_file
-        self.capital = PAIRS_CAPITAL
+        self.capital = PAIRS_GROSS_CAPITAL  # Use gross deployable capital for position sizing
         self.positions: list[PairPosition] = []
 
     def allocate_and_open(
