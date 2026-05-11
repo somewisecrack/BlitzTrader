@@ -13,9 +13,26 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Pre-load all heavy scientific packages that pairs/scanner.py needs.
+# Both test files mutate numpy.ndarray = object at module-level (collection time).
+# All scipy/statsmodels sub-modules that reference np.ndarray at import time must be
+# fully cached *before* that mutation runs.  Since this file is collected first, we
+# front-load the full import chain here so no module-body code re-executes later.
+# Order: numpy first (scipy and statsmodels both depend on it).
+import numpy  # noqa: F401
+import scipy.stats  # noqa: F401
+import scipy.signal  # noqa: F401  — imported transitively by statsmodels.tsa
+import statsmodels.regression.linear_model  # noqa: F401
+import statsmodels.tools.tools  # noqa: F401
+import statsmodels.tsa.stattools  # noqa: F401
+import statsmodels.tsa.vector_ar.vecm  # noqa: F401
 
 # ─── Minimal stubs so we can import without heavy dependencies ────────────────
 
@@ -306,26 +323,59 @@ class TestGeminiNotInPairsDecisions:
     """Gemini (AgentLoop) must not be imported or used in the pairs module."""
 
     def test_pairs_scanner_does_not_import_agent_loop(self):
-        import importlib
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "pairs.scanner",
-            "/Users/rahulgirishkumar/PROJECTS/TRADING/BlitzTrader/pairs/scanner.py",
-        )
-        # Check source text — no reference to AgentLoop or gemini at decision time
-        import pathlib
-        src = pathlib.Path(
-            "/Users/rahulgirishkumar/PROJECTS/TRADING/BlitzTrader/pairs/scanner.py"
-        ).read_text()
+        src = (_REPO_ROOT / "pairs" / "scanner.py").read_text()
         assert "AgentLoop" not in src
         assert "agent_loop" not in src
         assert "generate_content" not in src
 
     def test_pairs_portfolio_does_not_import_agent_loop(self):
-        import pathlib
-        src = pathlib.Path(
-            "/Users/rahulgirishkumar/PROJECTS/TRADING/BlitzTrader/pairs/portfolio.py"
-        ).read_text()
+        src = (_REPO_ROOT / "pairs" / "portfolio.py").read_text()
         assert "AgentLoop" not in src
         assert "agent_loop" not in src
         assert "generate_content" not in src
+
+
+class TestYfinanceOnlyDataSource:
+    """Verify pairs/scanner.py uses yfinance as its sole data source.
+
+    All checks use source-code inspection to avoid importing pairs.scanner
+    inside the test body, which would collide with the scipy stub that
+    test_pairs_wiring.py installs at module-level.
+    """
+
+    _SRC = None
+
+    @classmethod
+    def _scanner_src(cls) -> str:
+        if cls._SRC is None:
+            cls._SRC = (_REPO_ROOT / "pairs" / "scanner.py").read_text()
+        return cls._SRC
+
+    def test_fetch_interval_data_calls_yfinance(self):
+        """fetch_interval_data must delegate directly to _fetch_yfinance_data."""
+        src = self._scanner_src()
+        # The method body must contain exactly one call: _fetch_yfinance_data
+        import re
+        # Extract the fetch_interval_data method body
+        m = re.search(
+            r"def fetch_interval_data\(.*?\n((?:[ \t]+[^\n]*\n)*)",
+            src,
+        )
+        assert m, "fetch_interval_data not found in scanner.py"
+        body = m.group(1)
+        assert "_fetch_yfinance_data" in body, "fetch_interval_data must call _fetch_yfinance_data"
+        assert "_fetch_yahoo" not in body, "fetch_interval_data must not call _fetch_yahoo_chart_data"
+
+    def test_no_fetch_yahoo_chart_data_method(self):
+        src = self._scanner_src()
+        assert "def _fetch_yahoo_chart_data" not in src
+
+    def test_scanner_source_has_no_yahoo_direct_url(self):
+        src = self._scanner_src()
+        assert "query1.finance" not in src
+        assert "query2.finance" not in src
+        assert "urllib.request" not in src
+        assert "urlopen" not in src
+        assert "_fetch_yahoo" not in src
+        assert "Yahoo chart" not in src
+        assert "falling back to yfinance" not in src

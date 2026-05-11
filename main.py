@@ -89,6 +89,7 @@ from tools.goal_manager import GoalManager
 from tools.registry import ToolRegistry
 from tools.market_calendar import get_market_holiday_name, is_nse_trading_day
 from agent_loop import AgentLoop
+from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
 from context_builder import (
     SYSTEM_PROMPT,
     build_chat_context,
@@ -128,6 +129,8 @@ class BlitzTrader:
         self._pairs_candidates: list = []
         self._pairs_scan_done: bool = False
         self._pairs_opened: bool = False
+        # Promoted futures filters (loaded from wiki/promoted_filters at startup)
+        self._promoted_futures_filters: list = []
 
     def run(self):
         """Run the full trading session."""
@@ -409,6 +412,9 @@ class BlitzTrader:
             GEMINI_MAX_DECISION_TOKENS,
             GEMINI_MAX_SCHEDULED_TOKENS,
         )
+        # Load promoted futures filters from wiki/ (non-fatal if missing)
+        self._promoted_futures_filters = self._load_promoted_futures_filters()
+
         logger.info("All components initialized successfully")
 
         # Log startup configuration for verification
@@ -418,6 +424,22 @@ class BlitzTrader:
             f"Pairs base capital ₹{PAIRS_CAPITAL:,.0f} (gross ₹{PAIRS_GROSS_CAPITAL:,.0f} with {PAIRS_LEVERAGE}x leverage) | "
             f"State file: {STATE_FILE}"
         )
+
+    def _load_promoted_futures_filters(self) -> list:
+        """Load active promoted futures filters from wiki/promoted_filters at startup."""
+        try:
+            wiki_dir = Path(__file__).parent / "wiki"
+            filters = load_active_filters(wiki_dir)
+            if filters:
+                logger.info(
+                    "Loaded %d active promoted futures filter(s) from %s",
+                    len(filters),
+                    wiki_dir / "promoted_filters",
+                )
+            return filters
+        except Exception:
+            logger.warning("Failed to load promoted futures filters — continuing with no filters", exc_info=True)
+            return []
 
     def _run_agent_iteration(
         self,
@@ -972,6 +994,14 @@ class BlitzTrader:
             f"{symbol} {interval}m | price ₹{price:.2f} | EMA20 {ema20} | "
             f"ADX {adx14} | RSI {rsi14} | avgVol20 {avg_volume_20:.0f}"
         )
+
+        # Apply promoted futures filters (Python-driven, backtest-validated)
+        if self._promoted_futures_filters:
+            filter_allowed, filter_reason = apply_promoted_filters(
+                signal, indicators, self._promoted_futures_filters
+            )
+            if not filter_allowed:
+                return False, context_summary, filter_reason
 
         if direction == "BUY" and ema_bear:
             return False, context_summary, "Rejected by Python: higher-timeframe EMA stack remains bearish."

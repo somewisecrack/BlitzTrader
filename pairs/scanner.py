@@ -3,9 +3,6 @@ from __future__ import annotations
 import logging
 import math
 import time
-import json
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from itertools import combinations
 
@@ -91,61 +88,7 @@ class PairScanner:
 
     def fetch_interval_data(self, tickers: list[str], interval: str) -> pd.DataFrame:
         period = INTERVAL_PERIODS[interval]
-        frames = self._fetch_yahoo_chart_data(tickers, period, interval)
-        if frames:
-            return self._clean_price_frames(tickers, frames)
-
-        logger.warning("Yahoo chart API returned no data for %s; falling back to yfinance", interval)
         return self._fetch_yfinance_data(tickers, period, interval)
-
-    def _fetch_yahoo_chart_data(self, tickers: list[str], period: str, interval: str) -> list[pd.DataFrame]:
-        frames: list[pd.DataFrame] = []
-        headers = {"User-Agent": "Mozilla/5.0"}
-        for idx, ticker in enumerate(tickers):
-            if idx > 0 and idx % BATCH_SIZE == 0:
-                time.sleep(1.5)
-
-            encoded = urllib.parse.quote(ticker, safe="")
-            url = (
-                f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}"
-                f"?range={urllib.parse.quote(period)}&interval={urllib.parse.quote(interval)}"
-            )
-            series = None
-            for attempt in range(3):
-                if attempt > 0:
-                    time.sleep(2 * attempt)
-                try:
-                    req = urllib.request.Request(url, headers=headers)
-                    with urllib.request.urlopen(req, timeout=20) as resp:
-                        payload = json.loads(resp.read().decode("utf-8"))
-                    result = (payload.get("chart", {}).get("result") or [None])[0]
-                    if not result:
-                        continue
-                    timestamps = result.get("timestamp") or []
-                    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
-                    closes = quote.get("close") or []
-                    if not timestamps or not closes:
-                        continue
-                    index = pd.to_datetime(timestamps, unit="s", utc=True)
-                    series = pd.Series(closes, index=index, name=ticker, dtype="float64").dropna()
-                    if not series.empty:
-                        break
-                except Exception as exc:
-                    logger.warning(
-                        "Yahoo chart fetch failed for %s %s attempt %s: %s",
-                        ticker,
-                        interval,
-                        attempt + 1,
-                        exc,
-                    )
-
-            if series is None or series.empty:
-                logger.warning("Yahoo chart returned no data for %s %s", ticker, interval)
-                continue
-            frames.append(series.to_frame())
-
-        logger.info("Yahoo chart for %s: got %s/%s tickers", interval, len(frames), len(tickers))
-        return frames
 
     def _fetch_yfinance_data(self, tickers: list[str], period: str, interval: str) -> pd.DataFrame:
         batches = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
