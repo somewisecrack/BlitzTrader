@@ -320,63 +320,9 @@ def detect_patterns(executed: list, rejected: list) -> list:
 
     for sym, count in loss_by_sym.items():
         if count >= 2:
-            patterns.append(f"{count} consecutive losses on {sym}")
+            patterns.append(f"{count} repeated losses on {sym}")
 
     return patterns
-
-
-def generate_hypotheses(executed: list, rejected: list, patterns: list) -> list:
-    """Generate hypothesis suggestions from patterns."""
-    hyps = []
-
-    for p in patterns:
-        # Rejection-based hypotheses
-        if "NIFTY SELL" in p or "BANKNIFTY SELL" in p or "FINNIFTY SELL" in p:
-            sym_m = re.match(r"\d+x\s+(\w+):", p)
-            sym = sym_m.group(1) if sym_m else "NIFTY"
-            hyps.append(
-                f"Block {sym} SELL when RSI14 < 20 (oversold extension — prevents shorting into exhaustion)"
-            )
-        elif "NIFTY BUY" in p or "BANKNIFTY BUY" in p or "FINNIFTY BUY" in p:
-            sym_m = re.match(r"\d+x\s+(\w+):", p)
-            sym = sym_m.group(1) if sym_m else "NIFTY"
-            hyps.append(
-                f"Block {sym} BUY when RSI14 > 80 (overbought extension — prevents buying into exhaustion)"
-            )
-
-    # Rejected signals → block filter hypotheses
-    reject_reasons: dict = {}
-    for r in rejected:
-        sym = r.get("symbol", "")
-        direction = r.get("direction", r.get("action", ""))
-        reason = r.get("reason", r.get("reason:", ""))
-        if sym and reason:
-            key = f"{sym}|{direction}|{reason}"
-            reject_reasons[key] = reject_reasons.get(key, 0) + 1
-
-    for key, count in reject_reasons.items():
-        parts = key.split("|")
-        if len(parts) == 3:
-            sym, direction, reason = parts
-            reason_lower = reason.lower()
-            if "ema" in reason_lower and count >= 1:
-                hyps.append(
-                    f"Block {sym} {direction} when EMA stack is bearish (signals rejected: {count}x for EMA filter)"
-                )
-            elif "adx" in reason_lower and count >= 1:
-                hyps.append(
-                    f"Block {sym} {direction} when ADX14 < 25 (low trend strength, rejected {count}x)"
-                )
-
-    # Deduplicate
-    seen = set()
-    unique_hyps = []
-    for h in hyps:
-        if h not in seen:
-            seen.add(h)
-            unique_hyps.append(h)
-
-    return unique_hyps
 
 
 # ── Output formatting ─────────────────────────────────────────────────────────
@@ -388,7 +334,6 @@ def build_review_markdown(
     rejected: list,
     stats: dict,
     patterns: list,
-    hypotheses: list,
     log_messages: list,
     indicator_notes: list,
 ) -> str:
@@ -467,17 +412,6 @@ def build_review_markdown(
             lines.append(f"- {p}")
     else:
         lines.append("- No repeated failure modes detected.")
-    lines.append("")
-
-    # Possible hypotheses
-    lines.append("## Possible Hypotheses")
-    if hypotheses:
-        for h in hypotheses:
-            lines.append(f"- {h}")
-    else:
-        lines.append("- Insufficient data to propose hypotheses for this date.")
-        if stats["total"] == 0:
-            lines.append("  - Consider reviewing dates with more trading activity.")
     lines.append("")
 
     return "\n".join(lines)
@@ -582,7 +516,6 @@ def main():
     # Compute stats
     stats = compute_trade_stats(all_executed)
     patterns = detect_patterns(all_executed, all_rejected)
-    hypotheses = generate_hypotheses(all_executed, all_rejected, patterns)
 
     # Build output
     review_md = build_review_markdown(
@@ -591,7 +524,6 @@ def main():
         rejected=all_rejected,
         stats=stats,
         patterns=patterns,
-        hypotheses=hypotheses,
         log_messages=log_messages,
         indicator_notes=indicator_notes,
     )

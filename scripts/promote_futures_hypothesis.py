@@ -56,26 +56,6 @@ def ist_now() -> str:
     return datetime.now(IST).isoformat(timespec="seconds")
 
 
-def load_yaml_or_json(path: Path) -> dict:
-    """Load a YAML or JSON file, preferring the API functions."""
-    # Try JSON first
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    # Try hypothesis loader
-    try:
-        return load_hypothesis(path)
-    except Exception:
-        pass
-    # Try result loader
-    try:
-        return load_backtest_result(path)
-    except Exception:
-        pass
-    raise ValueError(f"Cannot parse file as JSON or YAML: {path}")
-
-
 def update_hypothesis_status(hyp: dict, hyp_path: Path, new_status: str):
     """Update hypothesis status field and rewrite the file."""
     hyp["status"] = new_status
@@ -171,13 +151,8 @@ def main():
         sys.exit(0)
 
     # Step 4: Write promoted filter
-    # promoted_filter already contains "id" from promote_if_passed — do NOT add filter_id.
-
     if "promoted_at" not in promoted_filter:
         promoted_filter["promoted_at"] = ist_now()
-
-    if "status" not in promoted_filter:
-        promoted_filter["status"] = "active"
 
     # Enrich with backtest summary (compact — no raw OHLCV)
     if "backtest_summary" not in promoted_filter:

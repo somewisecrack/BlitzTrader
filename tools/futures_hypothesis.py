@@ -359,7 +359,6 @@ def promote_if_passed(hypothesis: dict, result: dict) -> "dict | None":
         "symbol": hypothesis.get("symbol"),
         "direction": hypothesis.get("direction"),
         "filter": hypothesis.get("filter", {}),
-        "backtest_result": str(result.get("_source_path", "")),
         "promoted_at": _now_ist(),
     }
     return promoted
