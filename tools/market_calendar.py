@@ -1,7 +1,7 @@
 """
 tools/market_calendar.py - NSE trading-day guardrails.
 
-The systemd timer can only express "weekdays at 09:00"; this module blocks
+The systemd timer can only express "weekdays at 08:20"; this module blocks
 actual agent startup on exchange holidays before Shoonya/Gemini/feed init.
 """
 from __future__ import annotations

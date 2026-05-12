@@ -4,7 +4,7 @@ An autonomous intraday trading system for NSE index **futures** and **statistica
 
 ## What it does
 
-- Runs every trading day via a systemd timer on a GCP VM (9:00 AM IST)
+- Runs every trading day via a systemd timer on a GCP VM (8:20 AM IST)
 - Logs into Shoonya (Finvasia) broker API and resolves front-month futures contracts at startup
 - **Futures trading**: Scans, selects, executes, and manages intraday index futures trades (₹10L capital)
 - **Pairs trading**: Detects cointegrated NIFTY 50 pairs, monitors z-score mean-reversion, scales positions with Kalman hedge ratios (₹5L base × 2x leverage = ₹10L gross)
@@ -15,7 +15,7 @@ An autonomous intraday trading system for NSE index **futures** and **statistica
 ## Architecture
 
 ```
-systemd timer (9:00 AM IST, Mon–Fri)
+systemd timer (8:20 AM IST, Mon–Fri)
         │
         ▼
     main.py
@@ -215,7 +215,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now blitztrader.timer
 ```
 
-The timer fires at **9:00 AM IST, Monday–Friday**.
+The timer fires at **8:20 AM IST, Monday–Friday** so the pre-market pairs scan can run before the 9:15 AM open.
 
 ### Run the post-market pipeline
 

@@ -2,7 +2,7 @@
 main.py — BlitzTrader session lifecycle orchestrator.
 
 This is the entry point. It manages the full trading day:
-  9:00 AM  → Login, initialize services
+  8:20 AM  → Login, initialize services, run pre-market pairs scan
   9:15 AM  → Start deterministic Python trading loop
   3:15 PM  → Force EOD sequence, update memory
   3:25 PM  → Cleanup and exit
