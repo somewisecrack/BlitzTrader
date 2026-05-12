@@ -796,3 +796,287 @@ class TestMainIntegration:
         )
         hyp_files = list((outdir / "wiki" / "hypotheses").glob("HYP-*.json"))
         assert len(hyp_files) <= 1
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by new test classes
+# ---------------------------------------------------------------------------
+
+_split_markdown_sections = _mod._split_markdown_sections
+_truncate_section_lines = _mod._truncate_section_lines
+_MAX_REVIEW_CHARS = _mod._MAX_REVIEW_CHARS
+
+
+def _make_review(sections: dict, title: str = "# Review") -> str:
+    parts = [title, ""]
+    for heading, body in sections.items():
+        parts.append(f"## {heading}")
+        parts.append(body)
+        parts.append("")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# TestSplitMarkdownSections
+# ---------------------------------------------------------------------------
+
+class TestSplitMarkdownSections:
+    def test_empty_string(self):
+        preamble, sections = _split_markdown_sections("")
+        assert preamble == ""
+        assert sections == {}
+
+    def test_no_headings(self):
+        text = "This is just plain text.\nNo headings here."
+        preamble, sections = _split_markdown_sections(text)
+        assert preamble == text
+        assert sections == {}
+
+    def test_single_section(self):
+        text = "# Title\n\n## Summary\nsome text"
+        preamble, sections = _split_markdown_sections(text)
+        assert preamble == "# Title"
+        assert "Summary" in sections
+        assert sections["Summary"].startswith("## Summary")
+
+    def test_multiple_sections(self):
+        text = (
+            "# Daily Review\n\n"
+            "## Summary\nThis is the summary.\n\n"
+            "## Executed Trades\n| t | s |\n|---|---|\n| 09:00 | NIFTY |"
+        )
+        preamble, sections = _split_markdown_sections(text)
+        assert "Summary" in sections
+        assert "Executed Trades" in sections
+        assert sections["Summary"].startswith("## Summary")
+        assert sections["Executed Trades"].startswith("## Executed Trades")
+
+    def test_section_value_includes_heading(self):
+        text = "## Patterns Observed\n- Double reject\n"
+        preamble, sections = _split_markdown_sections(text)
+        for key, val in sections.items():
+            assert val.startswith("## "), f"Section {key!r} value does not start with '## '"
+
+    def test_trailing_whitespace_stripped(self):
+        text = "## Log Issues\nsome content\n\n\n   \n"
+        preamble, sections = _split_markdown_sections(text)
+        assert "Log Issues" in sections
+        val = sections["Log Issues"]
+        assert val == val.rstrip(), "Section value should have trailing whitespace stripped"
+
+
+# ---------------------------------------------------------------------------
+# TestTruncateSectionLines
+# ---------------------------------------------------------------------------
+
+class TestTruncateSectionLines:
+    def test_short_fits(self):
+        section = "## Summary\nshort content"
+        result = _truncate_section_lines(section, budget=500)
+        assert result == section
+        assert "_Section truncated" not in result
+
+    def test_truncation_adds_marker(self):
+        section = "## Summary\n" + ("long line content\n" * 200)
+        result = _truncate_section_lines(section, budget=100)
+        assert result.endswith("_Section truncated for prompt budget._")
+
+    def test_truncation_within_budget(self):
+        section = "## Summary\n" + ("data line\n" * 300)
+        budget = 200
+        result = _truncate_section_lines(section, budget=budget)
+        assert len(result) <= budget
+
+    def test_tiny_budget_returns_empty(self):
+        section = "## Summary\nsome content"
+        result = _truncate_section_lines(section, budget=5)
+        assert result == ""
+
+    def test_cuts_on_complete_lines(self):
+        # 10 lines of "xxxxxxxxxx" (10 chars each), total section = 109 chars.
+        # marker = "\n_Section truncated for prompt budget._" = 39 chars
+        # content_budget = budget - 39.  Each line costs 11 (10 chars + 1 newline).
+        # budget=72 → content_budget=33: 3 lines (33) fit, 4 lines (44) do not.
+        # 72 < 109 so truncation is triggered.
+        line = "x" * 10
+        section = "\n".join([line] * 10)
+        budget = 72
+        result = _truncate_section_lines(section, budget=budget)
+        marker = "_Section truncated for prompt budget._"
+        assert result.endswith(marker)
+        content_part = result[: result.index("\n" + marker)]
+        complete_lines = content_part.split("\n")
+        assert len(complete_lines) == 3
+        for ln in complete_lines:
+            assert ln == line, f"Expected complete line {line!r}, got {ln!r}"
+
+
+# ---------------------------------------------------------------------------
+# TestCompactReviewSectionAware
+# ---------------------------------------------------------------------------
+
+class TestCompactReviewSectionAware:
+    def test_section_priority(self):
+        sections = {
+            "Log Issues": "x" * 2000,
+            "Executed Trades": "| t | s |\n|---|---|\n| 09:00 | NIFTY |",
+            "Rejected Signals": "| t | s |\n|---|---|\n| 09:10 | NIFTY |",
+            "Patterns Observed": "- 2x reject",
+        }
+        review = _make_review(sections)
+        result = compact_review(review)
+        assert "## Executed Trades" in result
+        assert "## Rejected Signals" in result
+
+    def test_possible_hypotheses_excluded(self):
+        sections = {
+            "Summary": "Short summary.",
+            "Possible Hypotheses": "- Block VP-01 BUY when RSI14 < 25",
+            "Executed Trades": "| t | s |\n|---|---|\n| 09:00 | NIFTY |",
+        }
+        review = _make_review(sections)
+        result = compact_review(review)
+        assert "Possible Hypotheses" not in result
+
+    def test_budget_invariant(self):
+        filler_400 = "a" * 400
+        sections = {
+            "Summary": filler_400,
+            "Executed Trades": filler_400,
+            "Rejected Signals": filler_400,
+            "Patterns Observed": filler_400,
+            "Indicator Context": filler_400,
+            "Log Issues": filler_400,
+        }
+        review = _make_review(sections)
+        result = compact_review(review)
+        assert len(result) <= _MAX_REVIEW_CHARS
+
+    def test_missing_sections(self):
+        sections = {
+            "Summary": "Only summary here.",
+            "Executed Trades": "| t | s |\n|---|---|\n| 09:00 | NIFTY |",
+        }
+        review = _make_review(sections)
+        result = compact_review(review)
+        assert "## Summary" in result
+        assert "## Executed Trades" in result
+
+    def test_fallback_no_sections(self):
+        plain_text = "Just some plain text " * 200  # ~4200 chars
+        result = compact_review(plain_text)
+        assert len(result) <= _MAX_REVIEW_CHARS
+        assert result.startswith(plain_text[:50])
+
+    def test_table_no_broken_row(self):
+        table_rows = "\n".join(
+            "| 09:00 | NIFTY | SELL | VP-01 Counter Bull Trap | ₹500 |"
+            for _ in range(30)
+        )
+        sections = {
+            "Executed Trades": table_rows,
+        }
+        review = _make_review(sections)
+        result = compact_review(review)
+        _MARKER = "_Section truncated for prompt budget._"
+        if "## Executed Trades" in result:
+            for line in result.split("\n"):
+                if line.startswith("| "):
+                    assert line.endswith(" |") or "---" in line, (
+                        f"Partial table row found: {line!r}"
+                    )
+
+    def test_strategy_extraction_uses_full_review(self):
+        # Build prefix that fills > 2500 chars with no strategy names
+        summary_filler = "a" * 1400
+        log_filler = "b" * 1400
+        prefix_sections = {
+            "Summary": summary_filler,
+            "Log Issues": log_filler,
+        }
+        prefix = _make_review(prefix_sections)
+        # Ensure prefix is longer than _MAX_REVIEW_CHARS
+        assert len(prefix) > _MAX_REVIEW_CHARS
+        # Add Rejected Signals section AFTER char 2500 in the raw text
+        suffix = "\n## Rejected Signals\n| t | s |\n|---|---|\n| 09:10 | NIFTY | VP-07 Wicks Pullback |\n"
+        full_review = prefix + suffix
+        # Strategy should be found in full text
+        assert "VP-07 Wicks Pullback" in extract_strategies_from_review(full_review)
+        # But compact_review (which prioritizes Summary before Log Issues before nothing)
+        # should NOT include the Rejected Signals content since Log Issues isn't in priority
+        # Actually Log Issues IS in priority — so the budget will be spent on Summary + Log Issues
+        # The Rejected Signals section comes AFTER Log Issues in priority order so it may be cut.
+        # The key assertion: extract_strategies_from_review uses full text, not compact
+        result_compact = compact_review(full_review)
+        assert len(result_compact) <= _MAX_REVIEW_CHARS
+
+
+# ---------------------------------------------------------------------------
+# TestGeminiPromptContainsPrioritizedSections
+# ---------------------------------------------------------------------------
+
+class TestGeminiPromptContainsPrioritizedSections:
+    def test_gemini_prompt_uses_compact_review(self, monkeypatch):
+        # Build a review where Log Issues is 2000 chars and appears first,
+        # but Executed Trades has a clearly identifiable marker string.
+        _MARKER_STR = "NIFTY_MARKER_12345"
+        sections = {
+            "Log Issues": "z" * 2000,
+            "Executed Trades": f"| t | s |\n|---|---|\n| 09:00 | {_MARKER_STR} |",
+            "Summary": "Short summary.",
+        }
+        review_text = _make_review(sections)
+
+        # We need a review that has at least one supported strategy for call_gemini
+        # to proceed past the strategy check. We add VP-01 Counter Bull Trap to Summary.
+        sections_with_strategy = {
+            "Log Issues": "z" * 2000,
+            "Executed Trades": (
+                f"| t | s |\n|---|---|\n| 09:00 | {_MARKER_STR} |"
+                "\nVP-01 Counter Bull Trap: 1 signal"
+            ),
+            "Summary": "Short summary.",
+        }
+        review_text = _make_review(sections_with_strategy)
+
+        # Capture the prompt passed to generate_content
+        captured_prompts = []
+
+        mock_client = MagicMock()
+
+        def _capture_generate(model, contents):
+            captured_prompts.append(contents)
+            return _make_gemini_response([_VALID_GEMINI_CANDIDATE])
+
+        mock_client.models.generate_content.side_effect = _capture_generate
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        strategies_in_review = {s for s in SUPPORTED_STRATEGIES if s in review_text}
+        assert strategies_in_review, "Test setup error: no strategies found in review"
+
+        with patch.dict(sys.modules, {"google.genai": _make_fake_genai(mock_client)}):
+            call_gemini(
+                review_text,
+                _REVIEW_DATE_ISO,
+                _DATE_COMPACT,
+                max_hypotheses=3,
+                strategies_in_review=strategies_in_review,
+            )
+
+        assert captured_prompts, "generate_content was never called"
+        prompt = captured_prompts[0]
+
+        # Executed Trades was prioritized — marker must appear in the prompt
+        assert _MARKER_STR in prompt, (
+            f"Expected {_MARKER_STR!r} in prompt — Executed Trades should be prioritized"
+        )
+        # Log Issues content (z*2000) should not be at the START of the prompt's review section
+        # Find the review section (between --- delimiters in the template)
+        review_start = prompt.find("---\n")
+        if review_start != -1:
+            snippet = prompt[review_start: review_start + 200]
+            assert not snippet.startswith("---\nzzz"), (
+                "Log Issues content should not appear at the start of the review in the prompt"
+            )

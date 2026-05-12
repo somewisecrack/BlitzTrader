@@ -63,6 +63,15 @@ _FALLBACK_MODEL = "gemini-2.5-flash-lite"
 # Max chars of review text sent to Gemini — keeps prompt short and cost low
 _MAX_REVIEW_CHARS = 2_500
 
+_SECTION_PRIORITY = [
+    "Summary",
+    "Executed Trades",
+    "Rejected Signals",
+    "Patterns Observed",
+    "Indicator Context",
+    "Log Issues",
+]
+
 # Supported filter field names (mirrors tools/futures_filter_loader.py)
 _SUPPORTED_FILTER_FIELDS = {
     "rsi14_lt", "rsi14_gt",
@@ -107,12 +116,106 @@ def extract_review_date(review_path: Path) -> str:
     return review_path.stem.replace("-", "")
 
 
+def _split_markdown_sections(review_text: str) -> tuple[str, dict[str, str]]:
+    """Split review into (preamble, sections).
+
+    preamble  — text before the first ## heading, stripped.
+    sections  — dict keyed by heading text (without ##); each value is the
+                full section text INCLUDING the '## Heading' line, stripped
+                of trailing whitespace.  Insertion order is preserved.
+    """
+    lines = review_text.splitlines()
+    preamble_lines: list[str] = []
+    sections: dict[str, str] = {}
+    current_heading: str | None = None
+    current_lines: list[str] = []
+
+    for line in lines:
+        if line.startswith("## "):
+            if current_heading is not None:
+                sections[current_heading] = "\n".join(current_lines).rstrip()
+            else:
+                preamble_lines = list(current_lines)
+            current_heading = line[3:].strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    if current_heading is not None:
+        sections[current_heading] = "\n".join(current_lines).rstrip()
+    elif current_lines:
+        preamble_lines = list(current_lines)
+
+    return "\n".join(preamble_lines).rstrip(), sections
+
+
+def _truncate_section_lines(section_text: str, budget: int) -> str:
+    """Truncate section_text to at most budget chars, cutting on complete lines.
+
+    Appends a truncation marker when content is cut.  Returns '' if nothing fits.
+    """
+    if len(section_text) <= budget:
+        return section_text
+
+    _MARKER = "\n_Section truncated for prompt budget._"
+    content_budget = budget - len(_MARKER)
+    if content_budget <= 0:
+        return ""
+
+    lines = section_text.splitlines()
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        cost = len(line) + 1  # +1 for the newline splitlines removed
+        if used + cost > content_budget:
+            break
+        kept.append(line)
+        used += cost
+
+    if not kept:
+        return ""
+
+    return "\n".join(kept) + _MARKER
+
+
 def compact_review(review_text: str) -> str:
-    """Return the first _MAX_REVIEW_CHARS characters of the review (UTF-8 safe)."""
-    text = review_text[:_MAX_REVIEW_CHARS]
-    # Don't cut mid-word
-    last_nl = text.rfind("\n")
-    return text[:last_nl] if last_nl > 0 else text
+    """Return a section-aware compact version of the review for Gemini.
+
+    Sections are assembled in _SECTION_PRIORITY order so that the most
+    important evidence always appears within the prompt budget.
+    'Possible Hypotheses' is always excluded.
+    Falls back to plain head-truncation when no ## sections are found.
+    """
+    preamble, sections = _split_markdown_sections(review_text)
+
+    # Fallback: no ## sections — preserve old safe behavior
+    if not sections:
+        text = review_text[:_MAX_REVIEW_CHARS]
+        last_nl = text.rfind("\n")
+        return text[:last_nl] if last_nl > 0 else text
+
+    output = ""
+
+    if preamble and len(preamble) <= _MAX_REVIEW_CHARS:
+        output = preamble
+
+    for heading in _SECTION_PRIORITY:
+        if heading not in sections:
+            continue
+        section = sections[heading]
+        sep = "\n\n" if output else ""
+        remaining = _MAX_REVIEW_CHARS - len(output) - len(sep)
+        if remaining <= 0:
+            break
+        if len(section) <= remaining:
+            output = output + sep + section
+        else:
+            truncated = _truncate_section_lines(section, remaining)
+            if truncated:
+                output = output + sep + truncated
+            break
+
+    return output.rstrip()
 
 
 def extract_strategies_from_review(review_text: str) -> set[str]:
