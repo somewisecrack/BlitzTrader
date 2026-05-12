@@ -928,6 +928,38 @@ class TestCompactReviewSectionAware:
         assert "## Executed Trades" in result
         assert "## Rejected Signals" in result
 
+    def test_huge_summary_does_not_starve_trade_evidence(self):
+        sections = {
+            "Summary": "S" * 4000,
+            "Executed Trades": "EXEC_MARK",
+            "Rejected Signals": "REJ_MARK",
+            "Patterns Observed": "PAT_MARK",
+        }
+        result = compact_review(_make_review(sections))
+        assert "## Summary" in result
+        assert "EXEC_MARK" in result
+        assert "REJ_MARK" in result
+        assert "PAT_MARK" in result
+        assert len(result) <= _MAX_REVIEW_CHARS
+
+    def test_huge_executed_table_does_not_starve_rejections_or_patterns(self):
+        sections = {
+            "Summary": "Short summary.",
+            "Executed Trades": "\n".join(
+                "| 09:00 | NIFTY | SELL | VP-01 Counter Bull Trap | -100 |"
+                for _ in range(500)
+            ),
+            "Rejected Signals": "REJ_MARK",
+            "Patterns Observed": "PAT_MARK",
+        }
+        result = compact_review(_make_review(sections))
+        assert "## Executed Trades" in result
+        assert "## Rejected Signals" in result
+        assert "REJ_MARK" in result
+        assert "## Patterns Observed" in result
+        assert "PAT_MARK" in result
+        assert len(result) <= _MAX_REVIEW_CHARS
+
     def test_possible_hypotheses_excluded(self):
         sections = {
             "Summary": "Short summary.",

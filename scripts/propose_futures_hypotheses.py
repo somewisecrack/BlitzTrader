@@ -63,14 +63,21 @@ _FALLBACK_MODEL = "gemini-2.5-flash-lite"
 # Max chars of review text sent to Gemini — keeps prompt short and cost low
 _MAX_REVIEW_CHARS = 2_500
 
-_SECTION_PRIORITY = [
+_SECTION_PRIORITY = (
     "Summary",
     "Executed Trades",
     "Rejected Signals",
     "Patterns Observed",
     "Indicator Context",
     "Log Issues",
-]
+)
+
+_SECTION_MIN_BUDGETS = {
+    "Summary": 350,
+    "Executed Trades": 650,
+    "Rejected Signals": 650,
+    "Patterns Observed": 350,
+}
 
 # Supported filter field names (mirrors tools/futures_filter_loader.py)
 _SUPPORTED_FILTER_FIELDS = {
@@ -178,6 +185,19 @@ def _truncate_section_lines(section_text: str, budget: int) -> str:
     return "\n".join(kept) + _MARKER
 
 
+def _append_section(output: str, section: str, budget: int) -> str:
+    sep = "\n\n" if output else ""
+    available = budget - len(output) - len(sep)
+    if available <= 0:
+        return output
+    if len(section) <= available:
+        return output + sep + section
+    truncated = _truncate_section_lines(section, available)
+    if not truncated:
+        return output
+    return output + sep + truncated
+
+
 def compact_review(review_text: str) -> str:
     """Return a section-aware compact version of the review for Gemini.
 
@@ -199,20 +219,33 @@ def compact_review(review_text: str) -> str:
     if preamble and len(preamble) <= _MAX_REVIEW_CHARS:
         output = preamble
 
-    for heading in _SECTION_PRIORITY:
-        if heading not in sections:
-            continue
+    critical = [h for h in _SECTION_PRIORITY[:4] if h in sections]
+    non_critical = [h for h in _SECTION_PRIORITY[4:] if h in sections]
+
+    # First pass: reserve a compact slice for every critical evidence section.
+    # This avoids one oversized Summary/Executed table starving Rejected Signals
+    # or Patterns Observed out of the Gemini prompt.
+    for heading in critical:
         section = sections[heading]
         sep = "\n\n" if output else ""
-        remaining = _MAX_REVIEW_CHARS - len(output) - len(sep)
-        if remaining <= 0:
+        reserved = _SECTION_MIN_BUDGETS.get(heading, 300)
+        available_total = _MAX_REVIEW_CHARS - len(output) - len(sep)
+        if available_total <= 0:
             break
-        if len(section) <= remaining:
-            output = output + sep + section
-        else:
-            truncated = _truncate_section_lines(section, remaining)
-            if truncated:
-                output = output + sep + truncated
+        slice_budget = min(reserved, available_total)
+        chunk = section if len(section) <= slice_budget else _truncate_section_lines(section, slice_budget)
+        if chunk:
+            output = output + sep + chunk
+
+    # Second pass: use whatever budget remains on lower-priority context only.
+    # Critical sections are not re-expanded here because keeping all four
+    # evidence sections visible is more valuable than one very long section.
+    for heading in non_critical:
+        if heading not in sections:
+            continue
+        before = output
+        output = _append_section(output, sections[heading], _MAX_REVIEW_CHARS)
+        if output == before:
             break
 
     return output.rstrip()
