@@ -2,7 +2,7 @@
 Description=BlitzTrader Autonomous Trading Agent
 After=network-online.target
 Wants=network-online.target
-Requires=rclone-blitztrader-drive.service
+Wants=rclone-blitztrader-drive.service
 After=rclone-blitztrader-drive.service
 
 [Service]

@@ -350,6 +350,7 @@ class BlitzTrader:
             self._feed,
             active_tokens,
             data_recorder=self._data_recorder,
+            state_manager=self._state,
         )
         self._market_data = market_data
 
@@ -746,13 +747,18 @@ class BlitzTrader:
                 continue
 
             # ── Notify once when market opens ──
-            if not getattr(self, '_market_open_notified', False):
+            state = self._state.get_state()
+            notifications_sent = state.get("notifications_sent", {}) or {}
+            today_key = now.strftime("%Y-%m-%d")
+            market_open_key = f"market_open_ready:{today_key}"
+            if not notifications_sent.get(market_open_key):
                 self._telegram.send_telegram(
                     "Market is now open. BlitzTrader is active and scanning for setups. "
                     "All systems ready."
                 )
                 logger.info("Market open — Telegram notified")
-                self._market_open_notified = True
+                notifications_sent[market_open_key] = datetime.now(IST).isoformat()
+                self._state.update_state(notifications_sent=notifications_sent)
 
             # ── Open pairs positions once at market open ──
             if not self._pairs_opened:

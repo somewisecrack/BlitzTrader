@@ -2,6 +2,8 @@
 Description=Mount BlitzTrader Google Drive via rclone
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -9,10 +11,10 @@ User=blitztrader
 Group=blitztrader
 Environment=RCLONE_CONFIG=/home/blitztrader/.config/rclone/rclone.conf
 ExecStartPre=/bin/mkdir -p /mnt/blitztrader-drive
-ExecStart=/usr/bin/rclone mount gdrive:BlitzTrader /mnt/blitztrader-drive --config /home/blitztrader/.config/rclone/rclone.conf --dir-cache-time 1m --poll-interval 15s --vfs-cache-mode writes --vfs-cache-max-age 1h
+ExecStart=/usr/bin/rclone mount gdrive:BlitzTrader /mnt/blitztrader-drive --config /home/blitztrader/.config/rclone/rclone.conf --dir-cache-time 1m --poll-interval 15s --vfs-cache-mode writes --vfs-cache-max-age 1h --allow-non-empty
 ExecStop=/bin/fusermount -uz /mnt/blitztrader-drive
 Restart=on-failure
-RestartSec=5
+RestartSec=60
 
 [Install]
 WantedBy=multi-user.target

@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -325,7 +326,7 @@ def call_gemini(
         return [], "GEMINI_API_KEY is not set"
 
     try:
-        from google import genai  # google-genai>=1.0.0 (same SDK as agent_loop.py)
+        genai = importlib.import_module("google.genai")  # google-genai>=1.0.0
     except ImportError:
         return [], "google-genai package is not installed"
 

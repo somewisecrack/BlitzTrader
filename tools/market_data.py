@@ -17,7 +17,7 @@ class MarketDataTools:
     Wraps the ShoonyaClient and LiveFeedManager for Claude's use.
     """
 
-    def __init__(self, shoonya_client, live_feed, nse_tokens: dict, data_recorder=None):
+    def __init__(self, shoonya_client, live_feed, nse_tokens: dict, data_recorder=None, state_manager=None):
         """
         :param shoonya_client: Authenticated ShoonyaClient
         :param live_feed: LiveFeedManager instance
@@ -27,9 +27,32 @@ class MarketDataTools:
         self._feed = live_feed
         self._tokens = nse_tokens
         self._recorder = data_recorder
+        self._state = state_manager
         self._candle_cache: dict[tuple, tuple[float, dict]] = {}
         self._daily_ohlc_cache: dict[tuple, tuple[float, list[dict]]] = {}
-        self._emitted_signals: set[tuple] = set()
+        self._emitted_signals: set[str] = set()
+        if self._state:
+            try:
+                state = self._state.get_state()
+                self._emitted_signals.update(state.get("emitted_signal_keys", []) or [])
+            except Exception:
+                logger.exception("Failed to restore emitted signal keys from state")
+
+    @staticmethod
+    def _signal_key(parts: tuple) -> str:
+        return "|".join(str(part) for part in parts)
+
+    def _remember_signal_key(self, sig_key: str) -> None:
+        if not self._state:
+            return
+        try:
+            state = self._state.get_state()
+            keys = list(state.get("emitted_signal_keys", []) or [])
+            if sig_key not in keys:
+                keys.append(sig_key)
+                self._state.update_state(emitted_signal_keys=keys[-500:])
+        except Exception:
+            logger.exception("Failed to persist emitted signal key")
 
     def _resolve_token(self, index: str) -> tuple[str, str]:
         """Resolve index name to (exchange, token)."""
@@ -874,12 +897,13 @@ class MarketDataTools:
             # Daily-first-hour signals must use a date-based key (not candle time) because
             # latest["time"] changes every 3 min, which would re-emit the same signal ~104×/day.
             if interval == "daily-first-hour":
-                sig_key = (sym, "daily-first-hour", strategy, direction, today_date)
+                sig_key = self._signal_key((sym, "daily-first-hour", strategy, direction, today_date))
             else:
-                sig_key = (sym, str(interval), strategy, direction, candle["time"])
+                sig_key = self._signal_key((sym, str(interval), strategy, direction, candle["time"]))
             if sig_key in self._emitted_signals:
                 return
             self._emitted_signals.add(sig_key)
+            self._remember_signal_key(sig_key)
             tool_interval = "3" if interval == "daily-first-hour" else str(interval)
             signal_timeframe = "daily-first-hour" if interval == "daily-first-hour" else f"{interval}min"
             # Candle timestamp → IST datetime string (date + time for unambiguous audit trail).

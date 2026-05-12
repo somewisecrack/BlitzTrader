@@ -8,12 +8,17 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
-import scipy.stats as st
-from statsmodels.regression.linear_model import OLS
-from statsmodels.tools.tools import add_constant
-from statsmodels.tsa.stattools import adfuller
-from statsmodels.tsa.vector_ar.vecm import coint_johansen
-import yfinance as yf
+try:
+    import scipy.stats as st
+except ImportError:
+    st = None
+try:
+    from statsmodels.regression.linear_model import OLS
+    from statsmodels.tools.tools import add_constant
+    from statsmodels.tsa.stattools import adfuller
+    from statsmodels.tsa.vector_ar.vecm import coint_johansen
+except ImportError:
+    OLS = add_constant = adfuller = coint_johansen = None
 
 from config import (
     ADF_PVALUE_LIMIT,
@@ -91,6 +96,8 @@ class PairScanner:
         return self._fetch_yfinance_data(tickers, period, interval)
 
     def _fetch_yfinance_data(self, tickers: list[str], period: str, interval: str) -> pd.DataFrame:
+        import yfinance as yf
+
         batches = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
         frames: list[pd.DataFrame] = []
         base_kwargs = {
@@ -233,6 +240,9 @@ class PairScanner:
         return num if math.isfinite(num) else default
 
     def screen_pair(self, x_sym: str, y_sym: str, prices: pd.DataFrame, interval: str) -> ScreenedPair | None:
+        if any(dep is None for dep in (OLS, add_constant, adfuller, coint_johansen)):
+            raise RuntimeError("statsmodels is required for pair cointegration screening")
+
         pair_prices = prices[[x_sym, y_sym]].dropna()
         if len(pair_prices) < max(50, MIN_BARS):
             return None
@@ -363,6 +373,8 @@ class PairScanner:
 
         p_draws: list[float] = []
         for _ in range(int(ENSEMBLE_M)):
+            if st is None:
+                raise RuntimeError("scipy.stats is required for Monte Carlo pair metrics")
             try:
                 params_sample = rng_main.multivariate_normal(mean=[a_hat, phi_hat], cov=cov_params)
                 a_s, phi_s = float(params_sample[0]), float(params_sample[1])

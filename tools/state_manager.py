@@ -31,6 +31,8 @@ def _default_state(virtual_capital: float) -> dict:
         "pending_orders": [],   # Unfilled limit orders
         "trades": [],           # Completed trades (entry + exit)
         "trade_count": 0,
+        "emitted_signal_keys": [],
+        "notifications_sent": {},
         "is_paused": False,
         "is_stopped": False,
     }
