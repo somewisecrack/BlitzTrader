@@ -471,14 +471,35 @@ def _write_result(result: dict, wiki_dir: Path, hyp_id: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+# yfinance hard limits: 5m/15m/30m → max 60d; 1h → max 730d; 1d+ → unlimited
+_INTERVAL_DEFAULT_PERIOD: dict[str, str] = {
+    "1m":  "7d",
+    "2m":  "60d",
+    "5m":  "59d",
+    "15m": "59d",
+    "30m": "59d",
+    "60m": "1y",
+    "1h":  "1y",
+    "90m": "59d",
+    "1d":  "2y",
+    "5d":  "5y",
+    "1wk": "10y",
+    "1mo": "10y",
+}
+
+
+def _default_period_for_interval(interval: str) -> str:
+    return _INTERVAL_DEFAULT_PERIOD.get(interval, "59d")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="BlitzTrader futures hypothesis backtester"
     )
     parser.add_argument("--hypothesis", required=True,
                         help="Path to hypothesis YAML/JSON")
-    parser.add_argument("--period", default="120d",
-                        help="yfinance period (default: 120d)")
+    parser.add_argument("--period", default=None,
+                        help="yfinance period (default: auto-selected based on --interval)")
     parser.add_argument("--interval", default="5m",
                         help="yfinance interval (default: 5m)")
     parser.add_argument("--wiki-dir", default=None,
@@ -488,6 +509,8 @@ def main() -> None:
     parser.add_argument("--min-filtered-trades", type=int, default=10,
                         help="Minimum filtered trades required (default: 10)")
     args = parser.parse_args()
+
+    period = args.period if args.period else _default_period_for_interval(args.interval)
 
     wiki_dir = (
         Path(args.wiki_dir).expanduser().resolve()
@@ -521,7 +544,7 @@ def main() -> None:
     ticker = TICKER_MAP[symbol]
     print(f"  Hypothesis: {hyp_id} | Symbol: {symbol} | Ticker: {ticker}")
     print(f"  Strategy:   {strategy}")
-    print(f"  Period:     {args.period} | Interval: {args.interval}")
+    print(f"  Period:     {period} | Interval: {args.interval}")
     print(f"  Filter:     {block_when}")
 
     # ── Check strategy support ────────────────────────────────────────────────
@@ -534,7 +557,7 @@ def main() -> None:
             "symbol":             symbol,
             "ticker":             ticker,
             "strategy":           strategy,
-            "period":             args.period,
+            "period":             period,
             "interval":           args.interval,
             "reason":             reason_str,
             "promotion_decision": {
@@ -556,7 +579,7 @@ def main() -> None:
     try:
         df = yf.download(
             ticker,
-            period=args.period,
+            period=period,
             interval=args.interval,
             auto_adjust=True,
             progress=False,
@@ -569,7 +592,7 @@ def main() -> None:
             "symbol":             symbol,
             "ticker":             ticker,
             "strategy":           strategy,
-            "period":             args.period,
+            "period":             period,
             "interval":           args.interval,
             "reason":             str(exc),
             "promotion_decision": {"promote": False, "reason": "data unavailable"},
@@ -585,7 +608,7 @@ def main() -> None:
             "symbol":             symbol,
             "ticker":             ticker,
             "strategy":           strategy,
-            "period":             args.period,
+            "period":             period,
             "interval":           args.interval,
             "reason":             f"No OHLCV data returned for ticker {ticker}",
             "promotion_decision": {"promote": False, "reason": "data unavailable"},
@@ -609,7 +632,7 @@ def main() -> None:
             "symbol":             symbol,
             "ticker":             ticker,
             "strategy":           strategy,
-            "period":             args.period,
+            "period":             period,
             "interval":           args.interval,
             "reason":             "Empty candle list after DataFrame conversion",
             "promotion_decision": {"promote": False, "reason": "data unavailable"},
@@ -679,7 +702,7 @@ def main() -> None:
         "symbol":             symbol,
         "ticker":             ticker,
         "strategy":           strategy,
-        "period":             args.period,
+        "period":             period,
         "interval":           args.interval,
         "baseline":           baseline_stats,
         "filtered":           filtered_stats,

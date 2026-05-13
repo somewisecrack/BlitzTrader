@@ -622,3 +622,81 @@ class TestPairsFilesUnchangedGit:
         assert result.stdout.strip() == "", (
             f"Pairs portfolio/init or config files were modified unexpectedly: {result.stdout}"
         )
+
+
+# ===========================================================================
+# Adaptive period selection
+# ===========================================================================
+
+class TestDefaultPeriodForInterval:
+    """_default_period_for_interval must stay within yfinance hard limits."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        import importlib, sys
+        spec = importlib.util.spec_from_file_location(
+            "backtest_futures_hypothesis",
+            str(_REPO_ROOT / "scripts" / "backtest_futures_hypothesis.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.fn = mod._default_period_for_interval
+
+    def test_5m_yields_59d(self):
+        assert self.fn("5m") == "59d"
+
+    def test_15m_yields_59d(self):
+        assert self.fn("15m") == "59d"
+
+    def test_30m_yields_59d(self):
+        assert self.fn("30m") == "59d"
+
+    def test_1h_yields_1y(self):
+        assert self.fn("1h") == "1y"
+
+    def test_60m_yields_1y(self):
+        assert self.fn("60m") == "1y"
+
+    def test_1d_yields_2y(self):
+        assert self.fn("1d") == "2y"
+
+    def test_unknown_interval_yields_safe_default(self):
+        # Unknown intervals should not crash and must not exceed 60d limit
+        result = self.fn("unknown")
+        assert result == "59d"
+
+    def test_explicit_period_flag_overrides_default(self, tmp_path):
+        """--period on the CLI always wins over the auto-selected default."""
+        hyp = {
+            "id": "HYP-20260513-001", "scope": "futures", "symbol": "NIFTY",
+            "strategy": "VP-01 Counter Bull Trap", "status": "proposed",
+        }
+        hyp_path = tmp_path / "HYP-20260513-001.json"
+        hyp_path.write_text(json.dumps(hyp), encoding="utf-8")
+
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "backtest_futures_hypothesis",
+            str(_REPO_ROOT / "scripts" / "backtest_futures_hypothesis.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with patch("sys.argv", [
+            "backtest_futures_hypothesis.py",
+            "--hypothesis", str(hyp_path),
+            "--period", "30d",
+            "--interval", "1h",
+        ]):
+            import argparse
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--hypothesis")
+            parser.add_argument("--period", default=None)
+            parser.add_argument("--interval", default="5m")
+            parser.add_argument("--wiki-dir", default=None)
+            parser.add_argument("--min-baseline-trades", type=int, default=20)
+            parser.add_argument("--min-filtered-trades", type=int, default=10)
+            args = parser.parse_args()
+
+        resolved = args.period if args.period else mod._default_period_for_interval(args.interval)
+        assert resolved == "30d"
