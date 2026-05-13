@@ -474,11 +474,10 @@ def _write_result(result: dict, wiki_dir: Path, hyp_id: str) -> None:
 # yfinance hard limits: 5m/15m/30m → max 60d; 1h → max 730d; 1d+ → unlimited
 _INTERVAL_DEFAULT_PERIOD: dict[str, str] = {
     "1m":  "7d",
-    "2m":  "60d",
+    "2m":  "59d",
     "5m":  "59d",
     "15m": "59d",
     "30m": "59d",
-    "60m": "1y",
     "1h":  "1y",
     "90m": "59d",
     "1d":  "2y",

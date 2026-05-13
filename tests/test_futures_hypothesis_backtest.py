@@ -654,8 +654,8 @@ class TestDefaultPeriodForInterval:
     def test_1h_yields_1y(self):
         assert self.fn("1h") == "1y"
 
-    def test_60m_yields_1y(self):
-        assert self.fn("60m") == "1y"
+    def test_60m_not_in_map_falls_back_to_safe_default(self):
+        assert self.fn("60m") == "59d"
 
     def test_1d_yields_2y(self):
         assert self.fn("1d") == "2y"
