@@ -120,6 +120,7 @@ class BlitzTrader:
         self._journal = None
         self._goals = None
         self._data_recorder = None
+        self._data_export_upload_attempted = False
         self._active_tokens = None
         self._llm_disabled_reason = None
         self._llm_disabled_notified = False
@@ -1283,11 +1284,15 @@ class BlitzTrader:
         """Upload today's audit exports once."""
         if not self._data_recorder:
             return
+        if self._data_export_upload_attempted:
+            logger.info("Skipping data export upload; already attempted this session")
+            return
         now = datetime.now(IST)
         eod_time = now.replace(hour=15, minute=15, second=0, microsecond=0)
         if now < eod_time:
             logger.info("Skipping data export upload before 15:15 IST")
             return
+        self._data_export_upload_attempted = True
         try:
             result = self._data_recorder.finalize_and_upload()
             logger.info(f"Data export result: {result}")

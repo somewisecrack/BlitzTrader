@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import math
 import sys
+import tempfile
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +25,19 @@ from unittest.mock import MagicMock, patch
 for lib in ("numpy", "pandas", "scipy", "statsmodels", "yfinance"):
     if lib not in sys.modules:
         sys.modules[lib] = types.ModuleType(lib)
+
+if "google.genai" not in sys.modules:
+    google_mod = sys.modules.get("google", types.ModuleType("google"))
+    genai_mod = types.ModuleType("google.genai")
+    genai_types = types.ModuleType("google.genai.types")
+    genai_types.Tool = object
+    genai_types.Schema = lambda **kwargs: kwargs
+    genai_types.FunctionDeclaration = lambda **kwargs: kwargs
+    genai_mod.types = genai_types
+    google_mod.genai = genai_mod
+    sys.modules["google"] = google_mod
+    sys.modules["google.genai"] = genai_mod
+    sys.modules["google.genai.types"] = genai_types
 
 import numpy as _np_stub
 _np_stub.ndarray = object
@@ -125,6 +140,48 @@ class TestConfigConstants(unittest.TestCase):
         h, m = PAIR_EXIT_TIME.split(":")
         self.assertEqual(int(h), 15)
         self.assertEqual(int(m), 15)
+
+
+class TestDataExportUpload(unittest.TestCase):
+    """EOD export upload should be clear and non-spammy on failure."""
+
+    def test_rclone_failure_includes_stderr_tail(self):
+        from tools.data_recorder import DataRecorder
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = DataRecorder(
+                base_dir=Path(tmp),
+                nse_tokens={},
+                rclone_remote="gdrive",
+                rclone_folder="BlitzTrader",
+            )
+            failure = MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="line one\nrateLimitExceeded",
+            )
+            with patch("subprocess.run", return_value=failure):
+                with self.assertRaisesRegex(RuntimeError, "rateLimitExceeded"):
+                    recorder.finalize_and_upload()
+
+    def test_blitztrader_upload_failure_is_not_sent_twice(self):
+        import main
+        from main import BlitzTrader
+
+        trader = BlitzTrader.__new__(BlitzTrader)
+        trader._data_recorder = MagicMock()
+        trader._data_recorder.finalize_and_upload.side_effect = RuntimeError("quota failed")
+        trader._telegram = MagicMock()
+        trader._data_export_upload_attempted = False
+
+        after_eod = main.IST.localize(datetime(2026, 5, 13, 15, 20))
+        with patch("main.datetime") as dt:
+            dt.now.return_value = after_eod
+            trader._upload_data_export()
+            trader._upload_data_export()
+
+        trader._data_recorder.finalize_and_upload.assert_called_once()
+        trader._telegram.send_telegram.assert_called_once()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

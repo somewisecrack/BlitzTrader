@@ -255,7 +255,17 @@ class DataRecorder:
             if self._rclone_folder:
                 remote_path += f"{self._rclone_folder}/"
             remote_path += f"{self._date}"
-            subprocess.run(["rclone", "copy", str(self._day_dir), remote_path], check=True)
+            proc = subprocess.run(
+                ["rclone", "copy", str(self._day_dir), remote_path],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                error_text = (proc.stderr or proc.stdout or "").strip()
+                error_tail = error_text.splitlines()[-1] if error_text else "no rclone output"
+                raise RuntimeError(
+                    f"rclone copy failed with exit {proc.returncode}: {error_tail}"
+                )
             result = {"status": "uploaded", "method": "rclone", "destination": remote_path, "local_dir": str(self._day_dir)}
             with self._lock:
                 self._uploaded = True
