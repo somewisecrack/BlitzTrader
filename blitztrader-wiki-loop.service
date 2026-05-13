@@ -1,0 +1,20 @@
+[Unit]
+Description=BlitzTrader Post-Market Wiki Loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=blitztrader
+Group=blitztrader
+WorkingDirectory=/opt/blitztrader
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/blitztrader/.env
+
+ExecCondition=/opt/blitztrader/venv/bin/python scripts/is_trading_day.py
+ExecStart=/opt/blitztrader/venv/bin/python scripts/run_futures_wiki_loop.py
+
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=blitztrader-wiki-loop
