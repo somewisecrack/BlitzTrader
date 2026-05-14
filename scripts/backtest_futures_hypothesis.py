@@ -565,6 +565,57 @@ def _default_period_for_interval(interval: str) -> str:
     return _INTERVAL_DEFAULT_PERIOD.get(interval, "59d")
 
 
+def _check_data_sufficiency(
+    ticker: str, interval: str, block_when: dict, yf
+) -> tuple[str, str, str]:
+    """Pre-flight check: probe 5 days of data to determine whether the
+    requested interval has what the filter needs.
+
+    Returns (effective_interval, effective_period, note) where:
+      - effective_interval: interval to use for the full download
+      - effective_period:   period to use for the full download
+      - note:               human-readable explanation of any adjustment made
+    """
+    # Default: use what was requested
+    effective_interval = interval
+    effective_period = _default_period_for_interval(interval)
+    note = ""
+
+    # Only need to probe when the filter requires volume-dependent indicators
+    if not _needs_vwap(block_when):
+        return effective_interval, effective_period, note
+
+    # Probe: download a small slice to check volume availability
+    try:
+        probe = yf.download(
+            ticker, period="5d", interval=interval,
+            auto_adjust=True, progress=False,
+        )
+        if hasattr(probe.columns, "levels"):
+            probe.columns = [c[0] if isinstance(c, tuple) else c for c in probe.columns]
+    except Exception:
+        probe = None
+
+    has_volume = (
+        probe is not None
+        and len(probe) > 0
+        and "Volume" in probe.columns
+        and int(probe["Volume"].sum()) > 0
+    )
+
+    if has_volume:
+        note = f"Volume confirmed at {interval} — VWAP will be computed intraday."
+    else:
+        effective_interval = "1d"
+        effective_period = "5y"
+        note = (
+            f"No volume at {interval} — switching to 1d/5y for rolling daily VWAP "
+            f"(fractal equivalence)."
+        )
+
+    return effective_interval, effective_period, note
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="BlitzTrader futures hypothesis backtester"
@@ -617,7 +668,7 @@ def main() -> None:
     ticker = TICKER_MAP[symbol]
     print(f"  Hypothesis: {hyp_id} | Symbol: {symbol} | Ticker: {ticker}")
     print(f"  Strategy:   {strategy}")
-    print(f"  Period:     {period} | Interval: {args.interval}")
+    print(f"  Requested:  {args.interval} / {_default_period_for_interval(args.interval)}")
     print(f"  Filter:     {block_when}")
 
     # ── Check strategy support ────────────────────────────────────────────────
@@ -641,19 +692,29 @@ def main() -> None:
         _write_result(result, wiki_dir, hyp_id)
         sys.exit(0)
 
-    # ── Download OHLCV data ───────────────────────────────────────────────────
+    # ── Data sufficiency check (pre-flight) ───────────────────────────────────
     try:
         import yfinance as yf
     except ImportError:
         print("ERROR: yfinance not installed. Run: pip install yfinance", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[backtest_futures_hypothesis] Downloading {ticker} ...")
+    print(f"[backtest_futures_hypothesis] Checking data sufficiency for {ticker} at {args.interval}...")
+    effective_interval, period, sufficiency_note = _check_data_sufficiency(
+        ticker, args.interval, block_when, yf
+    )
+    if sufficiency_note:
+        print(f"  {sufficiency_note}")
+    if effective_interval != args.interval:
+        print(f"  Interval adjusted: {args.interval} → {effective_interval} | Period: {period}")
+
+    # ── Download OHLCV data ───────────────────────────────────────────────────
+    print(f"[backtest_futures_hypothesis] Downloading {ticker} ({effective_interval}, {period})...")
     try:
         df = yf.download(
             ticker,
             period=period,
-            interval=args.interval,
+            interval=effective_interval,
             auto_adjust=True,
             progress=False,
         )
@@ -666,7 +727,7 @@ def main() -> None:
             "ticker":             ticker,
             "strategy":           strategy,
             "period":             period,
-            "interval":           args.interval,
+            "interval":           effective_interval,
             "reason":             str(exc),
             "promotion_decision": {"promote": False, "reason": "data unavailable"},
         }
@@ -682,7 +743,7 @@ def main() -> None:
             "ticker":             ticker,
             "strategy":           strategy,
             "period":             period,
-            "interval":           args.interval,
+            "interval":           effective_interval,
             "reason":             f"No OHLCV data returned for ticker {ticker}",
             "promotion_decision": {"promote": False, "reason": "data unavailable"},
         }
@@ -706,49 +767,21 @@ def main() -> None:
             "ticker":             ticker,
             "strategy":           strategy,
             "period":             period,
-            "interval":           args.interval,
+            "interval":           effective_interval,
             "reason":             "Empty candle list after DataFrame conversion",
             "promotion_decision": {"promote": False, "reason": "data unavailable"},
         }
         _write_result(result, wiki_dir, hyp_id)
         sys.exit(0)
 
-    # ── VWAP: compute or fall back to daily ──────────────────────────────────
-    effective_interval = args.interval
+    # ── Compute VWAP series if needed ─────────────────────────────────────────
     vwap_series = None
-
     if _needs_vwap(block_when):
-        vwap_series = _compute_vwap_series(candles, args.interval)
-        if vwap_series is None:
-            print(
-                f"WARNING: No volume data at {args.interval} — "
-                "cannot compute VWAP. Falling back to 1d (fractal equivalence)."
-            )
-            effective_interval = "1d"
-            fb_period = "5y"
-            try:
-                df_fb = yf.download(
-                    ticker,
-                    period=fb_period,
-                    interval="1d",
-                    auto_adjust=True,
-                    progress=False,
-                )
-            except Exception as exc:
-                print(f"ERROR: daily fallback download failed: {exc}", file=sys.stderr)
-                df_fb = None
-
-            if df_fb is not None and len(df_fb) > 0:
-                if hasattr(df_fb.columns, "levels"):
-                    df_fb.columns = [c[0] if isinstance(c, tuple) else c for c in df_fb.columns]
-                candles = df_to_candles(df_fb)
-                vwap_series = _compute_vwap_series(candles, "1d")
-                period = fb_period
-                print(f"  Rolling daily VWAP fallback: downloaded {len(candles)} daily bars (5y).")
-            else:
-                print("WARNING: daily fallback also returned no data. VWAP will remain None.")
-        else:
+        vwap_series = _compute_vwap_series(candles, effective_interval)
+        if vwap_series is not None:
             print(f"  VWAP series computed ({len(vwap_series)} values).")
+        else:
+            print("WARNING: VWAP series could not be computed even after interval adjustment.")
 
     # ── Generate baseline signals ─────────────────────────────────────────────
     print(f"[backtest_futures_hypothesis] Scanning candles for {strategy} signals...")
