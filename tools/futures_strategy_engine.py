@@ -22,6 +22,20 @@ SUPPORTED_STRATEGIES = {
     "VP-21 Extreme Candle Reversal",
 }
 
+# Which directions each supported strategy can actually emit.
+# Used by hypothesis validation to reject proposals that can never produce trades.
+STRATEGY_DIRECTIONS: dict[str, frozenset[str]] = {
+    "VP-01 Counter Bull Trap":      frozenset({"SELL"}),
+    "VP-02 Counter Bear Trap":      frozenset({"BUY"}),
+    "VP-05 3EMA Trend":             frozenset({"BUY", "SELL"}),
+    "VP-07 Wicks Pullback":         frozenset({"BUY", "SELL"}),
+    "VP-14 Morning Star":           frozenset({"BUY"}),
+    "VP-15 Evening Star":           frozenset({"SELL"}),
+    "VP-18 M-Pattern Double Top":   frozenset({"SELL"}),
+    "VP-19 W-Pattern Double Bottom": frozenset({"BUY"}),
+    "VP-21 Extreme Candle Reversal": frozenset({"BUY", "SELL"}),
+}
+
 # Strategies that require real-time context not available from OHLCV alone.
 UNSUPPORTED_STRATEGIES = {
     "VP-10 First Candle Open",       # needs real-time 09:15 IST detection

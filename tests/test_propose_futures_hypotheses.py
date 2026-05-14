@@ -65,13 +65,13 @@ _SAMPLE_REVIEW = textwrap.dedent("""\
     # Futures Daily Review — 2026-05-09
 
     ## Signal Summary
-    - BANKNIFTY VP-01 Counter Bull Trap: 4 signals, 1 winner (25% win rate)
+    - BANKNIFTY VP-01 Counter Bull Trap: 4 SELL signals, 1 winner (25% win rate)
     - Losing entries had RSI14 < 25 at entry (extreme oversold, snap-back risk)
     - NIFTY VP-07 Wicks Pullback SELL: 3 signals, 1 winner (33% win rate)
     - Weak ADX14 readings at entry correlate with losing trades
 
     ## Possible Hypotheses
-    - Block BANKNIFTY VP-01 BUY when RSI14 < 25 (extreme oversold caused snap-backs)
+    - Block BANKNIFTY VP-01 SELL when RSI14 < 25 (extreme oversold caused snap-backs)
     - Block NIFTY VP-07 Wicks Pullback SELL when ADX14 < 18 (weak trend, false wick)
 """)
 
@@ -82,10 +82,10 @@ _VALID_GEMINI_CANDIDATE = {
     "scope": "futures",
     "symbol": "BANKNIFTY",
     "strategy": "VP-01 Counter Bull Trap",
-    "claim": "Block VP-01 BUY signals on BANKNIFTY when RSI14 < 25",
-    "direction": "BUY",
+    "claim": "Block VP-01 SELL signals on BANKNIFTY when RSI14 < 25",
+    "direction": "SELL",
     "filter": {"block_when": {"rsi14_lt": 25.0}},
-    "rationale": "3/4 VP-01 BUY signals failed when RSI14 < 25 in today's session.",
+    "rationale": "3/4 VP-01 SELL signals failed when RSI14 < 25 in today's session.",
     "source_review_date": _REVIEW_DATE_ISO,
     "created_by": "gemini",
     "status": "proposed",
@@ -298,6 +298,91 @@ class TestValidateGeminiHypothesisStrategy:
         )
         assert not ok
         assert "not present in today's review" in reason
+
+
+# ---------------------------------------------------------------------------
+# direction vs strategy validation
+# ---------------------------------------------------------------------------
+
+class TestValidateGeminiHypothesisDirectionMismatch:
+    """Proposals whose direction can never be emitted by the strategy must be rejected."""
+
+    def _strategies_with(self, *names) -> set:
+        return set(names)
+
+    def test_rejects_vp01_buy(self):
+        """VP-01 Counter Bull Trap only emits SELL — BUY proposal must be rejected."""
+        bad = {
+            **_VALID_GEMINI_CANDIDATE,
+            "direction": "BUY",
+            "claim": "Block VP-01 BUY on BANKNIFTY when RSI14 < 25",
+        }
+        ok, reason = _validate_gemini_hypothesis(
+            bad, _REVIEW_DATE_ISO, {"VP-01 Counter Bull Trap"}
+        )
+        assert not ok
+        assert "only emits" in reason or "can never produce" in reason
+
+    def test_rejects_vp02_sell(self):
+        """VP-02 Counter Bear Trap only emits BUY — SELL proposal must be rejected."""
+        bad = {
+            **_VALID_GEMINI_CANDIDATE,
+            "strategy": "VP-02 Counter Bear Trap",
+            "direction": "SELL",
+            "claim": "Block VP-02 SELL on NIFTY when RSI14 > 80",
+        }
+        ok, reason = _validate_gemini_hypothesis(
+            bad, _REVIEW_DATE_ISO, {"VP-02 Counter Bear Trap"}
+        )
+        assert not ok
+        assert "only emits" in reason or "can never produce" in reason
+
+    def test_rejects_morning_star_sell(self):
+        """VP-14 Morning Star only emits BUY — SELL proposal must be rejected."""
+        bad = {
+            **_VALID_GEMINI_CANDIDATE,
+            "strategy": "VP-14 Morning Star",
+            "direction": "SELL",
+            "claim": "Block VP-14 SELL on BANKNIFTY when ADX14 < 18",
+        }
+        ok, reason = _validate_gemini_hypothesis(
+            bad, _REVIEW_DATE_ISO, {"VP-14 Morning Star"}
+        )
+        assert not ok
+        assert "only emits" in reason or "can never produce" in reason
+
+    def test_accepts_vp01_sell(self):
+        """VP-01 SELL is the correct direction — must pass."""
+        ok, reason = _validate_gemini_hypothesis(
+            _VALID_GEMINI_CANDIDATE, _REVIEW_DATE_ISO, {"VP-01 Counter Bull Trap"}
+        )
+        assert ok, reason
+
+    def test_accepts_bidirectional_buy(self):
+        """VP-05 3EMA Trend can emit both directions — BUY proposal must pass."""
+        candidate = {
+            **_VALID_GEMINI_CANDIDATE,
+            "strategy": "VP-05 3EMA Trend",
+            "direction": "BUY",
+            "claim": "Block VP-05 BUY on BANKNIFTY when ADX14 < 18",
+        }
+        ok, reason = _validate_gemini_hypothesis(
+            candidate, _REVIEW_DATE_ISO, {"VP-05 3EMA Trend"}
+        )
+        assert ok, reason
+
+    def test_accepts_bidirectional_sell(self):
+        """VP-05 3EMA Trend can emit both directions — SELL proposal must pass."""
+        candidate = {
+            **_VALID_GEMINI_CANDIDATE,
+            "strategy": "VP-05 3EMA Trend",
+            "direction": "SELL",
+            "claim": "Block VP-05 SELL on BANKNIFTY when ADX14 < 18",
+        }
+        ok, reason = _validate_gemini_hypothesis(
+            candidate, _REVIEW_DATE_ISO, {"VP-05 3EMA Trend"}
+        )
+        assert ok, reason
 
 
 # ---------------------------------------------------------------------------

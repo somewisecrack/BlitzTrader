@@ -25,6 +25,11 @@ VALID_STATUSES = {"proposed", "backtested", "promoted", "rejected"}
 
 VALID_DIRECTIONS = {"BUY", "SELL"}
 
+try:
+    from tools.futures_strategy_engine import STRATEGY_DIRECTIONS as _STRATEGY_DIRECTIONS
+except ImportError:
+    _STRATEGY_DIRECTIONS: dict = {}
+
 SUPPORTED_FILTER_FIELDS = {
     "rsi14_lt",
     "rsi14_gt",
@@ -181,6 +186,13 @@ def validate_hypothesis(data: dict) -> tuple[bool, str]:
     if direction is not None:
         if not isinstance(direction, str) or direction.upper() not in VALID_DIRECTIONS:
             return False, f"direction must be BUY or SELL (or absent), got: {direction!r}"
+        # Check that the strategy actually emits this direction
+        allowed = _STRATEGY_DIRECTIONS.get(strategy)
+        if allowed is not None and direction.upper() not in allowed:
+            return False, (
+                f"strategy {strategy!r} only emits {sorted(allowed)} signals; "
+                f"direction {direction!r} can never produce trades"
+            )
 
     # --- filter ---
     flt = data.get("filter")
