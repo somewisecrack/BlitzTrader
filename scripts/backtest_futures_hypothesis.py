@@ -214,8 +214,9 @@ def _compute_vwap_series(candles: list[dict], interval: str) -> "list[float] | N
     Intraday intervals: cumulative (typical_price × volume) / cumulative_volume,
     resetting at each new calendar day.
 
-    Daily/weekly/monthly intervals: typical price (H+L+C)/3 — each bar IS
-    the session, so typical price is the natural VWAP proxy.
+    Daily intervals: rolling daily VWAP = cumulative (close × volume) /
+    cumulative_volume from the first bar to each bar. Using close price and
+    volume only — no H/L required.
 
     Returns None if no meaningful volume data is present (all zeros),
     which signals the caller to fall back to the daily timeframe.
@@ -233,8 +234,12 @@ def _compute_vwap_series(candles: list[dict], interval: str) -> "list[float] | N
     result: list[float] = []
 
     if is_daily:
+        cum_close_vol = 0.0
+        cum_vol = 0.0
         for c in candles:
-            result.append((c["high"] + c["low"] + c["close"]) / 3.0)
+            cum_close_vol += c["close"] * c["volume"]
+            cum_vol += c["volume"]
+            result.append(cum_close_vol / cum_vol if cum_vol > 0 else c["close"])
     else:
         from datetime import datetime, timezone as _tz
         cum_tp_vol = 0.0
@@ -720,7 +725,7 @@ def main() -> None:
                 "cannot compute VWAP. Falling back to 1d (fractal equivalence)."
             )
             effective_interval = "1d"
-            fb_period = _default_period_for_interval("1d")
+            fb_period = "5y"
             try:
                 df_fb = yf.download(
                     ticker,
@@ -739,7 +744,7 @@ def main() -> None:
                 candles = df_to_candles(df_fb)
                 vwap_series = _compute_vwap_series(candles, "1d")
                 period = fb_period
-                print(f"  Daily fallback: downloaded {len(candles)} daily bars.")
+                print(f"  Rolling daily VWAP fallback: downloaded {len(candles)} daily bars (5y).")
             else:
                 print("WARNING: daily fallback also returned no data. VWAP will remain None.")
         else:

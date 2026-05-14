@@ -734,13 +734,22 @@ class TestVwapHelpers:
         candles = [self._candle(1000, 100, 110, 90, 105, v=0) for _ in range(5)]
         assert self.mod._compute_vwap_series(candles, "5m") is None
 
-    def test_vwap_daily_uses_typical_price(self):
-        # (100+120+110)/3 = 110.0
-        candles = [self._candle(1000 + i, 100, 120, 100, 110, v=500) for i in range(3)]
+    def test_vwap_daily_uses_rolling_close_volume(self):
+        # Rolling VWAP = cumulative(close×vol) / cumulative(vol)
+        # Bar0: close=100, vol=1000 → vwap=100.0
+        # Bar1: close=200, vol=1000 → vwap=(100×1000 + 200×1000)/(2000) = 150.0
+        # Bar2: close=300, vol=1000 → vwap=(300000+300000)/(3000) + ... = 200.0
+        candles = [
+            self._candle(1000,     100, 120, 90,  100, v=1000),
+            self._candle(1000 + 1, 180, 220, 170, 200, v=1000),
+            self._candle(1000 + 2, 280, 320, 270, 300, v=1000),
+        ]
         series = self.mod._compute_vwap_series(candles, "1d")
         assert series is not None
         assert len(series) == 3
-        assert all(abs(v - 110.0) < 0.01 for v in series)
+        assert abs(series[0] - 100.0) < 0.01
+        assert abs(series[1] - 150.0) < 0.01
+        assert abs(series[2] - 200.0) < 0.01
 
     def test_vwap_intraday_resets_per_day(self):
         # Two bars same day, then one bar next day
