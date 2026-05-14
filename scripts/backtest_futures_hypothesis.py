@@ -371,11 +371,11 @@ def evaluate_promotion(
     pf_filt = filtered.get("profit_factor")
     pf_ok = False
     if pf_base is not None and pf_filt is not None:
-        pf_ok = pf_filt >= pf_base * 1.10
+        pf_ok = pf_filt >= pf_base * 1.05
         if not pf_ok:
             pct = ((pf_filt / pf_base) - 1) * 100 if pf_base != 0 else 0
             reasons.append(
-                f"Profit factor improvement {pct:.1f}% < required 10% "
+                f"Profit factor improvement {pct:.1f}% < required 5% "
                 f"(baseline={pf_base:.3f}, filtered={pf_filt:.3f})."
             )
     elif pf_base is None and pf_filt is None:
