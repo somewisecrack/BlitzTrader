@@ -254,7 +254,7 @@ class DataRecorder:
             remote_path = f"{self._rclone_remote}:"
             if self._rclone_folder:
                 remote_path += f"{self._rclone_folder}/"
-            remote_path += f"{self._date}"
+            remote_path += f"data_exports/{self._date}"
             proc = subprocess.run(
                 ["rclone", "copy", str(self._day_dir), remote_path],
                 capture_output=True,
