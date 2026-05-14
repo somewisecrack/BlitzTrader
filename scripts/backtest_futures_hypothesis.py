@@ -616,6 +616,144 @@ def _check_data_sufficiency(
     return effective_interval, effective_period, note
 
 
+# ---------------------------------------------------------------------------
+# Core backtest helper
+# ---------------------------------------------------------------------------
+
+def run_backtest_attempt(
+    ticker: str,
+    interval: str,
+    period: str,
+    symbol: str,
+    strategy: str,
+    direction_filter: str,
+    block_when: dict,
+    yf,
+) -> dict:
+    """Download OHLCV, scan signals, simulate trades, compute stats.
+
+    Returns a dict with keys:
+      status         : "ok" | "unavailable"
+      interval       : str
+      period         : str
+      candles_count  : int   (0 if unavailable)
+      baseline       : stats dict  (may be empty-stats if no signals)
+      filtered       : stats dict  (may be empty-stats if no signals)
+      reason         : str  (only present when status == "unavailable")
+    """
+    print(f"[backtest_futures_hypothesis] Downloading {ticker} ({interval}, {period})...")
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            auto_adjust=True,
+            progress=False,
+        )
+    except Exception as exc:
+        print(f"ERROR: yfinance download failed for {ticker}: {exc}", file=sys.stderr)
+        return {
+            "status":        "unavailable",
+            "interval":      interval,
+            "period":        period,
+            "candles_count": 0,
+            "baseline":      compute_stats([]),
+            "filtered":      compute_stats([]),
+            "reason":        str(exc),
+        }
+
+    if df is None or len(df) == 0:
+        print(f"WARNING: No data returned for {ticker}. Marking unavailable.")
+        return {
+            "status":        "unavailable",
+            "interval":      interval,
+            "period":        period,
+            "candles_count": 0,
+            "baseline":      compute_stats([]),
+            "filtered":      compute_stats([]),
+            "reason":        f"No OHLCV data returned for ticker {ticker}",
+        }
+
+    # Flatten MultiIndex columns (yfinance sometimes returns them)
+    if hasattr(df.columns, "levels"):
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+
+    print(f"  Downloaded {len(df)} rows.")
+
+    candles = df_to_candles(df)
+    if not candles:
+        print("WARNING: candle list is empty after conversion. Marking unavailable.")
+        return {
+            "status":        "unavailable",
+            "interval":      interval,
+            "period":        period,
+            "candles_count": 0,
+            "baseline":      compute_stats([]),
+            "filtered":      compute_stats([]),
+            "reason":        "Empty candle list after DataFrame conversion",
+        }
+
+    # Compute VWAP series if needed
+    vwap_series = None
+    if _needs_vwap(block_when):
+        vwap_series = _compute_vwap_series(candles, interval)
+        if vwap_series is not None:
+            print(f"  VWAP series computed ({len(vwap_series)} values).")
+        else:
+            print("WARNING: VWAP series could not be computed.")
+
+    # Scan signals
+    print(f"[backtest_futures_hypothesis] Scanning candles for {strategy} signals...")
+    all_signals = scan_candles(symbol, interval, candles)
+    baseline_signals = [s for s in all_signals if s["strategy"] == strategy]
+
+    if direction_filter in ("BUY", "SELL"):
+        baseline_signals = [s for s in baseline_signals
+                            if s["direction"] == direction_filter]
+        print(f"  After direction filter ({direction_filter}): {len(baseline_signals)} signals")
+    else:
+        print(f"  Total strategy signals: {len(baseline_signals)}")
+
+    if not baseline_signals:
+        print("WARNING: No signals found for this strategy in the downloaded data.")
+
+    # Simulate trades
+    print("[backtest_futures_hypothesis] Simulating trades...")
+    baseline_pnl: list[float] = []
+    filtered_pnl: list[float] = []
+
+    for sig in baseline_signals:
+        pnl = simulate_trade(sig, candles)
+        baseline_pnl.append(pnl)
+        if signal_passes_filter(sig, candles, block_when, vwap_series):
+            filtered_pnl.append(pnl)
+
+    baseline_stats = compute_stats(baseline_pnl)
+    filtered_stats = compute_stats(filtered_pnl)
+    filtered_stats["skipped_trades"] = baseline_stats["trades"] - filtered_stats["trades"]
+
+    print(
+        f"  Baseline: {baseline_stats['trades']} trades, "
+        f"win_rate={baseline_stats['win_rate']:.2%}, "
+        f"net_pnl={baseline_stats['net_pnl_points']:.2f}pts"
+    )
+    print(
+        f"  Filtered: {filtered_stats['trades']} trades, "
+        f"win_rate={filtered_stats['win_rate']:.2%}, "
+        f"net_pnl={filtered_stats['net_pnl_points']:.2f}pts, "
+        f"skipped={filtered_stats['skipped_trades']}"
+    )
+
+    return {
+        "status":        "ok",
+        "interval":      interval,
+        "period":        period,
+        "candles_count": len(candles),
+        "baseline":      baseline_stats,
+        "filtered":      filtered_stats,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="BlitzTrader futures hypothesis backtester"
@@ -634,7 +772,8 @@ def main() -> None:
                         help="Minimum filtered trades required (default: 10)")
     args = parser.parse_args()
 
-    period = args.period if args.period else _default_period_for_interval(args.interval)
+    requested_interval = args.interval
+    requested_period   = args.period if args.period else _default_period_for_interval(args.interval)
 
     wiki_dir = (
         Path(args.wiki_dir).expanduser().resolve()
@@ -668,7 +807,7 @@ def main() -> None:
     ticker = TICKER_MAP[symbol]
     print(f"  Hypothesis: {hyp_id} | Symbol: {symbol} | Ticker: {ticker}")
     print(f"  Strategy:   {strategy}")
-    print(f"  Requested:  {args.interval} / {_default_period_for_interval(args.interval)}")
+    print(f"  Requested:  {requested_interval} / {requested_period}")
     print(f"  Filter:     {block_when}")
 
     # ── Check strategy support ────────────────────────────────────────────────
@@ -681,8 +820,12 @@ def main() -> None:
             "symbol":             symbol,
             "ticker":             ticker,
             "strategy":           strategy,
-            "period":             period,
-            "interval":           args.interval,
+            "requested_interval": requested_interval,
+            "requested_period":   requested_period,
+            "period":             requested_period,
+            "interval":           requested_interval,
+            "fallback_used":      False,
+            "attempts":           [],
             "reason":             reason_str,
             "promotion_decision": {
                 "promote": False,
@@ -699,158 +842,159 @@ def main() -> None:
         print("ERROR: yfinance not installed. Run: pip install yfinance", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[backtest_futures_hypothesis] Checking data sufficiency for {ticker} at {args.interval}...")
-    effective_interval, period, sufficiency_note = _check_data_sufficiency(
-        ticker, args.interval, block_when, yf
+    print(f"[backtest_futures_hypothesis] Checking data sufficiency for {ticker} at {requested_interval}...")
+    effective_interval, effective_period, sufficiency_note = _check_data_sufficiency(
+        ticker, requested_interval, block_when, yf
     )
     if sufficiency_note:
         print(f"  {sufficiency_note}")
-    if effective_interval != args.interval:
-        print(f"  Interval adjusted: {args.interval} → {effective_interval} | Period: {period}")
+    if effective_interval != requested_interval:
+        print(f"  Interval adjusted: {requested_interval} → {effective_interval} | Period: {effective_period}")
 
-    # ── Download OHLCV data ───────────────────────────────────────────────────
-    print(f"[backtest_futures_hypothesis] Downloading {ticker} ({effective_interval}, {period})...")
-    try:
-        df = yf.download(
-            ticker,
-            period=period,
-            interval=effective_interval,
-            auto_adjust=True,
-            progress=False,
-        )
-    except Exception as exc:
-        print(f"ERROR: yfinance download failed for {ticker}: {exc}", file=sys.stderr)
-        result = {
-            "hypothesis_id":      hyp_id,
-            "status":             "unavailable",
-            "symbol":             symbol,
-            "ticker":             ticker,
-            "strategy":           strategy,
-            "period":             period,
-            "interval":           effective_interval,
-            "reason":             str(exc),
-            "promotion_decision": {"promote": False, "reason": "data unavailable"},
-        }
-        _write_result(result, wiki_dir, hyp_id)
-        sys.exit(0)
-
-    if df is None or len(df) == 0:
-        print(f"WARNING: No data returned for {ticker}. Marking unavailable.")
-        result = {
-            "hypothesis_id":      hyp_id,
-            "status":             "unavailable",
-            "symbol":             symbol,
-            "ticker":             ticker,
-            "strategy":           strategy,
-            "period":             period,
-            "interval":           effective_interval,
-            "reason":             f"No OHLCV data returned for ticker {ticker}",
-            "promotion_decision": {"promote": False, "reason": "data unavailable"},
-        }
-        _write_result(result, wiki_dir, hyp_id)
-        sys.exit(0)
-
-    # Flatten MultiIndex columns (yfinance sometimes returns them)
-    if hasattr(df.columns, "levels"):
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-
-    print(f"  Downloaded {len(df)} rows.")
-
-    # ── Convert to candle list ────────────────────────────────────────────────
-    candles = df_to_candles(df)
-    if not candles:
-        print("WARNING: candle list is empty after conversion. Marking unavailable.")
-        result = {
-            "hypothesis_id":      hyp_id,
-            "status":             "unavailable",
-            "symbol":             symbol,
-            "ticker":             ticker,
-            "strategy":           strategy,
-            "period":             period,
-            "interval":           effective_interval,
-            "reason":             "Empty candle list after DataFrame conversion",
-            "promotion_decision": {"promote": False, "reason": "data unavailable"},
-        }
-        _write_result(result, wiki_dir, hyp_id)
-        sys.exit(0)
-
-    # ── Compute VWAP series if needed ─────────────────────────────────────────
-    vwap_series = None
-    if _needs_vwap(block_when):
-        vwap_series = _compute_vwap_series(candles, effective_interval)
-        if vwap_series is not None:
-            print(f"  VWAP series computed ({len(vwap_series)} values).")
-        else:
-            print("WARNING: VWAP series could not be computed even after interval adjustment.")
-
-    # ── Generate baseline signals ─────────────────────────────────────────────
-    print(f"[backtest_futures_hypothesis] Scanning candles for {strategy} signals...")
-    all_signals = scan_candles(symbol, effective_interval, candles)
-    # Keep only signals for the hypothesis strategy
-    baseline_signals = [s for s in all_signals if s["strategy"] == strategy]
-
-    # Optionally restrict to the hypothesis direction if specified
     direction_filter = hypothesis.get("direction", "").upper()
-    if direction_filter in ("BUY", "SELL"):
-        baseline_signals = [s for s in baseline_signals
-                            if s["direction"] == direction_filter]
-        print(f"  After direction filter ({direction_filter}): {len(baseline_signals)} signals")
-    else:
-        print(f"  Total strategy signals: {len(baseline_signals)}")
 
-    if not baseline_signals:
-        print("WARNING: No signals found for this strategy in the downloaded data.")
-
-    # ── Simulate trades ───────────────────────────────────────────────────────
-    print("[backtest_futures_hypothesis] Simulating trades...")
-    baseline_pnl: list[float] = []
-    filtered_pnl: list[float] = []
-
-    for sig in baseline_signals:
-        pnl = simulate_trade(sig, candles)
-        baseline_pnl.append(pnl)
-
-        if signal_passes_filter(sig, candles, block_when, vwap_series):
-            filtered_pnl.append(pnl)
-
-    baseline_stats = compute_stats(baseline_pnl)
-    filtered_stats = compute_stats(filtered_pnl)
-    filtered_stats["skipped_trades"] = baseline_stats["trades"] - filtered_stats["trades"]
-
-    print(
-        f"  Baseline: {baseline_stats['trades']} trades, "
-        f"win_rate={baseline_stats['win_rate']:.2%}, "
-        f"net_pnl={baseline_stats['net_pnl_points']:.2f}pts"
+    # ── First backtest attempt ────────────────────────────────────────────────
+    attempt1 = run_backtest_attempt(
+        ticker=ticker,
+        interval=effective_interval,
+        period=effective_period,
+        symbol=symbol,
+        strategy=strategy,
+        direction_filter=direction_filter,
+        block_when=block_when,
+        yf=yf,
     )
-    print(
-        f"  Filtered: {filtered_stats['trades']} trades, "
-        f"win_rate={filtered_stats['win_rate']:.2%}, "
-        f"net_pnl={filtered_stats['net_pnl_points']:.2f}pts, "
-        f"skipped={filtered_stats['skipped_trades']}"
+
+    min_baseline_trades = args.min_baseline_trades
+    min_filtered_trades = args.min_filtered_trades
+
+    if attempt1["status"] == "unavailable":
+        # Data download failed — write unavailable immediately, no fallback
+        result = {
+            "hypothesis_id":      hyp_id,
+            "status":             "unavailable",
+            "symbol":             symbol,
+            "ticker":             ticker,
+            "strategy":           strategy,
+            "requested_interval": requested_interval,
+            "requested_period":   requested_period,
+            "interval":           effective_interval,
+            "period":             effective_period,
+            "fallback_used":      False,
+            "attempts": [
+                {
+                    "interval":          effective_interval,
+                    "period":            effective_period,
+                    "baseline_trades":   0,
+                    "filtered_trades":   0,
+                    "sample_sufficient": False,
+                }
+            ],
+            "reason":             attempt1["reason"],
+            "promotion_decision": {"promote": False, "reason": "data unavailable"},
+        }
+        _write_result(result, wiki_dir, hyp_id)
+        sys.exit(0)
+
+    # Check sample sufficiency
+    baseline1 = attempt1["baseline"]
+    filtered1 = attempt1["filtered"]
+    sample_ok1 = (
+        baseline1["trades"] >= min_baseline_trades
+        and filtered1["trades"] >= min_filtered_trades
     )
+
+    attempt1_meta = {
+        "interval":          effective_interval,
+        "period":            effective_period,
+        "baseline_trades":   baseline1["trades"],
+        "filtered_trades":   filtered1["trades"],
+        "sample_sufficient": sample_ok1,
+    }
+
+    # ── Daily fallback if needed ──────────────────────────────────────────────
+    fallback_used = False
+    fallback_reason = None
+    final_attempt = attempt1
+    attempts_list = [attempt1_meta]
+
+    if not sample_ok1 and effective_interval != "1d":
+        fallback_reason = (
+            f"Initial {effective_interval}/{effective_period} sample insufficient: "
+            f"baseline trades {baseline1['trades']} < {min_baseline_trades}, "
+            f"filtered trades {filtered1['trades']} < {min_filtered_trades}."
+        )
+        print(f"[backtest_futures_hypothesis] Insufficient sample — triggering daily fallback (1d/5y).")
+        print(f"  Reason: {fallback_reason}")
+
+        attempt2 = run_backtest_attempt(
+            ticker=ticker,
+            interval="1d",
+            period="5y",
+            symbol=symbol,
+            strategy=strategy,
+            direction_filter=direction_filter,
+            block_when=block_when,
+            yf=yf,
+        )
+
+        baseline2 = attempt2.get("baseline", compute_stats([]))
+        filtered2 = attempt2.get("filtered", compute_stats([]))
+        sample_ok2 = (
+            attempt2["status"] == "ok"
+            and baseline2["trades"] >= min_baseline_trades
+            and filtered2["trades"] >= min_filtered_trades
+        )
+
+        attempt2_meta = {
+            "interval":          "1d",
+            "period":            "5y",
+            "baseline_trades":   baseline2["trades"],
+            "filtered_trades":   filtered2["trades"],
+            "sample_sufficient": sample_ok2,
+        }
+        attempts_list.append(attempt2_meta)
+        fallback_used = True
+
+        if attempt2["status"] == "ok":
+            final_attempt = attempt2
+        else:
+            # Fallback also unavailable — keep attempt1 data, mark failed
+            final_attempt = attempt1
 
     # ── Evaluate promotion ────────────────────────────────────────────────────
+    final_baseline = final_attempt["baseline"]
+    final_filtered = final_attempt["filtered"]
+    final_interval = final_attempt["interval"]
+    final_period   = final_attempt["period"]
+
     promotion_decision = evaluate_promotion(
-        baseline_stats,
-        filtered_stats,
-        args.min_baseline_trades,
-        args.min_filtered_trades,
+        final_baseline,
+        final_filtered,
+        min_baseline_trades,
+        min_filtered_trades,
     )
 
     status = "passed" if promotion_decision["promote"] else "failed"
 
-    result = {
+    result: dict = {
         "hypothesis_id":      hyp_id,
         "status":             status,
         "symbol":             symbol,
         "ticker":             ticker,
         "strategy":           strategy,
-        "period":             period,
-        "interval":           effective_interval,
-        "baseline":           baseline_stats,
-        "filtered":           filtered_stats,
+        "requested_interval": requested_interval,
+        "requested_period":   requested_period,
+        "interval":           final_interval,
+        "period":             final_period,
+        "fallback_used":      fallback_used,
+        "attempts":           attempts_list,
+        "baseline":           final_baseline,
+        "filtered":           final_filtered,
         "promotion_decision": promotion_decision,
     }
+    if fallback_reason:
+        result["fallback_reason"] = fallback_reason
 
     _write_result(result, wiki_dir, hyp_id)
     print(

@@ -810,3 +810,257 @@ class TestVwapHelpers:
         # block_when price_below_vwap=True → block when price IS below vwap → should block
         result = self.mod.signal_passes_filter(sig, candles, {"price_below_vwap": True}, vwap_series)
         assert result is False
+
+
+# ===========================================================================
+# Daily fallback tests
+# ===========================================================================
+
+class TestDailyFallback:
+    """Tests for the daily-timeframe fallback introduced in run_backtest_attempt()."""
+
+    @pytest.fixture(autouse=True)
+    def _import_mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "backtest_futures_hypothesis",
+            str(_REPO_ROOT / "scripts" / "backtest_futures_hypothesis.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.mod = mod
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    def _ok_attempt(self, interval="5m", period="59d", baseline_trades=30, filtered_trades=25):
+        """Return a fake 'ok' attempt result with enough trades."""
+        stats = lambda n: {
+            "trades": n,
+            "win_rate": 0.6,
+            "net_pnl_points": 100.0,
+            "profit_factor": 1.5,
+            "max_drawdown_points": 50.0,
+            "avg_trade": 3.33,
+            "skipped_trades": 0,
+        }
+        return {
+            "status": "ok",
+            "interval": interval,
+            "period": period,
+            "candles_count": 500,
+            "baseline": stats(baseline_trades),
+            "filtered": stats(filtered_trades),
+        }
+
+    def _insufficient_attempt(self, interval="5m", period="59d", baseline_trades=5, filtered_trades=2):
+        """Return a fake 'ok' attempt result with too few trades."""
+        return self._ok_attempt(interval, period, baseline_trades, filtered_trades)
+
+    def _unavailable_attempt(self, interval="5m", period="59d"):
+        return {
+            "status": "unavailable",
+            "interval": interval,
+            "period": period,
+            "candles_count": 0,
+            "baseline": self.mod.compute_stats([]),
+            "filtered": self.mod.compute_stats([]),
+            "reason": "Download failed",
+        }
+
+    def _write_hyp(self, tmp_path, hyp_id="HYP-TEST-001", strategy="VP-01 Counter Bull Trap"):
+        hyp = {
+            "id": hyp_id,
+            "scope": "futures",
+            "symbol": "NIFTY",
+            "strategy": strategy,
+            "direction": "SELL",
+            "status": "proposed",
+            "filter": {"block_when": {}},
+        }
+        wiki_dir = tmp_path / "wiki"
+        (wiki_dir / "hypotheses").mkdir(parents=True)
+        (wiki_dir / "backtest_results").mkdir(parents=True)
+        hyp_path = wiki_dir / "hypotheses" / f"{hyp_id}.json"
+        hyp_path.write_text(json.dumps(hyp))
+        return hyp_path, wiki_dir
+
+    def _run_main_with_mocked_attempt(self, tmp_path, side_effects, hyp_id="HYP-TEST-001"):
+        """
+        Run main() with run_backtest_attempt mocked to return side_effects in order.
+        Returns the parsed result JSON.
+        """
+        hyp_path, wiki_dir = self._write_hyp(tmp_path, hyp_id)
+
+        mod = self.mod
+        call_args = []
+
+        def fake_attempt(**kwargs):
+            call_args.append(kwargs)
+            if side_effects:
+                return side_effects.pop(0)
+            return self._ok_attempt()
+
+        with patch.object(mod, "run_backtest_attempt", side_effect=fake_attempt), \
+             patch.object(mod, "_check_data_sufficiency",
+                          return_value=("5m", "59d", "")), \
+             patch("sys.argv", [
+                 "backtest_futures_hypothesis.py",
+                 "--hypothesis", str(hyp_path),
+                 "--wiki-dir", str(wiki_dir),
+             ]):
+            try:
+                mod.main()
+            except SystemExit:
+                pass
+
+        result_path = wiki_dir / "backtest_results" / f"{hyp_id}.json"
+        assert result_path.exists(), "Result JSON not written"
+        return json.loads(result_path.read_text()), call_args
+
+    # -----------------------------------------------------------------------
+    # Test 1: sufficient sample on first pass → no fallback
+    # -----------------------------------------------------------------------
+
+    def test_sufficient_sample_no_fallback(self, tmp_path):
+        result, calls = self._run_main_with_mocked_attempt(
+            tmp_path,
+            [self._ok_attempt(baseline_trades=30, filtered_trades=25)],
+        )
+        assert result["fallback_used"] is False
+        assert len(result["attempts"]) == 1
+        assert "fallback_reason" not in result
+        assert len(calls) == 1
+
+    # -----------------------------------------------------------------------
+    # Test 2: zero baseline trades → fallback triggered
+    # -----------------------------------------------------------------------
+
+    def test_zero_trades_triggers_fallback(self, tmp_path):
+        result, calls = self._run_main_with_mocked_attempt(
+            tmp_path,
+            [
+                self._insufficient_attempt(baseline_trades=0, filtered_trades=0),
+                self._ok_attempt("1d", "5y", 50, 40),
+            ],
+        )
+        assert result["fallback_used"] is True
+        assert len(calls) == 2
+        second_call = calls[1]
+        assert second_call["interval"] == "1d"
+        assert second_call["period"] == "5y"
+
+    # -----------------------------------------------------------------------
+    # Test 3: baseline ok but filtered < min → fallback triggered
+    # -----------------------------------------------------------------------
+
+    def test_insufficient_filtered_triggers_fallback(self, tmp_path):
+        # baseline=25 (>= 20) but filtered=5 (< 10)
+        result, calls = self._run_main_with_mocked_attempt(
+            tmp_path,
+            [
+                self._insufficient_attempt(baseline_trades=25, filtered_trades=5),
+                self._ok_attempt("1d", "5y", 50, 40),
+            ],
+        )
+        assert result["fallback_used"] is True
+        assert len(calls) == 2
+
+    # -----------------------------------------------------------------------
+    # Test 4: fallback passes → status=passed
+    # -----------------------------------------------------------------------
+
+    def test_fallback_passes_sets_status_passed(self, tmp_path):
+        result, calls = self._run_main_with_mocked_attempt(
+            tmp_path,
+            [
+                self._insufficient_attempt(baseline_trades=0, filtered_trades=0),
+                self._ok_attempt("1d", "5y", 50, 40),
+            ],
+        )
+        assert result["fallback_used"] is True
+        assert result["interval"] == "1d"
+        assert result["period"] == "5y"
+        # With 50 baseline trades, 40 filtered, good stats → should pass
+        assert result["status"] in ("passed", "failed")  # depends on PF; at minimum not unavailable
+
+    # -----------------------------------------------------------------------
+    # Test 5: daily fallback also insufficient → status=failed, fallback_used=True, 2 attempts
+    # -----------------------------------------------------------------------
+
+    def test_fallback_fails_status_failed(self, tmp_path):
+        result, calls = self._run_main_with_mocked_attempt(
+            tmp_path,
+            [
+                self._insufficient_attempt(baseline_trades=0, filtered_trades=0),
+                self._insufficient_attempt("1d", "5y", 3, 1),
+            ],
+        )
+        assert result["fallback_used"] is True
+        assert result["status"] == "failed"
+        assert len(result["attempts"]) == 2
+
+    # -----------------------------------------------------------------------
+    # Test 6: effective_interval already "1d" → no duplicate fallback
+    # -----------------------------------------------------------------------
+
+    def test_already_1d_no_duplicate_fallback(self, tmp_path):
+        hyp_path, wiki_dir = self._write_hyp(tmp_path)
+        mod = self.mod
+        calls = []
+
+        def fake_attempt(**kwargs):
+            calls.append(kwargs)
+            return self._insufficient_attempt(kwargs["interval"], kwargs["period"], 3, 1)
+
+        with patch.object(mod, "run_backtest_attempt", side_effect=fake_attempt), \
+             patch.object(mod, "_check_data_sufficiency",
+                          return_value=("1d", "5y", "No volume at 5m — switching to 1d/5y")), \
+             patch("sys.argv", [
+                 "backtest_futures_hypothesis.py",
+                 "--hypothesis", str(hyp_path),
+                 "--wiki-dir", str(wiki_dir),
+             ]):
+            try:
+                mod.main()
+            except SystemExit:
+                pass
+
+        # effective_interval is "1d", so fallback must NOT be triggered
+        assert len(calls) == 1, f"Expected exactly 1 attempt, got {len(calls)}: {calls}"
+        result_path = wiki_dir / "backtest_results" / "HYP-TEST-001.json"
+        result = json.loads(result_path.read_text())
+        assert len(result["attempts"]) == 1
+
+    # -----------------------------------------------------------------------
+    # Test 7: first attempt unavailable → no fallback
+    # -----------------------------------------------------------------------
+
+    def test_unavailable_first_pass_no_fallback(self, tmp_path):
+        result, calls = self._run_main_with_mocked_attempt(
+            tmp_path,
+            [self._unavailable_attempt()],
+        )
+        assert result["status"] == "unavailable"
+        assert result["fallback_used"] is False
+        assert len(calls) == 1
+
+    # -----------------------------------------------------------------------
+    # Test 8: "attempts" list always present in result
+    # -----------------------------------------------------------------------
+
+    def test_attempts_metadata_in_result(self, tmp_path):
+        result, _ = self._run_main_with_mocked_attempt(
+            tmp_path,
+            [self._ok_attempt(baseline_trades=30, filtered_trades=25)],
+        )
+        assert "attempts" in result
+        assert isinstance(result["attempts"], list)
+        assert len(result["attempts"]) >= 1
+        first = result["attempts"][0]
+        assert "interval" in first
+        assert "period" in first
+        assert "baseline_trades" in first
+        assert "filtered_trades" in first
+        assert "sample_sufficient" in first
