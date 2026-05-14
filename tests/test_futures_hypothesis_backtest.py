@@ -700,3 +700,104 @@ class TestDefaultPeriodForInterval:
 
         resolved = args.period if args.period else mod._default_period_for_interval(args.interval)
         assert resolved == "30d"
+
+
+# ===========================================================================
+# VWAP series computation and daily fallback
+# ===========================================================================
+
+class TestVwapHelpers:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "backtest_futures_hypothesis",
+            str(_REPO_ROOT / "scripts" / "backtest_futures_hypothesis.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.mod = mod
+
+    def _candle(self, ts, o, h, l, c, v=1000):
+        return {"time": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
+
+    def test_needs_vwap_detects_price_above(self):
+        assert self.mod._needs_vwap({"price_above_vwap": True}) is True
+
+    def test_needs_vwap_detects_price_below(self):
+        assert self.mod._needs_vwap({"price_below_vwap": True}) is True
+
+    def test_needs_vwap_false_for_unrelated_fields(self):
+        assert self.mod._needs_vwap({"rsi14_lt": 30, "ema_stacked_bear": True}) is False
+
+    def test_vwap_returns_none_when_no_volume(self):
+        candles = [self._candle(1000, 100, 110, 90, 105, v=0) for _ in range(5)]
+        assert self.mod._compute_vwap_series(candles, "5m") is None
+
+    def test_vwap_daily_uses_typical_price(self):
+        # (100+120+110)/3 = 110.0
+        candles = [self._candle(1000 + i, 100, 120, 100, 110, v=500) for i in range(3)]
+        series = self.mod._compute_vwap_series(candles, "1d")
+        assert series is not None
+        assert len(series) == 3
+        assert all(abs(v - 110.0) < 0.01 for v in series)
+
+    def test_vwap_intraday_resets_per_day(self):
+        # Two bars same day, then one bar next day
+        import datetime
+        day1 = int(datetime.datetime(2026, 5, 13, 9, 15, tzinfo=datetime.timezone.utc).timestamp())
+        day1b = int(datetime.datetime(2026, 5, 13, 9, 20, tzinfo=datetime.timezone.utc).timestamp())
+        day2 = int(datetime.datetime(2026, 5, 14, 9, 15, tzinfo=datetime.timezone.utc).timestamp())
+
+        candles = [
+            self._candle(day1,  100, 110, 90, 105, v=1000),
+            self._candle(day1b, 106, 112, 100, 108, v=2000),
+            self._candle(day2,  200, 210, 190, 205, v=1000),
+        ]
+        series = self.mod._compute_vwap_series(candles, "5m")
+        assert series is not None
+        assert len(series) == 3
+        # Day2 VWAP should reset — equals day2 typical price (210+190+205)/3 = 201.667
+        expected_day2_vwap = (210 + 190 + 205) / 3.0
+        assert abs(series[2] - expected_day2_vwap) < 0.01
+        # Day1 bar2 VWAP should be between bar1 and bar2 typical prices
+        assert series[0] != series[2]  # different days → different values
+
+    def test_signal_passes_filter_vwap_above_blocks_correctly(self):
+        """price_above_vwap=False should block a signal where close > vwap."""
+        # Candle with close=110, vwap=100 → price IS above vwap → price_above_vwap=True
+        # block_when: price_above_vwap=False → only block when NOT above vwap → should NOT block
+        import datetime
+        ts = int(datetime.datetime(2026, 5, 13, 9, 15, tzinfo=datetime.timezone.utc).timestamp())
+        candles = [self._candle(ts + i * 300, 100, 110, 90, 110, v=1000) for i in range(20)]
+        vwap_series = [100.0] * 20  # close=110 > vwap=100 → price_above_vwap=True
+
+        sig = {
+            "candle_index": 15,
+            "direction": "BUY",
+            "entry_reference": 110,
+            "stop_loss": 105,
+            "target": 115,
+        }
+        # block_when price_above_vwap=False → block only when price is NOT above vwap
+        # Since price IS above vwap, filter should NOT block → passes
+        result = self.mod.signal_passes_filter(sig, candles, {"price_above_vwap": False}, vwap_series)
+        assert result is True
+
+    def test_signal_passes_filter_blocks_when_below_vwap(self):
+        """price_below_vwap=True should block when close < vwap."""
+        import datetime
+        ts = int(datetime.datetime(2026, 5, 13, 9, 15, tzinfo=datetime.timezone.utc).timestamp())
+        candles = [self._candle(ts + i * 300, 100, 110, 90, 95, v=1000) for i in range(20)]
+        vwap_series = [100.0] * 20  # close=95 < vwap=100 → price_below_vwap=True
+
+        sig = {
+            "candle_index": 15,
+            "direction": "BUY",
+            "entry_reference": 95,
+            "stop_loss": 90,
+            "target": 105,
+        }
+        # block_when price_below_vwap=True → block when price IS below vwap → should block
+        result = self.mod.signal_passes_filter(sig, candles, {"price_below_vwap": True}, vwap_series)
+        assert result is False

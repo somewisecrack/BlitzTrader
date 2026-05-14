@@ -200,18 +200,79 @@ def _compute_ema_stack(closes: list[float]) -> tuple[bool, bool]:
 
 
 # ---------------------------------------------------------------------------
+# VWAP helpers
+# ---------------------------------------------------------------------------
+
+def _needs_vwap(block_when: dict) -> bool:
+    """True if any filter condition requires VWAP."""
+    return "price_above_vwap" in block_when or "price_below_vwap" in block_when
+
+
+def _compute_vwap_series(candles: list[dict], interval: str) -> "list[float] | None":
+    """Compute a per-candle VWAP series.
+
+    Intraday intervals: cumulative (typical_price × volume) / cumulative_volume,
+    resetting at each new calendar day.
+
+    Daily/weekly/monthly intervals: typical price (H+L+C)/3 — each bar IS
+    the session, so typical price is the natural VWAP proxy.
+
+    Returns None if no meaningful volume data is present (all zeros),
+    which signals the caller to fall back to the daily timeframe.
+    """
+    if not candles:
+        return None
+
+    total_vol = sum(c["volume"] for c in candles)
+    if total_vol == 0:
+        return None
+
+    _DAILY_INTERVALS = {"1d", "5d", "1wk", "1mo"}
+    is_daily = interval in _DAILY_INTERVALS
+
+    result: list[float] = []
+
+    if is_daily:
+        for c in candles:
+            result.append((c["high"] + c["low"] + c["close"]) / 3.0)
+    else:
+        from datetime import datetime, timezone as _tz
+        cum_tp_vol = 0.0
+        cum_vol = 0.0
+        current_date = None
+
+        for c in candles:
+            bar_date = datetime.fromtimestamp(c["time"], tz=_tz.utc).date()
+            if bar_date != current_date:
+                cum_tp_vol = 0.0
+                cum_vol = 0.0
+                current_date = bar_date
+
+            tp = (c["high"] + c["low"] + c["close"]) / 3.0
+            cum_tp_vol += tp * c["volume"]
+            cum_vol += c["volume"]
+            result.append(cum_tp_vol / cum_vol if cum_vol > 0 else tp)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Filter application
 # ---------------------------------------------------------------------------
 
-def signal_passes_filter(sig: dict, candles: list[dict], block_when: dict) -> bool:
+def signal_passes_filter(
+    sig: dict,
+    candles: list[dict],
+    block_when: dict,
+    vwap_series: "list[float] | None" = None,
+) -> bool:
     """
     Returns True if the signal is NOT blocked by the hypothesis filter.
 
-    Computes RSI14, ADX14, and EMA-stack indicators at the signal's candle
-    index and evaluates each block_when condition using the same
-    _check_condition() function used by the live filter loader.
-    price_above_vwap is set to None (intraday VWAP is not available from
-    daily/5m yfinance data).
+    Computes RSI14, ADX14, EMA-stack, and (when vwap_series is provided)
+    price_above/below_vwap indicators at the signal's candle index and
+    evaluates each block_when condition using the same _check_condition()
+    function used by the live filter loader.
     """
     if not block_when:
         return True
@@ -223,13 +284,21 @@ def signal_passes_filter(sig: dict, candles: list[dict], block_when: dict) -> bo
     adx_val = _compute_adx(candles[:idx + 1])
     ema_bull, ema_bear = _compute_ema_stack(closes)
 
+    price_above_vwap = None
+    price_below_vwap = None
+    if vwap_series is not None and idx < len(vwap_series):
+        vwap_val = vwap_series[idx]
+        close = candles[idx]["close"]
+        price_above_vwap = close > vwap_val
+        price_below_vwap = close < vwap_val
+
     indicators = {
-        "rsi14":              rsi_val,
-        "adx14":              adx_val,
-        "ema_stacked_bull":   ema_bull,
-        "ema_stacked_bear":   ema_bear,
-        "price_above_vwap":   None,   # not available without intraday VWAP
-        "price_below_vwap":   None,
+        "rsi14":            rsi_val,
+        "adx14":            adx_val,
+        "ema_stacked_bull": ema_bull,
+        "ema_stacked_bear": ema_bear,
+        "price_above_vwap": price_above_vwap,
+        "price_below_vwap": price_below_vwap,
     }
 
     for field, threshold in block_when.items():
@@ -639,9 +708,46 @@ def main() -> None:
         _write_result(result, wiki_dir, hyp_id)
         sys.exit(0)
 
+    # ── VWAP: compute or fall back to daily ──────────────────────────────────
+    effective_interval = args.interval
+    vwap_series = None
+
+    if _needs_vwap(block_when):
+        vwap_series = _compute_vwap_series(candles, args.interval)
+        if vwap_series is None:
+            print(
+                f"WARNING: No volume data at {args.interval} — "
+                "cannot compute VWAP. Falling back to 1d (fractal equivalence)."
+            )
+            effective_interval = "1d"
+            fb_period = _default_period_for_interval("1d")
+            try:
+                df_fb = yf.download(
+                    ticker,
+                    period=fb_period,
+                    interval="1d",
+                    auto_adjust=True,
+                    progress=False,
+                )
+            except Exception as exc:
+                print(f"ERROR: daily fallback download failed: {exc}", file=sys.stderr)
+                df_fb = None
+
+            if df_fb is not None and len(df_fb) > 0:
+                if hasattr(df_fb.columns, "levels"):
+                    df_fb.columns = [c[0] if isinstance(c, tuple) else c for c in df_fb.columns]
+                candles = df_to_candles(df_fb)
+                vwap_series = _compute_vwap_series(candles, "1d")
+                period = fb_period
+                print(f"  Daily fallback: downloaded {len(candles)} daily bars.")
+            else:
+                print("WARNING: daily fallback also returned no data. VWAP will remain None.")
+        else:
+            print(f"  VWAP series computed ({len(vwap_series)} values).")
+
     # ── Generate baseline signals ─────────────────────────────────────────────
     print(f"[backtest_futures_hypothesis] Scanning candles for {strategy} signals...")
-    all_signals = scan_candles(symbol, args.interval, candles)
+    all_signals = scan_candles(symbol, effective_interval, candles)
     # Keep only signals for the hypothesis strategy
     baseline_signals = [s for s in all_signals if s["strategy"] == strategy]
 
@@ -666,7 +772,7 @@ def main() -> None:
         pnl = simulate_trade(sig, candles)
         baseline_pnl.append(pnl)
 
-        if signal_passes_filter(sig, candles, block_when):
+        if signal_passes_filter(sig, candles, block_when, vwap_series):
             filtered_pnl.append(pnl)
 
     baseline_stats = compute_stats(baseline_pnl)
@@ -702,7 +808,7 @@ def main() -> None:
         "ticker":             ticker,
         "strategy":           strategy,
         "period":             period,
-        "interval":           args.interval,
+        "interval":           effective_interval,
         "baseline":           baseline_stats,
         "filtered":           filtered_stats,
         "promotion_decision": promotion_decision,
