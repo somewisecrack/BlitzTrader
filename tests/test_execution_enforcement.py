@@ -795,10 +795,10 @@ class TestExecutionEnforcement(unittest.TestCase):
         self.assertEqual(kwargs["action"], "REJECT")
         self.assertIn("Latest order result", kwargs["reason"])
 
-    def test_daily_trade_cap_blocks_eleventh_entry(self):
-        """Completed + open + pending entries must not exceed daily cap."""
+    def test_no_daily_trade_cap_with_many_completed_trades(self):
+        """Daily trade count is no longer capped; 15 completed trades must not block a new entry."""
         self.executor._state.get_state.return_value.update({
-            "trades": [{"symbol": "NIFTY28APR26F"} for _ in range(10)],
+            "trades": [{"symbol": "NIFTY28APR26F"} for _ in range(15)],
             "positions": [],
             "pending_orders": [],
         })
@@ -810,49 +810,8 @@ class TestExecutionEnforcement(unittest.TestCase):
             stop_loss=23900.0,
         )
 
-        self.assertEqual(result.get("status"), "REJECTED")
-        self.assertIn("Daily trade cap reached", result.get("error", ""))
-
-    def test_daily_trade_cap_counts_open_positions(self):
-        """Nine closed plus one open position leaves no room for another entry."""
-        self.executor._state.get_state.return_value.update({
-            "trades": [{"symbol": "NIFTY28APR26F"} for _ in range(9)],
-            "positions": [
-                {
-                    "symbol": "BANKNIFTY28APR26F",
-                    "direction": "BUY",
-                    "quantity": 15,
-                }
-            ],
-            "pending_orders": [],
-        })
-
-        result = self.executor.place_virtual_order(
-            symbol="NIFTY28APR26F",
-            direction="BUY",
-            quantity=25,
-            stop_loss=23900.0,
-        )
-
-        self.assertEqual(result.get("status"), "REJECTED")
-        self.assertIn("10/10", result.get("error", ""))
-
-    def test_daily_trade_cap_allows_tenth_entry(self):
-        """Nine prior entries still allows exactly one more."""
-        self.executor._state.get_state.return_value.update({
-            "trades": [{"symbol": "NIFTY28APR26F"} for _ in range(9)],
-            "positions": [],
-            "pending_orders": [],
-        })
-
-        result = self.executor.place_virtual_order(
-            symbol="NIFTY28APR26F",
-            direction="BUY",
-            quantity=25,
-            stop_loss=23900.0,
-        )
-
-        self.assertEqual(result.get("status"), "FILLED")
+        self.assertEqual(result.get("status"), "FILLED",
+                         f"Expected FILLED but got: {result}")
 
 
 class TestTrailingStops(unittest.TestCase):

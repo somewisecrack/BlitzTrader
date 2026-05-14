@@ -116,16 +116,16 @@ class TestEventDrivenGatekeeper(unittest.TestCase):
         self.assertEqual(len(blocked), 1)
         self.assertIn("No pyramiding", blocked[0]["blocked_reason"])
 
-    def test_daily_trade_cap_blocks_all_candidates(self):
-        bot = _bot_with_state(_state(trades=[{} for _ in range(10)]))
+    def test_no_daily_trade_cap_many_trades_still_tradeable(self):
+        """Daily trade count is uncapped; 15 completed trades must not block new signals."""
+        bot = _bot_with_state(_state(trades=[{} for _ in range(15)]))
         tradeable, blocked = bot._filter_tradeable_signals(
             [_signal("NIFTY"), _signal("BANKNIFTY")],
             IST.localize(datetime(2026, 4, 22, 10, 0)),
         )
 
-        self.assertEqual(tradeable, [])
-        self.assertEqual(len(blocked), 2)
-        self.assertIn("Daily trade cap reached", blocked[0]["blocked_reason"])
+        self.assertEqual(len(tradeable), 2)
+        self.assertEqual(blocked, [])
 
     def test_existing_pending_review_blocks_duplicate_instrument(self):
         bot = _bot_with_state(_state())

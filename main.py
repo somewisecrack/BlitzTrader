@@ -47,7 +47,6 @@ from config import (
     SCAN_INTERVAL_SECONDS,
     MASTER_STRATEGY_FILE,
     MAX_DAILY_LOSS_AMOUNT,
-    MAX_DAILY_TRADES,
     MAX_POSITIONS,
     MAX_RISK_PCT,
     MEMORY_FILE,
@@ -362,7 +361,6 @@ class BlitzTrader:
             live_feed=self._feed,
             shoonya_client=self._shoonya,
             max_positions=MAX_POSITIONS,
-            max_daily_trades=MAX_DAILY_TRADES,
             max_risk_amount=VIRTUAL_CAPITAL * MAX_RISK_PCT,
             max_daily_loss=MAX_DAILY_LOSS_AMOUNT,
             no_entry_after=NO_NEW_ENTRY_AFTER,
@@ -829,15 +827,13 @@ class BlitzTrader:
 
         Python does not score setup quality here. It only filters candidates that
         cannot legally be traded regardless of Gemini's opinion: paused state,
-        daily cap/loss, no-entry cutoff, max positions, unresolved futures, or
+        daily loss limit, no-entry cutoff, max positions, unresolved futures, or
         no-pyramiding conflicts.
         """
         state = self._state.get_state() if self._state else {}
         positions = state.get("positions", []) or []
         pending_orders = state.get("pending_orders", []) or []
-        trades = state.get("trades", []) or []
 
-        daily_entries = len(trades) + len(positions) + len(pending_orders)
         blocked_reason = None
         if state.get("is_paused"):
             blocked_reason = "Trading paused by user command"
@@ -845,8 +841,6 @@ class BlitzTrader:
             blocked_reason = "Trading stopped by daily-loss guardrail"
         elif float(state.get("daily_pnl", 0) or 0) <= -MAX_DAILY_LOSS_AMOUNT:
             blocked_reason = "Daily loss limit reached"
-        elif daily_entries >= MAX_DAILY_TRADES:
-            blocked_reason = f"Daily trade cap reached ({daily_entries}/{MAX_DAILY_TRADES})"
         elif len(positions) >= MAX_POSITIONS:
             blocked_reason = f"Maximum open positions reached ({len(positions)}/{MAX_POSITIONS})"
         else:

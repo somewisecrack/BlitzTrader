@@ -33,7 +33,6 @@ class OrderExecutionTools:
         live_feed,
         shoonya_client,
         max_positions: int = 3,
-        max_daily_trades: int = 10,
         max_risk_amount: float = 25000,  # 5% of 5L
         max_daily_loss: float = 25000,  # 5% of 5L
         no_entry_after: str = "15:05",
@@ -44,7 +43,6 @@ class OrderExecutionTools:
         self._feed = live_feed
         self._client = shoonya_client
         self._max_positions = max_positions
-        self._max_daily_trades = max_daily_trades
         self._max_risk_amount = max_risk_amount
         self._max_daily_loss = max_daily_loss
         self._no_entry_after = no_entry_after
@@ -86,17 +84,6 @@ class OrderExecutionTools:
 
         open_positions = state.get("positions", [])
         pending_orders = state.get("pending_orders", [])
-        completed_trades = state.get("trades", [])
-
-        # Check daily trade cap. Count completed trades plus open/pending entries
-        # so intraday restarts and still-open positions cannot bypass the limit.
-        daily_entries = len(completed_trades) + len(open_positions) + len(pending_orders)
-        if daily_entries >= self._max_daily_trades:
-            return (
-                f"BLOCKED: Daily trade cap reached ({daily_entries}/"
-                f"{self._max_daily_trades}). No more new entries allowed today. "
-                "Exits remain allowed."
-            )
 
         # Check max positions
         if len(open_positions) >= self._max_positions:

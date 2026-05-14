@@ -195,7 +195,6 @@ Z_SCORE_LIMIT        = 2.0
 # ──────────────────────────────────────────────────────────────
 
 MIN_FREE_DISK_MB = 2048   # abort if less than 2 GB free
-MAX_DAILY_TRADES = 10
 MAX_RISK_PCT = 0.05  # 5% of capital per trade
 MAX_DAILY_LOSS_PCT = 0.05  # 5% daily loss limit
 MAX_DAILY_LOSS_AMOUNT = VIRTUAL_CAPITAL * MAX_DAILY_LOSS_PCT  # ₹50,000
