@@ -423,8 +423,7 @@ class ToolRegistry:
                     "LIMIT fills only if LTP touches price within 5 minutes, else auto-cancels. "
                     "Hard guardrails enforced: max 3 positions, no pyramiding "
                     "(one open position per instrument), exactly 1 futures lot per trade, "
-                    "max 10 total daily entries, no entry after 15:05 IST, "
-                    "daily loss limit, margin limit. "
+                    "no entry after 15:05 IST, daily loss limit, margin limit. "
                     "FUTURES ONLY: symbol must be the futures tsym (e.g. NIFTY28APR26F). "
                     "Options (CE/PE) are BLOCKED — do not pass CE/PE symbols."
                 ),
