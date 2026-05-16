@@ -67,6 +67,98 @@ def _ema_series(values: list[float], period: int) -> list[float | None]:
     return result
 
 
+def _rsi_series(values: list[float], period: int = 14) -> list[float | None]:
+    """Compute RSI over a list of close prices using Wilder smoothing.
+    Returns None at positions before enough data is available."""
+    n = len(values)
+    result: list[float | None] = [None] * n
+    if n < period + 1:
+        return result
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        d = values[i] - values[i - 1]
+        gains[i] = max(d, 0.0)
+        losses[i] = max(-d, 0.0)
+    # Seed with simple average of first period
+    avg_gain = sum(gains[1:period + 1]) / period
+    avg_loss = sum(losses[1:period + 1]) / period
+    if avg_loss == 0:
+        result[period] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        result[period] = 100.0 - 100.0 / (1.0 + rs)
+    for i in range(period + 1, n):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            result[i] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            result[i] = 100.0 - 100.0 / (1.0 + rs)
+    return result
+
+
+def _adx_series(candles: list[dict], period: int = 14) -> list[float | None]:
+    """Compute ADX(period) over a list of candle dicts using Wilder smoothing.
+    Returns a list of the same length as *candles*, with None where data is
+    insufficient.  Standard Wilder DX method."""
+    n = len(candles)
+    result: list[float | None] = [None] * n
+    if n < period * 2 + 1:
+        return result
+
+    # Compute raw DM+, DM-, TR for each bar (index 0 has no previous bar)
+    dm_plus: list[float] = []
+    dm_minus: list[float] = []
+    trs: list[float] = []
+    for i in range(1, n):
+        h, l, c_prev = candles[i]["high"], candles[i]["low"], candles[i - 1]["close"]
+        up   = h - candles[i - 1]["high"]
+        down = candles[i - 1]["low"] - l
+        dm_plus.append(up   if up > down and up > 0   else 0.0)
+        dm_minus.append(down if down > up and down > 0 else 0.0)
+        trs.append(max(h - l, abs(h - c_prev), abs(l - c_prev)))
+
+    # Wilder smoothing helper
+    def _wilder(vals: list[float], p: int) -> list[float]:
+        s = sum(vals[:p])
+        out = [s]
+        for v in vals[p:]:
+            s = s - s / p + v
+            out.append(s)
+        return out
+
+    atr_w  = _wilder(trs,      period)
+    dip_w  = _wilder(dm_plus,  period)
+    dim_w  = _wilder(dm_minus, period)
+
+    # DX series
+    dxs: list[float] = []
+    for a, p, m in zip(atr_w, dip_w, dim_w):
+        if a == 0:
+            dxs.append(0.0)
+            continue
+        di_plus  = 100.0 * p / a
+        di_minus = 100.0 * m / a
+        denom = di_plus + di_minus
+        dxs.append(100.0 * abs(di_plus - di_minus) / denom if denom else 0.0)
+
+    # ADX = Wilder-smoothed DX; needs at least `period` DX values
+    if len(dxs) < period:
+        return result
+
+    adx_vals = _wilder(dxs, period)
+    # adx_vals[0] corresponds to candle index `period + period` (2*period-th bar, 0-indexed)
+    adx_start_candle_idx = 2 * period  # first candle index that has a valid ADX
+    for k, adx_val in enumerate(adx_vals):
+        candle_idx = adx_start_candle_idx + k
+        if candle_idx < n:
+            result[candle_idx] = adx_val
+
+    return result
+
+
 def _candle_stats(c: dict) -> tuple[float, float, float, float]:
     """Returns (body, range, upper_wick, lower_wick)."""
     body = abs(c["close"] - c["open"])
@@ -126,9 +218,29 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
             candle_index.
         ``candle_index`` is the index into *candles* where the signal fired —
         used by the backtester to walk forward from that point.
+
+    Signal freshness: the candle that TRIGGERS a signal must belong to the
+    same calendar date (IST) as the last candle in the list.  Historical
+    candles from prior sessions are still used for indicator warm-up but
+    cannot emit signals.
     """
+    import datetime as _dt
+    try:
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+    except ImportError:
+        _IST = None
+
     if len(candles) < 25:
         return []
+
+    # Determine the "current session date" from the last candle.
+    def _ist_date(ts: float) -> _dt.date:
+        if _IST is not None:
+            return _dt.datetime.fromtimestamp(ts, _IST).date()
+        return _dt.datetime.utcfromtimestamp(ts + 19800).date()  # +5:30 offset
+
+    session_date = _ist_date(candles[-1]["time"])
 
     # Normalise interval label (e.g. "5m" → "5", "15m" → "15")
     norm_interval = interval.replace("m", "").replace("min", "").strip()
@@ -137,9 +249,11 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
     ranges = [c["high"] - c["low"] for c in candles]
     volumes = [c.get("volume", 0) for c in candles]
 
-    e20_all = _ema_series(closes, 20)
-    e50_all = _ema_series(closes, 50)
+    e20_all  = _ema_series(closes, 20)
+    e50_all  = _ema_series(closes, 50)
     e100_all = _ema_series(closes, 100)
+    rsi_all  = _rsi_series(closes, 14)
+    adx_all  = _adx_series(candles, 14)
 
     signals: list[dict] = []
     # Track (strategy, direction, candle_index) to avoid duplicate signals
@@ -149,6 +263,12 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
     def _add(i: int, c: dict, strategy: str, direction: str, reason: str,
              stop_loss: float | None, target: float | None,
              requires_volume: bool = False) -> None:
+        # ── Session freshness gate ────────────────────────────────────────────
+        # The trigger candle must belong to the current session date (IST).
+        # Historical candles are used for indicator lookbacks but CANNOT emit.
+        if _ist_date(c["time"]) != session_date:
+            return
+        # ─────────────────────────────────────────────────────────────────────
         key = (strategy, direction, i)
         if key in emitted:
             return
@@ -174,9 +294,11 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
 
         bull = c["close"] > c["open"]
         bear = c["close"] < c["open"]
-        e20 = e20_all[i]
-        e50 = e50_all[i]
+        e20  = e20_all[i]
+        e50  = e50_all[i]
         e100 = e100_all[i]
+        rsi14 = rsi_all[i]
+        adx14 = adx_all[i]
 
         # ── VP-05: 3-EMA trend pullback ──────────────────────────────────────
         if e20 and e50 and e100:
@@ -197,37 +319,45 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
                      "EMA stack bullish and pin bar rejected EMA20/EMA50",
                      sl, c["close"] + 2 * abs(c["close"] - sl))
 
+            # VP-05 SELL: additionally requires RSI14 <= 40 (fail-closed if unavailable)
             if bear_stack and upper > body and (touched_ema20_short or touched_ema50_short):
-                sl = e50 if touched_ema20_short else e100
-                _add(i, c, "VP-05 3EMA Trend", "SELL",
-                     "EMA stack bearish and pin bar rejected EMA20/EMA50",
-                     sl, c["close"] - 2 * abs(sl - c["close"]))
+                if rsi14 is None or rsi14 > 40:
+                    pass  # fail closed — do not emit
+                else:
+                    sl = e50 if touched_ema20_short else e100
+                    _add(i, c, "VP-05 3EMA Trend", "SELL",
+                         "EMA stack bearish and pin bar rejected EMA20/EMA50",
+                         sl, c["close"] - 2 * abs(sl - c["close"]))
 
         # ── VP-07: wicks pullback in EMA20 direction ─────────────────────────
+        # Both BUY and SELL require ADX14 <= 30; fail closed if unavailable.
         if i >= 10 and e20:
-            masters = candles[i - 10:i]
-            if bull and c["close"] > e20:
-                for m in masters:
-                    m_body, _, _, m_lower = _candle_stats(m)
-                    if (m["close"] > m["open"] and m_body > 0
-                            and m_lower > 2 * m_body
-                            and c["close"] > m["close"]):
-                        _add(i, c, "VP-07 Wicks Pullback", "BUY",
-                             "Bullish follow-through above lower-wick master candle and EMA20; confirm volume before trading",
-                             m["low"], c["close"] + 2 * (c["close"] - m["low"]),
-                             True)
-                        break
-            if bear and c["close"] < e20:
-                for m in masters:
-                    m_body, _, m_upper, _ = _candle_stats(m)
-                    if (m["close"] < m["open"] and m_body > 0
-                            and m_upper > 2 * m_body
-                            and c["close"] < m["close"]):
-                        _add(i, c, "VP-07 Wicks Pullback", "SELL",
-                             "Bearish follow-through below upper-wick master candle and EMA20; confirm volume before trading",
-                             m["high"], c["close"] - 2 * (m["high"] - c["close"]),
-                             True)
-                        break
+            if adx14 is None or adx14 > 30:
+                pass  # ADX gate: fail closed for both directions
+            else:
+                masters = candles[i - 10:i]
+                if bull and c["close"] > e20:
+                    for m in masters:
+                        m_body, _, _, m_lower = _candle_stats(m)
+                        if (m["close"] > m["open"] and m_body > 0
+                                and m_lower > 2 * m_body
+                                and c["close"] > m["close"]):
+                            _add(i, c, "VP-07 Wicks Pullback", "BUY",
+                                 "Bullish follow-through above lower-wick master candle and EMA20; confirm volume before trading",
+                                 m["low"], c["close"] + 2 * (c["close"] - m["low"]),
+                                 True)
+                            break
+                if bear and c["close"] < e20:
+                    for m in masters:
+                        m_body, _, m_upper, _ = _candle_stats(m)
+                        if (m["close"] < m["open"] and m_body > 0
+                                and m_upper > 2 * m_body
+                                and c["close"] < m["close"]):
+                            _add(i, c, "VP-07 Wicks Pullback", "SELL",
+                                 "Bearish follow-through below upper-wick master candle and EMA20; confirm volume before trading",
+                                 m["high"], c["close"] - 2 * (m["high"] - c["close"]),
+                                 True)
+                            break
 
         # ── VP-01/02: counter trap ───────────────────────────────────────────
         if i >= 10 and e20:
@@ -241,16 +371,17 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
                 for rc in recent if rc["close"] < rc["open"]
             ]
 
-            # VP-01 Counter Bull Trap (SELL) — all symbols / all intervals
+            # VP-01 Counter Bull Trap (SELL): requires ADX14 <= 30; fail closed if unavailable
             if green_bodies and c["close"] < e20 and bear:
-                _, trap = max(green_bodies, key=lambda item: item[0])
-                if c["close"] < trap["close"]:
-                    sl = c["high"]
-                    _add(i, c, "VP-01 Counter Bull Trap", "SELL",
-                         "Price below EMA20; bearish candle closed below largest recent green candle close",
-                         sl, _target_for(c, "SELL", sl))
+                if adx14 is not None and adx14 <= 30:
+                    _, trap = max(green_bodies, key=lambda item: item[0])
+                    if c["close"] < trap["close"]:
+                        sl = c["high"]
+                        _add(i, c, "VP-01 Counter Bull Trap", "SELL",
+                             "Price below EMA20; bearish candle closed below largest recent green candle close",
+                             sl, _target_for(c, "SELL", sl))
 
-            # VP-02 Counter Bear Trap (BUY) — NIFTY 3m only
+            # VP-02 Counter Bear Trap (BUY) — NIFTY 3m only (no ADX filter change)
             if (symbol.upper() == "NIFTY" and norm_interval == "3"
                     and red_bodies and c["close"] > e20 and bull):
                 _, trap = max(red_bodies, key=lambda item: item[0])
@@ -261,6 +392,9 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
                          sl, _target_for(c, "BUY", sl))
 
         # ── VP-14 Morning Star / VP-15 Evening Star ──────────────────────────
+        # VP-14 Morning Star BUY: disabled from live executable signals.
+        # The pattern is still computed and stored for backtesting/research but
+        # is NOT emitted here (scan_candles is the live scanner path).
         if i >= 2 and e20:
             c1, c2, c3 = candles[i - 2], candles[i - 1], c
             c1_body, _, _, _ = _candle_stats(c1)
@@ -268,7 +402,10 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
             c3_body, _, _, _ = _candle_stats(c3)
             c2_small = c2_rng > 0 and c2_body < 0.3 * c2_rng
 
-            if (c1["close"] < c1["open"] and c2_small and bull
+            # VP-14: intentionally NOT emitted — shadow/non-executable in live path.
+            # Pattern detection kept here as a no-op so backtest logic can be
+            # re-enabled by removing the `pass` guard.
+            if False and (c1["close"] < c1["open"] and c2_small and bull  # noqa: SIM210
                     and c3_body > 0.5 * c1_body and c["close"] > e20):
                 sl = min(c1["low"], c2["low"])
                 _add(i, c, "VP-14 Morning Star", "BUY",
@@ -283,31 +420,34 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
                      sl, _target_for(c, "SELL", sl))
 
         # ── VP-18 M-Pattern Double Top / VP-19 W-Pattern Double Bottom ───────
+        # VP-18 SELL requires ADX14 <= 30; VP-19 BUY requires ADX14 <= 30.
+        # Fail closed if ADX is unavailable.
         if i >= 20:
             window = candles[i - 20:i + 1]
             prior = window[:-1]
             highs_found = _swing_highs(prior)
             lows_found = _swing_lows(prior)
 
-            for (idx1, h1), (idx2, h2) in zip(highs_found, highs_found[1:]):
-                if abs(h1["high"] - h2["high"]) / max(h1["high"], h2["high"]) <= 0.005:
-                    neckline = min(w["low"] for w in prior[idx1:idx2 + 1])
-                    if bear and c["close"] < neckline:
-                        sl = max(h1["high"], h2["high"])
-                        _add(i, c, "VP-18 M-Pattern Double Top", "SELL",
-                             "Two swing highs within 0.5% followed by bearish neckline break",
-                             sl, _target_for(c, "SELL", sl))
-                        break
+            if adx14 is not None and adx14 <= 30:
+                for (idx1, h1), (idx2, h2) in zip(highs_found, highs_found[1:]):
+                    if abs(h1["high"] - h2["high"]) / max(h1["high"], h2["high"]) <= 0.005:
+                        neckline = min(w["low"] for w in prior[idx1:idx2 + 1])
+                        if bear and c["close"] < neckline:
+                            sl = max(h1["high"], h2["high"])
+                            _add(i, c, "VP-18 M-Pattern Double Top", "SELL",
+                                 "Two swing highs within 0.5% followed by bearish neckline break",
+                                 sl, _target_for(c, "SELL", sl))
+                            break
 
-            for (idx1, l1), (idx2, l2) in zip(lows_found, lows_found[1:]):
-                if abs(l1["low"] - l2["low"]) / min(l1["low"], l2["low"]) <= 0.005:
-                    neckline = max(w["high"] for w in prior[idx1:idx2 + 1])
-                    if bull and c["close"] > neckline:
-                        sl = min(l1["low"], l2["low"])
-                        _add(i, c, "VP-19 W-Pattern Double Bottom", "BUY",
-                             "Two swing lows within 0.5% followed by bullish neckline break",
-                             sl, _target_for(c, "BUY", sl))
-                        break
+                for (idx1, l1), (idx2, l2) in zip(lows_found, lows_found[1:]):
+                    if abs(l1["low"] - l2["low"]) / min(l1["low"], l2["low"]) <= 0.005:
+                        neckline = max(w["high"] for w in prior[idx1:idx2 + 1])
+                        if bull and c["close"] > neckline:
+                            sl = min(l1["low"], l2["low"])
+                            _add(i, c, "VP-19 W-Pattern Double Bottom", "BUY",
+                                 "Two swing lows within 0.5% followed by bullish neckline break",
+                                 sl, _target_for(c, "BUY", sl))
+                            break
 
         # ── VP-21 Extreme Candle Reversal (15m only) ─────────────────────────
         if i >= 21 and norm_interval == "15":

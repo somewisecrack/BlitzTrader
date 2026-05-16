@@ -871,11 +871,31 @@ class BlitzTrader:
         )
         occupied.discard(None)
 
+        trading_date_str = now.strftime("%Y-%m-%d")
         tradeable = []
         blocked = []
         queued_instruments = set()
         for sig in signals:
             sig_copy = dict(sig)
+            # ── Stale signal guard (filter layer, defence-in-depth) ──────────
+            sig_date = sig_copy.get("signal_date")
+            if sig_date and sig_date != trading_date_str:
+                sig_copy["blocked_reason"] = (
+                    f"Stale signal trigger candle: signal_date={sig_date}, "
+                    f"trading_date={trading_date_str}"
+                )
+                logger.info(
+                    "Stale signal trigger candle: signal_date=%s, trading_date=%s "
+                    "— strategy=%s sym=%s direction=%s — blocked at filter layer",
+                    sig_date,
+                    trading_date_str,
+                    sig_copy.get("strategy", ""),
+                    sig_copy.get("symbol", ""),
+                    sig_copy.get("direction", ""),
+                )
+                blocked.append(sig_copy)
+                continue
+            # ─────────────────────────────────────────────────────────────────
             instrument = self._logical_instrument(sig_copy.get("symbol", ""))
             if not instrument:
                 sig_copy["blocked_reason"] = "Unknown signal instrument"

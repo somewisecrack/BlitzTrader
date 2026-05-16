@@ -851,6 +851,81 @@ class MarketDataTools:
                 result[i] = e
             return result
 
+        def rsi_series(values, period=14):
+            """RSI series using Wilder smoothing. Returns list same length as values."""
+            n = len(values)
+            result = [None] * n
+            if n < period + 1:
+                return result
+            gains = [0.0] * n
+            losses = [0.0] * n
+            for idx in range(1, n):
+                d = values[idx] - values[idx - 1]
+                gains[idx] = max(d, 0.0)
+                losses[idx] = max(-d, 0.0)
+            avg_gain = sum(gains[1:period + 1]) / period
+            avg_loss = sum(losses[1:period + 1]) / period
+            if avg_loss == 0:
+                result[period] = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                result[period] = 100.0 - 100.0 / (1.0 + rs)
+            for idx in range(period + 1, n):
+                avg_gain = (avg_gain * (period - 1) + gains[idx]) / period
+                avg_loss = (avg_loss * (period - 1) + losses[idx]) / period
+                if avg_loss == 0:
+                    result[idx] = 100.0
+                else:
+                    rs = avg_gain / avg_loss
+                    result[idx] = 100.0 - 100.0 / (1.0 + rs)
+            return result
+
+        def adx_series(candle_list, period=14):
+            """ADX series using Wilder smoothing. Returns list same length as candle_list."""
+            n = len(candle_list)
+            result = [None] * n
+            if n < period * 2 + 1:
+                return result
+            dm_plus, dm_minus, trs = [], [], []
+            for idx in range(1, n):
+                h, l = candle_list[idx]["high"], candle_list[idx]["low"]
+                c_prev = candle_list[idx - 1]["close"]
+                up   = h - candle_list[idx - 1]["high"]
+                down = candle_list[idx - 1]["low"] - l
+                dm_plus.append(up   if up > down and up > 0   else 0.0)
+                dm_minus.append(down if down > up and down > 0 else 0.0)
+                trs.append(max(h - l, abs(h - c_prev), abs(l - c_prev)))
+
+            def _wilder(vals, p):
+                s = sum(vals[:p])
+                out = [s]
+                for v in vals[p:]:
+                    s = s - s / p + v
+                    out.append(s)
+                return out
+
+            atr_w = _wilder(trs,      period)
+            dip_w = _wilder(dm_plus,  period)
+            dim_w = _wilder(dm_minus, period)
+            dxs = []
+            for a, p_val, m in zip(atr_w, dip_w, dim_w):
+                if a == 0:
+                    dxs.append(0.0)
+                    continue
+                di_plus  = 100.0 * p_val / a
+                di_minus = 100.0 * m / a
+                denom = di_plus + di_minus
+                dxs.append(100.0 * abs(di_plus - di_minus) / denom if denom else 0.0)
+            if len(dxs) < period:
+                return result
+            adx_vals = _wilder(dxs, period)
+            adx_start = 2 * period
+            for k, adx_val in enumerate(adx_vals):
+                ci = adx_start + k
+                if ci < n:
+                    result[ci] = adx_val
+            return result
+
         def candle_stats(c):
             body = abs(c["close"] - c["open"])
             rng = c["high"] - c["low"]
@@ -894,6 +969,24 @@ class MarketDataTools:
 
         def add_signal(sym, interval, candle, strategy, direction, reason, stop_loss, target,
                        requires_volume_confirmation=False, candle_source=None):
+            # ── Session freshness gate ────────────────────────────────────────
+            # The candle that TRIGGERS/EMITS a signal must belong to today's
+            # NSE trading date (IST).  Historical candles may cross overnight
+            # for indicator warm-up but CANNOT emit signals.
+            # daily-first-hour signals use the latest candle which is always
+            # current, so they are exempt from this check.
+            if interval != "daily-first-hour":
+                _candle_ist_date = datetime.datetime.fromtimestamp(
+                    candle["time"], IST
+                ).strftime("%Y-%m-%d")
+                if _candle_ist_date != today_date:
+                    logger.debug(
+                        "Stale signal trigger candle: signal_date=%s, trading_date=%s "
+                        "— strategy=%s sym=%s direction=%s — not emitting",
+                        _candle_ist_date, today_date, strategy, sym, direction,
+                    )
+                    return
+            # ─────────────────────────────────────────────────────────────────
             # Daily-first-hour signals must use a date-based key (not candle time) because
             # latest["time"] changes every 3 min, which would re-emit the same signal ~104×/day.
             if interval == "daily-first-hour":
@@ -1038,9 +1131,11 @@ class MarketDataTools:
                 closes = [c["close"] for c in candles]
                 ranges = [c["high"] - c["low"] for c in candles]
                 volumes = [c.get("volume", 0) for c in candles]
-                e20_all = ema_series(closes, 20)
-                e50_all = ema_series(closes, 50)
+                e20_all  = ema_series(closes, 20)
+                e50_all  = ema_series(closes, 50)
                 e100_all = ema_series(closes, 100)
+                rsi14_all = rsi_series(closes, 14)
+                adx14_all = adx_series(candles, 14)
 
                 start = max(1, len(candles) - max(1, lookback_bars))
                 for i in range(start, len(candles)):
@@ -1051,6 +1146,8 @@ class MarketDataTools:
                     bull = c["close"] > c["open"]
                     bear = c["close"] < c["open"]
                     e20, e50, e100 = e20_all[i], e50_all[i], e100_all[i]
+                    rsi14_i = rsi14_all[i]
+                    adx14_i = adx14_all[i]
                     avg_vol20 = sum(volumes[max(0, i - 20):i]) / min(i, 20) if i else 0
                     has_volume = avg_vol20 > 0
                     tp_vol = sum(
@@ -1072,28 +1169,33 @@ class MarketDataTools:
                             sl = e50 if touched_ema20_long else e100
                             add_signal(sym, interval, c, "VP-05 3EMA Trend", "BUY",
                                        "EMA stack bullish and pin bar rejected EMA20/EMA50", sl, c["close"] + 2 * abs(c["close"] - sl))
+                        # VP-05 SELL: additionally requires RSI14 <= 40 (fail-closed if unavailable)
                         if bear_stack and upper > body and (touched_ema20_short or touched_ema50_short):
-                            sl = e50 if touched_ema20_short else e100
-                            add_signal(sym, interval, c, "VP-05 3EMA Trend", "SELL",
-                                       "EMA stack bearish and pin bar rejected EMA20/EMA50", sl, c["close"] - 2 * abs(sl - c["close"]))
+                            if rsi14_i is not None and rsi14_i <= 40:
+                                sl = e50 if touched_ema20_short else e100
+                                add_signal(sym, interval, c, "VP-05 3EMA Trend", "SELL",
+                                           "EMA stack bearish and pin bar rejected EMA20/EMA50", sl, c["close"] - 2 * abs(sl - c["close"]))
 
                     # VP-07: wicks pullback in EMA20 direction.
+                    # VP-07: wicks pullback — both BUY and SELL require ADX14 <= 30.
+                    # Fail closed if ADX is unavailable.
                     if i >= 10 and e20:
-                        masters = candles[i - 10:i]
-                        if bull and c["close"] > e20:
-                            for m in masters:
-                                m_body, _, _, m_lower = candle_stats(m)
-                                if m["close"] > m["open"] and m_body > 0 and m_lower > 2 * m_body and c["close"] > m["close"]:
-                                    add_signal(sym, interval, c, "VP-07 Wicks Pullback", "BUY",
-                                               "Bullish follow-through above lower-wick master candle and EMA20; confirm volume before trading", m["low"], c["close"] + 2 * (c["close"] - m["low"]), True)
-                                    break
-                        if bear and c["close"] < e20:
-                            for m in masters:
-                                m_body, _, m_upper, _ = candle_stats(m)
-                                if m["close"] < m["open"] and m_body > 0 and m_upper > 2 * m_body and c["close"] < m["close"]:
-                                    add_signal(sym, interval, c, "VP-07 Wicks Pullback", "SELL",
-                                               "Bearish follow-through below upper-wick master candle and EMA20; confirm volume before trading", m["high"], c["close"] - 2 * (m["high"] - c["close"]), True)
-                                    break
+                        if adx14_i is not None and adx14_i <= 30:
+                            masters = candles[i - 10:i]
+                            if bull and c["close"] > e20:
+                                for m in masters:
+                                    m_body, _, _, m_lower = candle_stats(m)
+                                    if m["close"] > m["open"] and m_body > 0 and m_lower > 2 * m_body and c["close"] > m["close"]:
+                                        add_signal(sym, interval, c, "VP-07 Wicks Pullback", "BUY",
+                                                   "Bullish follow-through above lower-wick master candle and EMA20; confirm volume before trading", m["low"], c["close"] + 2 * (c["close"] - m["low"]), True)
+                                        break
+                            if bear and c["close"] < e20:
+                                for m in masters:
+                                    m_body, _, m_upper, _ = candle_stats(m)
+                                    if m["close"] < m["open"] and m_body > 0 and m_upper > 2 * m_body and c["close"] < m["close"]:
+                                        add_signal(sym, interval, c, "VP-07 Wicks Pullback", "SELL",
+                                                   "Bearish follow-through below upper-wick master candle and EMA20; confirm volume before trading", m["high"], c["close"] - 2 * (m["high"] - c["close"]), True)
+                                        break
 
                     # VP-24: BANKNIFTY pivot bounce/rejection on preferred timeframes.
                     if sym == "BANKNIFTY" and interval in ("3", "5"):
@@ -1122,16 +1224,18 @@ class MarketDataTools:
                                        "Narrow CPR day; bearish upper-wick rejection near TC", sl, c["close"] - 2 * (sl - c["close"]))
 
                     # VP-01/02: counter trap against the largest recent opposite-color candle.
+                    # VP-01 SELL requires ADX14 <= 30 (fail-closed if unavailable).
                     if i >= 10 and e20:
                         recent = candles[i - 10:i]
                         green_bodies = [(abs(rc["close"] - rc["open"]), rc) for rc in recent if rc["close"] > rc["open"]]
                         red_bodies = [(abs(rc["close"] - rc["open"]), rc) for rc in recent if rc["close"] < rc["open"]]
                         if green_bodies and c["close"] < e20 and bear:
-                            _, trap = max(green_bodies, key=lambda item: item[0])
-                            if c["close"] < trap["close"]:
-                                add_signal(sym, interval, c, "VP-01 Counter Bull Trap", "SELL",
-                                           "Price below EMA20; bearish candle closed below largest recent green candle close",
-                                           c["high"], target_for(c, "SELL", c["high"]))
+                            if adx14_i is not None and adx14_i <= 30:
+                                _, trap = max(green_bodies, key=lambda item: item[0])
+                                if c["close"] < trap["close"]:
+                                    add_signal(sym, interval, c, "VP-01 Counter Bull Trap", "SELL",
+                                               "Price below EMA20; bearish candle closed below largest recent green candle close",
+                                               c["high"], target_for(c, "SELL", c["high"]))
                         if sym == "NIFTY" and interval == "3" and red_bodies and c["close"] > e20 and bull:
                             _, trap = max(red_bodies, key=lambda item: item[0])
                             if c["close"] > trap["close"]:
@@ -1202,13 +1306,17 @@ class MarketDataTools:
                                            c["high"], target_for(c, "SELL", c["high"]))
 
                     # VP-14/15: Morning/Evening Star 3-candle reversals.
+                    # VP-14 Morning Star BUY: disabled from live executable signals.
+                    # VP-15 Evening Star SELL: unchanged.
                     if i >= 2 and e20:
                         c1, c2, c3 = candles[i - 2], candles[i - 1], c
                         c1_body, c1_rng, _, _ = candle_stats(c1)
                         c2_body, c2_rng, _, _ = candle_stats(c2)
                         c3_body, _, _, _ = candle_stats(c3)
                         c2_small = c2_rng > 0 and c2_body < 0.3 * c2_rng
-                        if c1["close"] < c1["open"] and c2_small and bull and c3_body > 0.5 * c1_body and c["close"] > e20:
+                        # VP-14: intentionally NOT emitted — shadow/non-executable in live path.
+                        # Pattern is preserved for backtest re-enablement.
+                        if False and c1["close"] < c1["open"] and c2_small and bull and c3_body > 0.5 * c1_body and c["close"] > e20:  # noqa: SIM210
                             sl = min(c1["low"], c2["low"])
                             add_signal(sym, interval, c, "VP-14 Morning Star", "BUY",
                                        "3-candle Morning Star; use as support confluence, not standalone",
@@ -1220,29 +1328,32 @@ class MarketDataTools:
                                        sl, target_for(c, "SELL", sl))
 
                     # VP-18/19: double top / double bottom neckline breaks.
+                    # VP-18 SELL requires ADX14 <= 30; VP-19 BUY requires ADX14 <= 30.
+                    # Fail closed if ADX is unavailable.
                     if i >= 20:
                         window = candles[i - 20:i + 1]
                         prior = window[:-1]
                         highs_found = swing_highs(prior)
                         lows_found = swing_lows(prior)
-                        for (idx1, h1), (idx2, h2) in zip(highs_found, highs_found[1:]):
-                            if abs(h1["high"] - h2["high"]) / max(h1["high"], h2["high"]) <= 0.005:
-                                neckline = min(w["low"] for w in prior[idx1:idx2 + 1])
-                                if bear and c["close"] < neckline:
-                                    sl = max(h1["high"], h2["high"])
-                                    add_signal(sym, interval, c, "VP-18 M-Pattern Double Top", "SELL",
-                                               "Two swing highs within 0.5% followed by bearish neckline break",
-                                               sl, target_for(c, "SELL", sl))
-                                    break
-                        for (idx1, l1), (idx2, l2) in zip(lows_found, lows_found[1:]):
-                            if abs(l1["low"] - l2["low"]) / min(l1["low"], l2["low"]) <= 0.005:
-                                neckline = max(w["high"] for w in prior[idx1:idx2 + 1])
-                                if bull and c["close"] > neckline:
-                                    sl = min(l1["low"], l2["low"])
-                                    add_signal(sym, interval, c, "VP-19 W-Pattern Double Bottom", "BUY",
-                                               "Two swing lows within 0.5% followed by bullish neckline break",
-                                               sl, target_for(c, "BUY", sl))
-                                    break
+                        if adx14_i is not None and adx14_i <= 30:
+                            for (idx1, h1), (idx2, h2) in zip(highs_found, highs_found[1:]):
+                                if abs(h1["high"] - h2["high"]) / max(h1["high"], h2["high"]) <= 0.005:
+                                    neckline = min(w["low"] for w in prior[idx1:idx2 + 1])
+                                    if bear and c["close"] < neckline:
+                                        sl = max(h1["high"], h2["high"])
+                                        add_signal(sym, interval, c, "VP-18 M-Pattern Double Top", "SELL",
+                                                   "Two swing highs within 0.5% followed by bearish neckline break",
+                                                   sl, target_for(c, "SELL", sl))
+                                        break
+                            for (idx1, l1), (idx2, l2) in zip(lows_found, lows_found[1:]):
+                                if abs(l1["low"] - l2["low"]) / min(l1["low"], l2["low"]) <= 0.005:
+                                    neckline = max(w["high"] for w in prior[idx1:idx2 + 1])
+                                    if bull and c["close"] > neckline:
+                                        sl = min(l1["low"], l2["low"])
+                                        add_signal(sym, interval, c, "VP-19 W-Pattern Double Bottom", "BUY",
+                                                   "Two swing lows within 0.5% followed by bullish neckline break",
+                                                   sl, target_for(c, "BUY", sl))
+                                        break
 
                     # VP-21: extreme candle reversal, systematic mainly on BANKNIFTY 15m.
                     if i >= 21 and interval == "15":
