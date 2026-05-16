@@ -58,27 +58,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 class TestConfigConstants(unittest.TestCase):
     """All pairs-related config constants must exist and have sane values."""
 
-    def test_pairs_capital(self):
-        from config import PAIRS_CAPITAL
-        self.assertEqual(PAIRS_CAPITAL, 500_000)
+    def test_pairs_base_capital(self):
+        from config import PAIRS_BASE_CAPITAL
+        self.assertEqual(PAIRS_BASE_CAPITAL, 500_000)
 
     def test_pairs_leverage(self):
         from config import PAIRS_LEVERAGE
         self.assertEqual(PAIRS_LEVERAGE, 2)
 
     def test_pairs_gross_capital(self):
-        from config import PAIRS_CAPITAL, PAIRS_LEVERAGE, PAIRS_GROSS_CAPITAL
+        from config import PAIRS_BASE_CAPITAL, PAIRS_LEVERAGE, PAIRS_GROSS_CAPITAL
         self.assertEqual(PAIRS_GROSS_CAPITAL, 1_000_000)
-        self.assertEqual(PAIRS_GROSS_CAPITAL, PAIRS_CAPITAL * PAIRS_LEVERAGE)
+        self.assertEqual(PAIRS_GROSS_CAPITAL, PAIRS_BASE_CAPITAL * PAIRS_LEVERAGE)
 
-    def test_max_open_pairs(self):
-        from config import MAX_OPEN_PAIRS
-        self.assertEqual(MAX_OPEN_PAIRS, 10)
+    def test_no_max_open_pairs_constant(self):
+        """MAX_OPEN_PAIRS removed — no hard cap on number of pairs."""
+        import config
+        self.assertFalse(
+            hasattr(config, "MAX_OPEN_PAIRS"),
+            "MAX_OPEN_PAIRS should have been removed from config",
+        )
 
-    def test_per_pair_capital(self):
-        from config import PAIRS_GROSS_CAPITAL, PER_PAIR_CAPITAL, MAX_OPEN_PAIRS
-        self.assertEqual(PER_PAIR_CAPITAL, 100_000)
-        self.assertAlmostEqual(PER_PAIR_CAPITAL, PAIRS_GROSS_CAPITAL / MAX_OPEN_PAIRS)
+    def test_no_per_pair_capital_constant(self):
+        """PER_PAIR_CAPITAL removed — allocation is dynamic."""
+        import config
+        self.assertFalse(
+            hasattr(config, "PER_PAIR_CAPITAL"),
+            "PER_PAIR_CAPITAL should have been removed from config",
+        )
 
     def test_pairs_state_file_is_path(self):
         from config import PAIRS_STATE_FILE

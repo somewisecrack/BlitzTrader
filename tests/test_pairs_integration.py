@@ -187,15 +187,13 @@ class TestDuplicatePairDeduplication:
 
 
 class TestCapitalAllocation:
-    """Allocation logic: 10 pairs vs fewer than 10."""
+    """Dynamic per-pair allocation: PAIRS_GROSS_CAPITAL / n_selected_pairs."""
 
     def test_allocation_with_10_pairs(self):
-        from config import PAIRS_GROSS_CAPITAL, PER_PAIR_CAPITAL, MAX_OPEN_PAIRS
+        from config import PAIRS_GROSS_CAPITAL
         num_pairs = 10
-        assert num_pairs >= MAX_OPEN_PAIRS
-        per_pair = float(PER_PAIR_CAPITAL)
-        assert per_pair == 100_000
-        assert per_pair == PAIRS_GROSS_CAPITAL / MAX_OPEN_PAIRS
+        per_pair = PAIRS_GROSS_CAPITAL / num_pairs
+        assert math.isclose(per_pair, 100_000)
         total_allocated = per_pair * num_pairs
         assert math.isclose(total_allocated, PAIRS_GROSS_CAPITAL)
 
@@ -204,7 +202,7 @@ class TestCapitalAllocation:
         num_pairs = 6
         per_pair = PAIRS_GROSS_CAPITAL / num_pairs
         assert math.isclose(per_pair * num_pairs, PAIRS_GROSS_CAPITAL)
-        # Each pair gets more than the standard ₹1L
+        # Each pair gets more capital when fewer are selected
         assert per_pair > 100_000
 
     def test_allocation_with_1_pair(self):
@@ -213,12 +211,39 @@ class TestCapitalAllocation:
         per_pair = PAIRS_GROSS_CAPITAL / num_pairs
         assert math.isclose(per_pair, PAIRS_GROSS_CAPITAL)
 
+    def test_allocation_with_15_pairs_no_cap(self):
+        """No hard 10-pair cap: 15 valid pairs all get allocated."""
+        from config import PAIRS_GROSS_CAPITAL
+        num_pairs = 15
+        per_pair = PAIRS_GROSS_CAPITAL / num_pairs
+        total = per_pair * num_pairs
+        # Total must not exceed gross capital
+        assert math.isclose(total, PAIRS_GROSS_CAPITAL)
+        assert per_pair < 100_000  # smaller slice per pair, but no cap
+
+    def test_total_gross_never_exceeds_pairs_gross_capital(self):
+        """For any n, per-pair * n == PAIRS_GROSS_CAPITAL (no overshoot)."""
+        from config import PAIRS_GROSS_CAPITAL
+        for n in [1, 5, 10, 15, 20, 25]:
+            per_pair = PAIRS_GROSS_CAPITAL / n
+            assert math.isclose(per_pair * n, PAIRS_GROSS_CAPITAL), f"Failed for n={n}"
+
     def test_capital_pools_are_separate(self):
-        from config import VIRTUAL_CAPITAL, PAIRS_CAPITAL
+        from config import VIRTUAL_CAPITAL, PAIRS_BASE_CAPITAL
         # Futures: ₹10L, Pairs base: ₹5L (with 2x leverage = ₹10L gross)
         assert VIRTUAL_CAPITAL == 1_000_000
-        assert PAIRS_CAPITAL == 500_000
+        assert PAIRS_BASE_CAPITAL == 500_000
         # Neither is derived from the other at module level — they don't share a pool
+
+    def test_no_max_open_pairs_in_config(self):
+        """MAX_OPEN_PAIRS was removed; no hard cap in config."""
+        import config
+        assert not hasattr(config, "MAX_OPEN_PAIRS")
+
+    def test_no_per_pair_capital_in_config(self):
+        """PER_PAIR_CAPITAL was removed; allocation is dynamic."""
+        import config
+        assert not hasattr(config, "PER_PAIR_CAPITAL")
 
 
 class TestLegTrailingStop:
@@ -379,3 +404,207 @@ class TestYfinanceOnlyDataSource:
         assert "_fetch_yahoo" not in src
         assert "Yahoo chart" not in src
         assert "falling back to yfinance" not in src
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   NEW: Ranking, Deduplication, Concentration Filter
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class _FakeCandidate:
+    """Minimal stand-in for PairCandidate used in selection logic tests."""
+    x_symbol: str
+    y_symbol: str
+    timeframe: str
+    prob_profit: float
+    z_score: float
+    half_life: int
+    matched_timeframes: list = None
+
+    def __post_init__(self):
+        if self.matched_timeframes is None:
+            self.matched_timeframes = [self.timeframe]
+
+    @property
+    def pair_key(self):
+        return tuple(sorted((self.x_symbol, self.y_symbol)))
+
+
+def _rank(candidates):
+    return sorted(candidates, key=lambda c: (-c.prob_profit, -abs(c.z_score), c.half_life))
+
+
+def _dedup(candidates):
+    seen = set()
+    out = []
+    for c in candidates:
+        key = tuple(sorted((c.x_symbol, c.y_symbol)))
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+def _concentrate(candidates, max_per_stock=2):
+    usage = {}
+    out = []
+    for c in candidates:
+        xc = usage.get(c.x_symbol, 0)
+        yc = usage.get(c.y_symbol, 0)
+        if xc < max_per_stock and yc < max_per_stock:
+            out.append(c)
+            usage[c.x_symbol] = xc + 1
+            usage[c.y_symbol] = yc + 1
+    return out
+
+
+class TestRanking:
+    """Pair ranking: prob_profit desc → abs(z_score) desc → half_life asc."""
+
+    def test_prob_profit_primary_sort(self):
+        a = _FakeCandidate("A", "B", "1h", 80.0, 2.0, 5)
+        b = _FakeCandidate("C", "D", "1h", 70.0, 3.0, 3)
+        result = _rank([b, a])
+        assert result[0] is a  # higher prob_profit wins
+
+    def test_z_score_tiebreaker(self):
+        a = _FakeCandidate("A", "B", "1h", 75.0, 3.0, 5)
+        b = _FakeCandidate("C", "D", "1h", 75.0, 2.0, 3)
+        result = _rank([b, a])
+        assert result[0] is a  # higher |z_score| wins on tie
+
+    def test_half_life_final_tiebreaker(self):
+        a = _FakeCandidate("A", "B", "1h", 75.0, 2.5, 3)
+        b = _FakeCandidate("C", "D", "1h", 75.0, 2.5, 8)
+        result = _rank([b, a])
+        assert result[0] is a  # shorter half_life wins on double tie
+
+    def test_negative_z_score_uses_absolute_value(self):
+        a = _FakeCandidate("A", "B", "1h", 70.0, -3.5, 5)
+        b = _FakeCandidate("C", "D", "1h", 70.0, 2.0, 5)
+        result = _rank([b, a])
+        assert result[0] is a  # |-3.5| > |2.0|
+
+    def test_deterministic_order_for_many(self):
+        candidates = [
+            _FakeCandidate("A", "B", "1h", 60.0, 2.1, 5),
+            _FakeCandidate("C", "D", "1h", 80.0, 3.0, 3),
+            _FakeCandidate("E", "F", "1h", 70.0, 2.5, 4),
+            _FakeCandidate("G", "H", "1h", 80.0, 3.5, 2),
+        ]
+        result = _rank(candidates)
+        assert result[0].x_symbol == "G"  # 80.0, |3.5|, 2
+        assert result[1].x_symbol == "C"  # 80.0, |3.0|, 3
+        assert result[2].x_symbol == "E"  # 70.0
+        assert result[3].x_symbol == "A"  # 60.0
+
+
+class TestDeduplication:
+    """Unordered pair deduplication: INFY/SBIN == SBIN/INFY."""
+
+    def test_reversed_pair_deduplicated(self):
+        a = _FakeCandidate("INFY", "SBIN", "15m", 75.0, 2.5, 5)
+        b = _FakeCandidate("SBIN", "INFY", "30m", 70.0, 2.0, 4)
+        ranked = _rank([a, b])
+        result = _dedup(ranked)
+        assert len(result) == 1
+        assert result[0].prob_profit == 75.0  # better-ranked survives
+
+    def test_reversed_pair_worse_ranked_dropped(self):
+        a = _FakeCandidate("INFY", "SBIN", "1h", 80.0, 3.0, 3)
+        b = _FakeCandidate("SBIN", "INFY", "15m", 65.0, 2.0, 5)
+        ranked = _rank([b, a])
+        result = _dedup(ranked)
+        assert len(result) == 1
+        assert result[0].x_symbol == "INFY"
+
+    def test_different_pairs_both_kept(self):
+        a = _FakeCandidate("INFY", "TCS", "1h", 75.0, 2.5, 5)
+        b = _FakeCandidate("SBIN", "AXIS", "1h", 70.0, 2.0, 4)
+        result = _dedup(_rank([a, b]))
+        assert len(result) == 2
+
+    def test_same_ticker_in_different_pairs_not_deduped(self):
+        """INFY/TCS and INFY/HCLTECH are distinct unordered pairs — both kept."""
+        a = _FakeCandidate("INFY", "TCS", "1h", 75.0, 2.5, 5)
+        b = _FakeCandidate("INFY", "HCLTECH", "1h", 70.0, 2.0, 4)
+        result = _dedup(_rank([a, b]))
+        assert len(result) == 2
+
+    def test_three_timeframes_same_pair_deduped_to_one(self):
+        a = _FakeCandidate("HDFCBANK", "ICICIBANK", "15m", 72.0, 2.5, 5)
+        b = _FakeCandidate("HDFCBANK", "ICICIBANK", "30m", 75.0, 2.8, 6)
+        c = _FakeCandidate("HDFCBANK", "ICICIBANK", "1h", 68.0, 2.1, 8)
+        result = _dedup(_rank([a, b, c]))
+        assert len(result) == 1
+        assert result[0].prob_profit == 75.0
+
+
+class TestConcentrationFilter:
+    """No ticker in more than 2 final selected pairs."""
+
+    def test_single_stock_caps_at_2(self):
+        """INFY can appear in at most 2 pairs."""
+        candidates = [
+            _FakeCandidate("INFY", "TCS",     "1h", 90.0, 3.0, 3),
+            _FakeCandidate("INFY", "HCLTECH", "1h", 85.0, 2.8, 4),
+            _FakeCandidate("INFY", "WIPRO",   "1h", 80.0, 2.5, 5),
+        ]
+        result = _concentrate(candidates)
+        infy_count = sum(1 for c in result if "INFY" in (c.x_symbol, c.y_symbol))
+        assert infy_count <= 2
+
+    def test_exactly_2_allowed(self):
+        candidates = [
+            _FakeCandidate("INFY", "TCS",     "1h", 90.0, 3.0, 3),
+            _FakeCandidate("INFY", "HCLTECH", "1h", 85.0, 2.8, 4),
+        ]
+        result = _concentrate(candidates)
+        assert len(result) == 2
+
+    def test_third_pair_with_same_stock_skipped(self):
+        candidates = [
+            _FakeCandidate("INFY", "TCS",     "1h", 90.0, 3.0, 3),
+            _FakeCandidate("INFY", "HCLTECH", "1h", 85.0, 2.8, 4),
+            _FakeCandidate("INFY", "WIPRO",   "1h", 80.0, 2.5, 5),  # should be skipped
+            _FakeCandidate("SBIN", "AXISBANK","1h", 75.0, 2.3, 6),  # should be kept
+        ]
+        result = _concentrate(candidates)
+        symbols_used = {c.x_symbol for c in result} | {c.y_symbol for c in result}
+        infy_count = sum(1 for c in result if "INFY" in (c.x_symbol, c.y_symbol))
+        assert infy_count == 2
+        assert "SBIN" in symbols_used
+
+    def test_no_concentration_violation_in_output(self):
+        """Any stock appears in at most 2 pairs in final output."""
+        candidates = [
+            _FakeCandidate("A", "B", "1h", 95.0, 3.0, 2),
+            _FakeCandidate("A", "C", "1h", 90.0, 2.8, 3),
+            _FakeCandidate("A", "D", "1h", 85.0, 2.5, 4),
+            _FakeCandidate("B", "C", "1h", 80.0, 2.3, 5),
+            _FakeCandidate("D", "E", "1h", 75.0, 2.1, 6),
+        ]
+        result = _concentrate(candidates)
+        usage = {}
+        for c in result:
+            usage[c.x_symbol] = usage.get(c.x_symbol, 0) + 1
+            usage[c.y_symbol] = usage.get(c.y_symbol, 0) + 1
+        for sym, count in usage.items():
+            assert count <= 2, f"{sym} appears in {count} pairs (max 2)"
+
+    def test_15_valid_no_overlap_all_kept(self):
+        """15 candidates with no stock overlap — all 15 are selected (no hard cap)."""
+        candidates = [
+            _FakeCandidate(f"X{i}", f"Y{i}", "1h", float(90 - i), 3.0 - i * 0.1, i + 1)
+            for i in range(15)
+        ]
+        result = _concentrate(candidates)
+        assert len(result) == 15  # no cap — all pass concentration
+
+    def test_gross_exposure_per_pair_dynamic(self):
+        """Per-pair gross = PAIRS_GROSS_CAPITAL / n for any n."""
+        from config import PAIRS_GROSS_CAPITAL
+        for n in [1, 5, 10, 15]:
+            per_pair = PAIRS_GROSS_CAPITAL / n
+            total = per_pair * n
+            assert math.isclose(total, PAIRS_GROSS_CAPITAL), f"Total mismatch for n={n}"

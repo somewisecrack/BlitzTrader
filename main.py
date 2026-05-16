@@ -37,7 +37,7 @@ from config import (
     JOURNALS_DIR,
     LOGS_DIR,
     MIN_FREE_DISK_MB,
-    PAIRS_CAPITAL,
+    PAIRS_BASE_CAPITAL,
     PAIRS_GROSS_CAPITAL,
     PAIRS_LEVERAGE,
     PAIRS_STATE_FILE,
@@ -421,7 +421,7 @@ class BlitzTrader:
         logger.info(
             "STARTUP CONFIG: "
             f"Futures capital ₹{VIRTUAL_CAPITAL:,.0f} | "
-            f"Pairs base capital ₹{PAIRS_CAPITAL:,.0f} (gross ₹{PAIRS_GROSS_CAPITAL:,.0f} with {PAIRS_LEVERAGE}x leverage) | "
+            f"Pairs base capital ₹{PAIRS_BASE_CAPITAL:,.0f} (gross ₹{PAIRS_GROSS_CAPITAL:,.0f} with {PAIRS_LEVERAGE}x leverage) | "
             f"State file: {STATE_FILE}"
         )
 
@@ -536,7 +536,7 @@ class BlitzTrader:
                 f"Futures capital: ₹{capital:,.2f}",
                 f"Available balance: ₹{available_balance:,.2f}",
                 f"Margin used: ₹{margin_used:,.2f}",
-                f"Pairs capital: ₹{PAIRS_CAPITAL:,.0f} base (₹{PAIRS_GROSS_CAPITAL:,.0f} gross @ {PAIRS_LEVERAGE}x)",
+                f"Pairs capital: ₹{PAIRS_BASE_CAPITAL:,.0f} base (₹{PAIRS_GROSS_CAPITAL:,.0f} gross @ {PAIRS_LEVERAGE}x)",
             ])
         if wants_status or not wants_capital:
             lines.extend([

@@ -606,25 +606,26 @@ class TestPromoteWritesJSON:
 
 class TestPairsFilesUnchangedGit:
 
-    def test_pairs_files_unchanged(self):
-        """Verify pairs/portfolio.py and pairs/__init__.py are unmodified.
+    def test_pairs_init_unchanged(self):
+        """Verify pairs/__init__.py is unmodified by futures-wiki changes.
+
+        pairs/portfolio.py is intentionally modified for the pairs selection
+        logic update (dynamic allocation, dedup, concentration filter) and is
+        excluded from this guard.
 
         pairs/scanner.py is excluded because it is intentionally modified to
         remove the direct Yahoo Chart API path (keeping yfinance as sole source).
-        That change is not a futures-wiki change; it is tracked separately.
 
-        config.py is excluded from this guard because futures-side constants
-        (e.g. MAX_DAILY_TRADES) may be legitimately removed without affecting
-        pairs trading logic.
+        config.py is excluded from this guard because pairs/futures constants
+        may be legitimately changed without affecting futures trading logic.
         """
         result = subprocess.run(
-            ["git", "diff", "--name-only", "--",
-             "pairs/portfolio.py", "pairs/__init__.py"],
+            ["git", "diff", "--name-only", "--", "pairs/__init__.py"],
             capture_output=True, text=True,
             cwd=str(_REPO_ROOT),
         )
         assert result.stdout.strip() == "", (
-            f"Pairs portfolio/init files were modified unexpectedly: {result.stdout}"
+            f"pairs/__init__.py was modified unexpectedly: {result.stdout}"
         )
 
 

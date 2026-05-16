@@ -9,13 +9,11 @@ from pathlib import Path
 
 from config import (
     JOURNALS_DIR,
-    MAX_OPEN_PAIRS,
-    PAIRS_CAPITAL,
+    PAIRS_BASE_CAPITAL,
     PAIRS_GROSS_CAPITAL,
     PAIRS_EXCHANGE,
     PAIRS_PRODUCT,
     PAIRS_STATE_FILE,
-    PER_PAIR_CAPITAL,
 )
 from broker.shoonya_client import ResolvedScrip, ShoonyaClient
 from pairs.scanner import PairCandidate
@@ -61,8 +59,47 @@ class PairPosition:
 class PairPortfolio:
     def __init__(self, state_file: Path = PAIRS_STATE_FILE):
         self._state_file = state_file
-        self.capital = PAIRS_GROSS_CAPITAL  # Use gross deployable capital for position sizing
+        self.capital = PAIRS_GROSS_CAPITAL  # gross deployable capital (base * leverage)
         self.positions: list[PairPosition] = []
+
+    @staticmethod
+    def _rank_candidates(candidates: list[PairCandidate]) -> list[PairCandidate]:
+        """Rank by prob_profit desc, abs(z_score) desc, half_life asc (deterministic)."""
+        return sorted(
+            candidates,
+            key=lambda c: (-c.prob_profit, -abs(c.z_score), c.half_life),
+        )
+
+    @staticmethod
+    def _deduplicate_unordered(candidates: list[PairCandidate]) -> list[PairCandidate]:
+        """Keep only the better-ranked candidate for each unordered pair (A/B == B/A).
+
+        Candidates must be pre-ranked; first occurrence wins (it is the better rank).
+        """
+        seen: set[tuple[str, str]] = set()
+        deduped: list[PairCandidate] = []
+        for c in candidates:
+            key = tuple(sorted((c.x_symbol, c.y_symbol)))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(c)
+        return deduped
+
+    @staticmethod
+    def _apply_concentration_filter(
+        candidates: list[PairCandidate], max_per_stock: int = 2
+    ) -> list[PairCandidate]:
+        """Greedy selection: no ticker may appear in more than max_per_stock final pairs."""
+        usage: dict[str, int] = {}
+        selected: list[PairCandidate] = []
+        for c in candidates:
+            x_count = usage.get(c.x_symbol, 0)
+            y_count = usage.get(c.y_symbol, 0)
+            if x_count < max_per_stock and y_count < max_per_stock:
+                selected.append(c)
+                usage[c.x_symbol] = x_count + 1
+                usage[c.y_symbol] = y_count + 1
+        return selected
 
     def allocate_and_open(
         self, client: ShoonyaClient, candidates: list[PairCandidate]
@@ -70,11 +107,26 @@ class PairPortfolio:
         if not candidates:
             logger.warning("No candidates to allocate")
             return []
-        selected = candidates[:MAX_OPEN_PAIRS]
-        if len(selected) >= MAX_OPEN_PAIRS:
-            per_pair_capital = float(PER_PAIR_CAPITAL)
-        else:
-            per_pair_capital = float(self.capital / len(selected))
+
+        # 1. Rank deterministically
+        ranked = self._rank_candidates(candidates)
+        # 2. Deduplicate unordered pairs (INFY/SBIN == SBIN/INFY — keep better-ranked)
+        deduped = self._deduplicate_unordered(ranked)
+        # 3. Stock concentration filter: no ticker in > 2 final selected pairs
+        selected = self._apply_concentration_filter(deduped, max_per_stock=2)
+
+        if not selected:
+            logger.warning("No pairs survived ranking/dedup/concentration filters")
+            return []
+
+        # 4. Dynamic per-pair allocation: never exceed gross capital
+        per_pair_capital = float(PAIRS_GROSS_CAPITAL / len(selected))
+        logger.info(
+            "Selected %d pairs after filters; per-pair gross = ₹%,.0f",
+            len(selected),
+            per_pair_capital,
+        )
+
         opened: list[PairPosition] = []
         for candidate in selected:
             pos = self._open_candidate(client, candidate, per_pair_capital)

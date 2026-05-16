@@ -140,11 +140,11 @@ MAX_POSITIONS = 3
 
 # Capital (independent pool — does not share with VIRTUAL_CAPITAL)
 # Base capital pool with 2:1 leverage for gross exposure
-PAIRS_CAPITAL = 500_000              # ₹5,00,000 (base capital)
+PAIRS_BASE_CAPITAL = 500_000         # ₹5,00,000 (base capital)
 PAIRS_LEVERAGE = 2                   # 2:1 leverage ratio
-PAIRS_GROSS_CAPITAL = PAIRS_CAPITAL * PAIRS_LEVERAGE  # ₹10,00,000 (total deployable)
-MAX_OPEN_PAIRS = 10
-PER_PAIR_CAPITAL = PAIRS_GROSS_CAPITAL / MAX_OPEN_PAIRS  # ₹1,00,000 per pair gross notional
+PAIRS_GROSS_CAPITAL = PAIRS_BASE_CAPITAL * PAIRS_LEVERAGE  # ₹10,00,000 (total deployable)
+# Per-pair allocation is computed dynamically: PAIRS_GROSS_CAPITAL / n_selected_pairs
+# No hard cap on number of pairs — concentration rule limits via stock-level check
 
 PAIRS_STATE_FILE = RUNTIME_STORAGE_DIR / "pairs_state.json"
 PAIRS_EXCHANGE = "NSE"
