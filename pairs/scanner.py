@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import combinations
 
 import numpy as np
@@ -25,6 +27,7 @@ from config import (
     BATCH_SIZE,
     BLOCK_LEN_FACTOR,
     ENSEMBLE_M,
+    HALF_LIFE_MAX_BARS,
     HURST_LIMIT,
     INTERVAL_PERIODS,
     MAX_TOTAL_SIMS,
@@ -33,6 +36,7 @@ from config import (
     PAIR_INTERVALS,
     PAIR_SCREEN_TOP_N,
     RNG_SEED,
+    RUNTIME_STORAGE_DIR,
     SIMS_PER_DRAW,
     USE_BOOTSTRAP_RESID,
     Z_SCORE_LIMIT,
@@ -306,6 +310,14 @@ class PairScanner:
         half_life = max(1, int(round(-np.log(2) / b))) if b != 0 else 1
         half_life = min(half_life, max(1, len(spread) // 3))
 
+        hl_max = HALF_LIFE_MAX_BARS[interval]
+        if half_life >= hl_max:
+            logger.info(
+                "Rejecting pair %s/%s for interval %s: half_life %s >= max %s",
+                x_sym, y_sym, interval, half_life, hl_max,
+            )
+            return None
+
         rolling_mean = spread.rolling(window=half_life, min_periods=max(1, half_life // 2)).mean()
         rolling_std = spread.rolling(window=half_life, min_periods=max(1, half_life // 2)).std()
         current_std = rolling_std.iloc[-1]
@@ -475,8 +487,36 @@ class PairScanner:
                     candidate.matched_timeframes = sorted(set(existing.matched_timeframes + candidate.matched_timeframes))
                     merged[key] = candidate
 
-        return sorted(
+        final = sorted(
             merged.values(),
             key=lambda c: (c.prob_profit, abs(c.z_score), -c.half_life),
             reverse=True,
         )
+
+        try:
+            today_date = datetime.now().strftime("%Y%m%d")
+            artifact_path = RUNTIME_STORAGE_DIR / f"pairs_scan_{today_date}.json"
+            records = []
+            for rank, c in enumerate(final, start=1):
+                records.append({
+                    "rank": rank,
+                    "x_symbol": c.x_symbol,
+                    "y_symbol": c.y_symbol,
+                    "timeframe": c.timeframe,
+                    "method": c.method,
+                    "z_score": c.z_score,
+                    "beta": c.beta,
+                    "half_life": c.half_life,
+                    "prob_profit": c.prob_profit,
+                    "prob_profit_low": c.prob_profit_low,
+                    "prob_profit_high": c.prob_profit_high,
+                    "price_corr": c.price_corr,
+                    "return_corr": c.return_corr,
+                    "matched_timeframes": c.matched_timeframes,
+                })
+            artifact_path.write_text(json.dumps(records, indent=2))
+            logger.info("Wrote scan artifact: %s (%d candidates)", artifact_path, len(records))
+        except Exception as exc:
+            logger.warning("Failed to write scan artifact: %s", exc)
+
+        return final

@@ -155,11 +155,19 @@ PAIR_SCAN_TIME  = "08:30"    # yfinance pre-market scan
 PAIR_ENTRY_TIME = "09:15"    # open positions at market open
 PAIR_EXIT_TIME  = "15:15"    # forced EOD close
 
-PAIR_INTERVALS = ("15m", "30m", "1h")
+PAIR_INTERVALS = ("5m", "15m", "30m", "1h")
 INTERVAL_PERIODS = {
+    "5m":  "60d",
     "15m": "60d",
     "30m": "60d",
     "1h":  "1y",
+}
+
+HALF_LIFE_MAX_BARS = {
+    "5m":  72,   # 6h × 12 bars/h
+    "15m": 24,   # 6h × 4 bars/h
+    "30m": 12,   # 6h × 2 bars/h
+    "1h":  6,    # 6h × 1 bar/h
 }
 
 # NIFTY 50 universe for the pairs scanner (yfinance base symbols, no .NS suffix)

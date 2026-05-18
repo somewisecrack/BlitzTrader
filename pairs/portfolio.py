@@ -54,6 +54,7 @@ class PairPosition:
     closed_at: str | None = None
     pnl: float | None = None
     matched_timeframes: list[str] = field(default_factory=list)
+    half_life: int = 0
 
 
 class PairPortfolio:
@@ -356,6 +357,7 @@ class PairPortfolio:
             capital_reserved=round(pair_capital, 2),
             opened_at=datetime.now().isoformat(),
             matched_timeframes=sorted(candidate.matched_timeframes),
+            half_life=candidate.half_life,
         )
         logger.info(
             "OPEN %s long=%s x%s @ %.2f short=%s x%s @ %.2f margin=%.2f",
@@ -472,6 +474,7 @@ class PairPortfolio:
                 f"- Timeframe: `{pos.timeframe}` (matched: {', '.join(pos.matched_timeframes)})",
                 f"- Method: `{pos.method}`",
                 f"- Z-score: `{pos.z_score}` | Beta: `{pos.beta}` | P(profit): `{pos.prob_profit}%` (`{pos.prob_profit_low}%–{pos.prob_profit_high}%`)",
+                f"- Half-life: `{pos.half_life}` bars",
                 f"- Capital reserved: `₹{pos.capital_reserved:,.2f}`",
                 f"- Long: `{pos.long_leg.symbol}` x {pos.long_leg.qty} @ ₹{pos.long_leg.entry_price:.2f}",
                 f"- Short: `{pos.short_leg.symbol}` x {pos.short_leg.qty} @ ₹{pos.short_leg.entry_price:.2f}",
@@ -494,6 +497,7 @@ class PairPortfolio:
         for pos in positions:
             lines.extend([
                 f"### Closed {pos.pair_name}",
+                f"- Half-life: `{pos.half_life}` bars",
                 f"- Long exit: `{pos.long_leg.symbol}` @ ₹{pos.long_leg.exit_price:.2f}",
                 f"- Short exit: `{pos.short_leg.symbol}` @ ₹{pos.short_leg.exit_price:.2f}",
                 f"- P&L: `₹{pos.pnl:+,.2f}`",
