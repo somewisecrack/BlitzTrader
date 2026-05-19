@@ -89,6 +89,12 @@ from tools.registry import ToolRegistry
 from tools.market_calendar import get_market_holiday_name, is_nse_trading_day
 from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
+from tools.position_serial import (
+    build_status_message,
+    save_position_index,
+    load_position_index,
+    invalidate_position_index,
+)
 from context_builder import (
     SYSTEM_PROMPT,
     build_chat_context,
@@ -393,6 +399,10 @@ class BlitzTrader:
             strategy_reader=strategy,
             memory_reader=memory,
             goal_manager=self._goals,
+            pairs_portfolio=self._pairs_portfolio,
+            live_feed=self._feed,
+            shoonya_client=self._shoonya,
+            active_tokens=self._active_tokens,
         )
 
         # 12. Agent loop
@@ -499,10 +509,41 @@ class BlitzTrader:
         Answer common operational questions without Gemini.
 
         This keeps Telegram useful even when Gemini is slow, capped, or disabled.
+        Also handles exit-by-serial commands deterministically.
         """
+        import re as _re
         if not self._telegram or not self._state:
             return False
         text = " ".join((m.get("text") or "").lower() for m in chat_messages)
+
+        # ── Exit-by-serial: "exit 2", "close position 2", "square off #3", "close serial 2" ──
+        exit_patterns = [
+            r'\bexit\s+#?(\d+)\b',
+            r'\bclose\s+(?:position\s+|serial\s+)?#?(\d+)\b',
+            r'\bsquare\s+off\s+#?(\d+)\b',
+        ]
+        for pattern in exit_patterns:
+            m = _re.search(pattern, text)
+            if m:
+                serial = int(m.group(1))
+                logger.info("Exit-by-serial command detected: serial=%d", serial)
+                from tools.position_serial import exit_position_by_serial as _exit_serial
+                result = _exit_serial(
+                    serial=serial,
+                    state_manager=self._state,
+                    pairs_portfolio=self._pairs_portfolio,
+                    order_execution=self._order_exec,
+                    shoonya_client=self._shoonya,
+                    telegram_handler=self._telegram,
+                    active_tokens=self._active_tokens,
+                    live_feed=self._feed,
+                )
+                if not result.get("success"):
+                    self._telegram.send_telegram(
+                        f"Cannot exit serial #{serial}: {result.get('error', 'Unknown error')}"
+                    )
+                return True
+
         wants_capital = any(
             phrase in text
             for phrase in (
@@ -521,6 +562,38 @@ class BlitzTrader:
         if not wants_status and not wants_capital:
             return False
 
+        # Use serial-numbered status format for status/positions requests
+        if wants_status and self._order_exec and self._pairs_portfolio:
+            try:
+                msg, index_payload = build_status_message(
+                    state_manager=self._state,
+                    pairs_portfolio=self._pairs_portfolio,
+                    live_feed=self._feed,
+                    shoonya_client=self._shoonya,
+                    active_tokens=self._active_tokens,
+                )
+                if wants_capital:
+                    # Prepend capital info
+                    state = self._state.get_state()
+                    capital = float(state.get("virtual_capital", 0) or 0)
+                    available_balance = float(state.get("available_balance", 0) or 0)
+                    margin_used = float(state.get("margin_used", 0) or 0)
+                    cap_lines = [
+                        f"Futures capital: ₹{capital:,.2f}",
+                        f"Available balance: ₹{available_balance:,.2f}",
+                        f"Margin used: ₹{margin_used:,.2f}",
+                        f"Pairs capital: ₹{PAIRS_BASE_CAPITAL:,.0f} base (₹{PAIRS_GROSS_CAPITAL:,.0f} gross @ {PAIRS_LEVERAGE}x)",
+                        "",
+                    ]
+                    msg = "\n".join(cap_lines) + msg
+                save_position_index(index_payload)
+                self._telegram.send_telegram(msg)
+                logger.info("Answered Telegram status with serial-numbered positions")
+                return True
+            except Exception:
+                logger.exception("Serial status build failed — falling back to simple status")
+
+        # Fallback: capital-only request or serial build failed
         state = self._state.get_state()
         pnl = float(state.get("daily_pnl", 0) or 0)
         pnl_pct = float(state.get("daily_pnl_pct", 0) or 0)

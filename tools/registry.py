@@ -15,6 +15,11 @@ LIVE_TOOLS   — tool names exposed to the live agent
 LEGACY_TOOLS — tool names available only for manual use (never sent to the LLM)
 """
 import logging
+from tools.position_serial import (
+    build_status_message,
+    save_position_index,
+    exit_position_by_serial as _exit_by_serial_impl,
+)
 
 logger = logging.getLogger("BlitzTrader.ToolRegistry")
 
@@ -42,6 +47,8 @@ LIVE_TOOLS = [
     "get_strategy_docs",
     "send_telegram",
     "log_decision",
+    "exit_position_by_serial",
+    "get_status_with_serials",
 ]
 
 # Tool names available only for manual/informational use — NEVER sent to the live LLM agent
@@ -64,6 +71,10 @@ class ToolRegistry:
         strategy_reader,
         memory_reader,
         goal_manager,
+        pairs_portfolio=None,
+        live_feed=None,
+        shoonya_client=None,
+        active_tokens=None,
     ):
         self._market_data = market_data
         self._order_exec = order_execution
@@ -72,6 +83,10 @@ class ToolRegistry:
         self._strategy = strategy_reader
         self._memory = memory_reader
         self._goals = goal_manager
+        self._pairs_portfolio = pairs_portfolio
+        self._live_feed = live_feed
+        self._shoonya_client = shoonya_client
+        self._active_tokens = active_tokens or {}
         self._pending_entry_log = None
 
         # Build the tool map — NOTE: get_option_chain is NOT in this map so the
@@ -106,6 +121,9 @@ class ToolRegistry:
             "send_telegram": self._telegram.send_telegram,
             # Journal
             "log_decision": self._log_decision_guarded,
+            # Serial-numbered position status + exit-by-serial
+            "exit_position_by_serial": self._exit_position_by_serial,
+            "get_status_with_serials": self._get_status_with_serials,
         }
 
         # Legacy tool map — available for manual/informational use ONLY.
@@ -221,6 +239,47 @@ class ToolRegistry:
             reason=reason,
             strategy_applied=strategy_applied,
             market_context_summary=market_context_summary,
+        )
+
+    def _get_status_with_serials(self) -> dict:
+        """
+        Generate a structured status message with serial-numbered open positions
+        and persist the index for exit-by-serial.
+        """
+        if not self._pairs_portfolio:
+            return {"error": "Pairs portfolio not available."}
+        msg, index_payload = build_status_message(
+            state_manager=self._order_exec._state,
+            pairs_portfolio=self._pairs_portfolio,
+            live_feed=self._live_feed,
+            shoonya_client=self._shoonya_client,
+            active_tokens=self._active_tokens,
+        )
+        save_position_index(index_payload)
+        self._telegram.send_telegram(msg)
+        return {
+            "status": "sent",
+            "position_count": len(index_payload.get("positions", [])),
+            "generated_at": index_payload.get("generated_at"),
+        }
+
+    def _exit_position_by_serial(self, serial: int) -> dict:
+        """
+        Exit the open position identified by its Telegram serial number.
+        Validates index freshness and live state before placing any orders.
+        NEVER opens a new position.
+        """
+        if not self._pairs_portfolio:
+            return {"error": "Pairs portfolio not available."}
+        return _exit_by_serial_impl(
+            serial=serial,
+            state_manager=self._order_exec._state,
+            pairs_portfolio=self._pairs_portfolio,
+            order_execution=self._order_exec,
+            shoonya_client=self._shoonya_client,
+            telegram_handler=self._telegram,
+            active_tokens=self._active_tokens,
+            live_feed=self._live_feed,
         )
 
     def get_tool_definitions(self) -> list[dict]:
@@ -652,6 +711,43 @@ class ToolRegistry:
                         },
                     },
                     "required": ["action", "reason"],
+                },
+            },
+            # ── Serial-numbered status + exit-by-serial ──
+            {
+                "name": "get_status_with_serials",
+                "description": (
+                    "Generate a structured status message with serial-numbered open positions "
+                    "(futures and pairs), send it via Telegram, and persist the serial index. "
+                    "Call this when the trader asks for a status update or position summary. "
+                    "Must be called before exit_position_by_serial to refresh the index."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "exit_position_by_serial",
+                "description": (
+                    "Exit the open position identified by its serial number from the last status message. "
+                    "For a Pairs position, BOTH legs are closed atomically — no single-leg exits. "
+                    "SAFETY: validates index freshness (30 min TTL), re-verifies position is still open, "
+                    "and NEVER opens a new position. "
+                    "Call when user says: 'exit 2', 'close position 3', 'square off #1', 'close serial 2'."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "serial": {
+                            "type": "integer",
+                            "description": (
+                                "The serial number of the position to exit, "
+                                "as shown in the last status message."
+                            ),
+                        }
+                    },
+                    "required": ["serial"],
                 },
             },
         ]
