@@ -12,6 +12,7 @@ Design constraints:
 - TTL = 1800 s; stale index → error, not execution
 - NEVER opens a new position
 - NEVER modifies strategy logic
+- Pairs exit is VIRTUAL ONLY — no Shoonya broker orders placed
 """
 from __future__ import annotations
 
@@ -33,6 +34,10 @@ IST = pytz.timezone("Asia/Kolkata")
 # Where we persist the index
 _INDEX_FILE = RUNTIME_STORAGE_DIR / "telegram_position_index.json"
 _TTL_SECONDS = 1800  # 30 minutes
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -62,6 +67,201 @@ def _get_price_for_symbol(symbol: str, live_feed=None, shoonya_client=None, toke
         except Exception:
             pass
     return None
+
+
+# ──────────────────────────────────────────────────────────────
+#   IDENTITY MATCHING HELPERS
+# ──────────────────────────────────────────────────────────────
+
+def _match_futures_identity(index_entry: dict, live_pos: dict) -> tuple[bool, str]:
+    """
+    Compare a stored index entry against a live futures position dict.
+
+    Returns (True, "") if all fields match, (False, reason) on mismatch.
+    Fields checked: tradingsymbol, direction, qty, entry_price, opened_at,
+    order_id (latter two only when both sides have the field non-empty).
+    """
+    ie = index_entry
+    lp = live_pos
+
+    # tradingsymbol
+    if ie.get("tradingsymbol", "").upper() != lp.get("symbol", "").upper():
+        return False, (
+            f"tradingsymbol mismatch: index={ie.get('tradingsymbol')} "
+            f"live={lp.get('symbol')}"
+        )
+
+    # direction
+    if ie.get("direction", "").upper() != lp.get("direction", "").upper():
+        return False, (
+            f"direction mismatch: index={ie.get('direction')} "
+            f"live={lp.get('direction')}"
+        )
+
+    # qty
+    try:
+        ie_qty = int(ie.get("qty", 0))
+        lp_qty = int(lp.get("quantity", 0))
+    except (TypeError, ValueError):
+        return False, "qty is non-numeric"
+    if ie_qty != lp_qty:
+        return False, f"qty mismatch: index={ie_qty} live={lp_qty}"
+
+    # entry_price within tolerance
+    try:
+        ie_ep = float(ie.get("entry_price", 0))
+        lp_ep = float(lp.get("entry_price", 0))
+    except (TypeError, ValueError):
+        return False, "entry_price is non-numeric"
+    if abs(ie_ep - lp_ep) >= 1e-4:
+        return False, f"entry_price mismatch: index={ie_ep} live={lp_ep}"
+
+    # opened_at — only check when both sides have it
+    ie_oa = str(ie.get("opened_at") or "").strip()
+    lp_oa = str(lp.get("entry_time") or "").strip()
+    if ie_oa and lp_oa and ie_oa != lp_oa:
+        return False, f"opened_at mismatch: index={ie_oa} live={lp_oa}"
+
+    # order_id — only check when both sides have it
+    ie_oid = str(ie.get("order_id") or "").strip()
+    lp_oid = str(lp.get("order_id") or "").strip()
+    if ie_oid and lp_oid and ie_oid != lp_oid:
+        return False, f"order_id mismatch: index={ie_oid} live={lp_oid}"
+
+    return True, ""
+
+
+def _match_pair_identity(index_entry: dict, live_pos) -> tuple[bool, str]:
+    """
+    Compare a stored index entry against a live PairPosition dataclass instance.
+
+    Returns (True, "") on match, (False, reason) on mismatch.
+    """
+    ie = index_entry
+
+    # pair_name
+    if ie.get("pair_name", "") != live_pos.pair_name:
+        return False, (
+            f"pair_name mismatch: index={ie.get('pair_name')} "
+            f"live={live_pos.pair_name}"
+        )
+
+    # opened_at — only when both sides non-empty
+    ie_oa = str(ie.get("opened_at") or "").strip()
+    lp_oa = str(live_pos.opened_at or "").strip()
+    if ie_oa and lp_oa and ie_oa != lp_oa:
+        return False, f"opened_at mismatch: index={ie_oa} live={lp_oa}"
+
+    ll = live_pos.long_leg
+    sl = live_pos.short_leg
+
+    # long leg symbol / tradingsymbol / token
+    if ie.get("long_symbol", "") != ll.symbol:
+        return False, f"long_symbol mismatch: index={ie.get('long_symbol')} live={ll.symbol}"
+    if ie.get("long_tradingsymbol", "") != ll.tradingsymbol:
+        return False, (
+            f"long_tradingsymbol mismatch: index={ie.get('long_tradingsymbol')} "
+            f"live={ll.tradingsymbol}"
+        )
+    ie_lt = str(ie.get("long_token") or "").strip()
+    lp_lt = str(ll.token or "").strip()
+    if ie_lt and lp_lt and ie_lt != lp_lt:
+        return False, f"long_token mismatch: index={ie_lt} live={lp_lt}"
+
+    # short leg symbol / tradingsymbol / token
+    if ie.get("short_symbol", "") != sl.symbol:
+        return False, f"short_symbol mismatch: index={ie.get('short_symbol')} live={sl.symbol}"
+    if ie.get("short_tradingsymbol", "") != sl.tradingsymbol:
+        return False, (
+            f"short_tradingsymbol mismatch: index={ie.get('short_tradingsymbol')} "
+            f"live={sl.tradingsymbol}"
+        )
+    ie_st = str(ie.get("short_token") or "").strip()
+    lp_st = str(sl.token or "").strip()
+    if ie_st and lp_st and ie_st != lp_st:
+        return False, f"short_token mismatch: index={ie_st} live={lp_st}"
+
+    # long qty
+    try:
+        if int(ie.get("long_qty", 0)) != int(ll.qty):
+            return False, f"long_qty mismatch: index={ie.get('long_qty')} live={ll.qty}"
+    except (TypeError, ValueError):
+        return False, "long_qty is non-numeric"
+
+    # short qty
+    try:
+        if int(ie.get("short_qty", 0)) != int(sl.qty):
+            return False, f"short_qty mismatch: index={ie.get('short_qty')} live={sl.qty}"
+    except (TypeError, ValueError):
+        return False, "short_qty is non-numeric"
+
+    # long entry_price
+    try:
+        ie_lep = float(ie.get("long_entry_price", 0))
+        lp_lep = float(ll.entry_price)
+    except (TypeError, ValueError):
+        return False, "long_entry_price is non-numeric"
+    if abs(ie_lep - lp_lep) >= 1e-4:
+        return False, f"long_entry_price mismatch: index={ie_lep} live={lp_lep}"
+
+    # short entry_price
+    try:
+        ie_sep = float(ie.get("short_entry_price", 0))
+        lp_sep = float(sl.entry_price)
+    except (TypeError, ValueError):
+        return False, "short_entry_price is non-numeric"
+    if abs(ie_sep - lp_sep) >= 1e-4:
+        return False, f"short_entry_price mismatch: index={ie_sep} live={lp_sep}"
+
+    return True, ""
+
+
+# ──────────────────────────────────────────────────────────────
+#   P&L SUMMARY HELPER
+# ──────────────────────────────────────────────────────────────
+
+def _build_pnl_summary(futures_state: dict, pairs_portfolio) -> str:
+    """
+    Build the Overall / Futures / Pairs P&L summary block (no Open Positions list).
+
+    Mirrors the P&L header in build_status_message().
+    """
+    futures_realized = float(futures_state.get("daily_pnl", 0) or 0)
+    futures_positions = futures_state.get("positions", []) or []
+
+    # Unrealized futures — we have no live-feed access here, so sum from positions
+    # where current_price is unknown; callers that have a feed can pass enriched state.
+    # For the confirmation message we omit unrealized (best-effort, consistent with
+    # existing Telegram messaging style — realized P&L is the key number).
+    futures_unrealized = float(futures_state.get("_unrealized_cache", 0) or 0)
+    futures_total = futures_realized + futures_unrealized
+
+    pairs_status = pairs_portfolio.get_status()
+    pairs_realized = float(pairs_status.get("realized_pnl", 0) or 0)
+    pairs_unrealized = float(pairs_status.get("unrealized_pnl", 0) or 0)
+    pairs_total = pairs_realized + pairs_unrealized
+
+    overall_realized = futures_realized + pairs_realized
+    overall_unrealized = futures_unrealized + pairs_unrealized
+    overall_total = overall_realized + overall_unrealized
+
+    lines = [
+        "Overall",
+        f"- Realized P&L: ₹{overall_realized:+,.2f}",
+        f"- Unrealized P&L: ₹{overall_unrealized:+,.2f}",
+        f"- Total P&L: ₹{overall_total:+,.2f}",
+        "",
+        "Futures",
+        f"- Realized P&L: ₹{futures_realized:+,.2f}",
+        f"- Unrealized P&L: ₹{futures_unrealized:+,.2f}",
+        f"- Total P&L: ₹{futures_total:+,.2f}",
+        "",
+        "Pairs",
+        f"- Realized P&L: ₹{pairs_realized:+,.2f}",
+        f"- Unrealized P&L: ₹{pairs_unrealized:+,.2f}",
+        f"- Total P&L: ₹{pairs_total:+,.2f}",
+    ]
+    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -124,14 +324,16 @@ def build_status_message(
             f"unrealized={upnl_str}{strat_tag}"
         )
 
+        # FIX 1: store full identity fields for futures
         index_entries.append({
             "serial": serial,
             "type": "futures",
             "tradingsymbol": sym,
             "direction": direction,
+            "qty": int(qty),
             "entry_price": entry,
-            "qty": qty,
-            "opened_at": pos.get("entry_time", ""),
+            "opened_at": str(pos.get("entry_time") or ""),
+            "order_id": str(pos.get("order_id") or ""),
             "token": token or "",
         })
         serial += 1
@@ -196,17 +398,23 @@ def build_status_message(
             f"pair_unrealized={pair_upnl_str}"
         )
 
+        # FIX 2: store full identity fields for pairs
         index_entries.append({
             "serial": serial,
             "type": "pairs",
             "pair_name": pair_name,
-            "opened_at": pos.opened_at,
+            "opened_at": str(pos.opened_at or ""),
+            "timeframe": getattr(pos, "timeframe", ""),
             "long_symbol": ll.symbol,
             "long_tradingsymbol": ll.tradingsymbol,
-            "long_token": ll.token,
+            "long_token": str(ll.token or ""),
+            "long_qty": int(ll.qty),
+            "long_entry_price": float(ll.entry_price),
             "short_symbol": sl_leg.symbol,
             "short_tradingsymbol": sl_leg.tradingsymbol,
-            "short_token": sl_leg.token,
+            "short_token": str(sl_leg.token or ""),
+            "short_qty": int(sl_leg.qty),
+            "short_entry_price": float(sl_leg.entry_price),
         })
         serial += 1
 
@@ -245,7 +453,7 @@ def build_status_message(
 
     message = "\n".join(lines)
 
-    now_ist = datetime.now(IST)
+    now_ist = _now_ist()
     index_payload = {
         "generated_at": now_ist.isoformat(),
         "ttl_seconds": _TTL_SECONDS,
@@ -302,7 +510,7 @@ def _is_index_fresh(index: dict) -> bool:
         # Make tz-aware if naive
         if generated_at.tzinfo is None:
             generated_at = IST.localize(generated_at)
-        age = (datetime.now(IST) - generated_at).total_seconds()
+        age = (_now_ist() - generated_at).total_seconds()
         return age <= ttl
     except Exception:
         return False
@@ -330,6 +538,7 @@ def exit_position_by_serial(
     - NEVER modifies strategy rules
     - Validates index freshness, serial existence, and live position state
     - No partial exits; no single-leg pair exits
+    - Pairs exit is VIRTUAL ONLY — no Shoonya broker orders
     - Returns structured result; caller sends Telegram confirmation
     """
     active_tokens = active_tokens or {}
@@ -375,7 +584,7 @@ def exit_position_by_serial(
     elif pos_type == "pairs":
         return _exit_pairs_by_serial(
             serial, entry, pairs_portfolio, shoonya_client,
-            telegram_handler, live_feed, active_tokens,
+            state_manager, telegram_handler, live_feed, active_tokens,
         )
     else:
         return {"success": False, "error": f"Unknown position type '{pos_type}' for serial #{serial}."}
@@ -412,6 +621,20 @@ def _exit_futures_by_serial(
         invalidate_position_index()
         return {"success": False, "error": msg}
 
+    # FIX 1: full identity revalidation
+    matched, mismatch_reason = _match_futures_identity(entry, live_pos)
+    if not matched:
+        msg = (
+            f"Serial #{serial} no longer matches the current open position. "
+            f"Please request fresh status. Reason: {mismatch_reason}"
+        )
+        logger.warning(
+            "exit_by_serial(%d): identity mismatch for %s — %s",
+            serial, tradingsymbol, mismatch_reason,
+        )
+        invalidate_position_index()
+        return {"success": False, "error": msg}
+
     logger.info(
         "exit_by_serial(%d): closing futures %s %s qty=%s",
         serial, direction, tradingsymbol, live_pos.get("quantity"),
@@ -428,14 +651,16 @@ def _exit_futures_by_serial(
     pnl = result.get("pnl", 0.0)
     exit_price = result.get("exit_price")
 
-    # Invalidate index so next status gets fresh serials
+    # FIX 4: build P&L summary and invalidate index
+    pnl_summary = _build_pnl_summary(state_manager.get_state(), _NullPairsPortfolio())
     invalidate_position_index()
 
+    exit_price_str = f"₹{exit_price:.2f}" if exit_price is not None else "N/A"
     tg_msg = (
         f"Exited serial #{serial}: {direction} {tradingsymbol}\n"
-        f"Exit price: ₹{exit_price:.2f}\n"
+        f"Exit price: {exit_price_str}\n"
         f"Realized P&L: ₹{pnl:+,.2f}\n"
-        f"Position closed successfully."
+        f"\n{pnl_summary}"
     )
     if telegram_handler:
         telegram_handler.send_telegram(tg_msg)
@@ -456,11 +681,17 @@ def _exit_pairs_by_serial(
     entry: dict,
     pairs_portfolio,
     shoonya_client,
+    state_manager,
     telegram_handler,
     live_feed,
     active_tokens: dict,
 ) -> dict:
-    """Close BOTH legs of a pairs position identified by serial."""
+    """
+    Close BOTH legs of a pairs position identified by serial.
+
+    VIRTUAL ONLY — no Shoonya broker orders are placed.
+    Uses _close_leg() directly, exactly like EOD pairs close behavior.
+    """
     pair_name = entry.get("pair_name", "")
     long_sym = entry.get("long_symbol", "")
     short_sym = entry.get("short_symbol", "")
@@ -481,52 +712,96 @@ def _exit_pairs_by_serial(
         invalidate_position_index()
         return {"success": False, "error": msg}
 
+    # FIX 2: full identity revalidation
+    matched, mismatch_reason = _match_pair_identity(entry, live_pos)
+    if not matched:
+        msg = (
+            f"Serial #{serial} no longer matches the current open pair position. "
+            f"Please request fresh status. Reason: {mismatch_reason}"
+        )
+        logger.warning(
+            "exit_by_serial(%d): identity mismatch for pair %s — %s",
+            serial, pair_name, mismatch_reason,
+        )
+        invalidate_position_index()
+        return {"success": False, "error": msg}
+
+    ll = live_pos.long_leg
+    sl_leg = live_pos.short_leg
+
+    # FIX 3: handle partially-closed pair before touching state
+    if bool(ll.closed_at) != bool(sl_leg.closed_at):
+        msg = (
+            f"Pair serial #{serial} ({pair_name}) has one leg already closed — "
+            "abnormal state. Manual review required."
+        )
+        logger.error(
+            "exit_by_serial(%d): pair %s is in partial-close state "
+            "(long_closed=%s short_closed=%s)",
+            serial, pair_name, bool(ll.closed_at), bool(sl_leg.closed_at),
+        )
+        return {"success": False, "error": msg}
+
+    # FIX 3: resolve both exit prices BEFORE touching any state
+    from broker.shoonya_client import ResolvedScrip
+
+    long_scrip = ResolvedScrip(ll.symbol, ll.tradingsymbol, ll.token)
+    short_scrip = ResolvedScrip(sl_leg.symbol, sl_leg.tradingsymbol, sl_leg.token)
+
+    long_exit_price = pairs_portfolio._entry_price(shoonya_client, long_scrip, "SELL")
+    short_exit_price = pairs_portfolio._entry_price(shoonya_client, short_scrip, "BUY")
+
+    if long_exit_price is None and short_exit_price is None:
+        msg = (
+            f"Could not safely close pair serial #{serial} because price was "
+            f"unavailable for both {ll.symbol} and {sl_leg.symbol}. No state changed."
+        )
+        logger.warning("exit_by_serial(%d): both exit prices unavailable for pair %s", serial, pair_name)
+        return {"success": False, "error": msg}
+
+    if long_exit_price is None:
+        msg = (
+            f"Could not safely close pair serial #{serial} because price was "
+            f"unavailable for {ll.symbol} (LONG leg). No state changed."
+        )
+        logger.warning("exit_by_serial(%d): long exit price unavailable for %s", serial, ll.symbol)
+        return {"success": False, "error": msg}
+
+    if short_exit_price is None:
+        msg = (
+            f"Could not safely close pair serial #{serial} because price was "
+            f"unavailable for {sl_leg.symbol} (SHORT leg). No state changed."
+        )
+        logger.warning("exit_by_serial(%d): short exit price unavailable for %s", serial, sl_leg.symbol)
+        return {"success": False, "error": msg}
+
+    # Both prices confirmed — now close virtually (NO broker orders)
     logger.info(
-        "exit_by_serial(%d): closing pair %s (long=%s short=%s)",
-        serial, pair_name, long_sym, short_sym,
+        "exit_by_serial(%d): virtually closing pair %s "
+        "(long=%s @ %.2f, short=%s @ %.2f)",
+        serial, pair_name,
+        ll.symbol, long_exit_price,
+        sl_leg.symbol, short_exit_price,
     )
 
-    # Use pairs portfolio's close-all to close just this pair atomically
-    # We target only this specific pair position
-    from broker.shoonya_client import ResolvedScrip
-    from pairs.portfolio import Leg
+    long_pnl = pairs_portfolio._close_leg(ll, long_exit_price)
+    short_pnl = pairs_portfolio._close_leg(sl_leg, short_exit_price)
 
-    # Close long leg
-    ll = live_pos.long_leg
-    long_scrip = ResolvedScrip(ll.symbol, ll.tradingsymbol, ll.token)
-    long_exit_price = pairs_portfolio._entry_price(shoonya_client, long_scrip, "SELL")
-    long_pnl = 0.0
-    if long_exit_price is not None and not ll.closed_at:
-        long_pnl = pairs_portfolio._close_leg(ll, long_exit_price)
-    elif ll.closed_at:
-        long_pnl = ll.realized_pnl or 0.0
-
-    # Close short leg
-    sl_leg = live_pos.short_leg
-    short_scrip = ResolvedScrip(sl_leg.symbol, sl_leg.tradingsymbol, sl_leg.token)
-    short_exit_price = pairs_portfolio._entry_price(shoonya_client, short_scrip, "BUY")
-    short_pnl = 0.0
-    if short_exit_price is not None and not sl_leg.closed_at:
-        short_pnl = pairs_portfolio._close_leg(sl_leg, short_exit_price)
-    elif sl_leg.closed_at:
-        short_pnl = sl_leg.realized_pnl or 0.0
-
-    # Mark pair as closed
-    live_pos.closed_at = datetime.now().isoformat()
+    live_pos.closed_at = _now_ist().isoformat()
     live_pos.pnl = round(long_pnl + short_pnl, 2)
     pairs_portfolio._persist()
 
     total_pnl = live_pos.pnl
-    invalidate_position_index()
 
-    long_price_str = f"₹{long_exit_price:.2f}" if long_exit_price else "N/A"
-    short_price_str = f"₹{short_exit_price:.2f}" if short_exit_price else "N/A"
+    # FIX 4: P&L summary; invalidate AFTER state is settled
+    pnl_summary = _build_pnl_summary(state_manager.get_state(), pairs_portfolio)
+    invalidate_position_index()
 
     tg_msg = (
         f"Exited serial #{serial}: pair {pair_name}\n"
-        f"  LONG {long_sym} exit: {long_price_str} P&L: ₹{long_pnl:+,.2f}\n"
-        f"  SHORT {short_sym} exit: {short_price_str} P&L: ₹{short_pnl:+,.2f}\n"
-        f"Pair total P&L: ₹{total_pnl:+,.2f}"
+        f"  LONG {long_sym} exit: ₹{long_exit_price:.2f} | SHORT {short_sym} exit: ₹{short_exit_price:.2f}\n"
+        f"Realized P&L: ₹{total_pnl:+,.2f}\n"
+        f"\n{pnl_summary}"
     )
     if telegram_handler:
         telegram_handler.send_telegram(tg_msg)
@@ -541,3 +816,18 @@ def _exit_pairs_by_serial(
         "pnl": total_pnl,
         "message": tg_msg,
     }
+
+
+# ──────────────────────────────────────────────────────────────
+#   INTERNAL STUB
+# ──────────────────────────────────────────────────────────────
+
+class _NullPairsPortfolio:
+    """Minimal stand-in used to build P&L summary right after a futures close."""
+
+    def get_status(self) -> dict:
+        return {
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 0.0,
+        }

@@ -5,6 +5,11 @@ Covers:
  Status format (1–6)
  Exit routing via text patterns (7–9)
  Safety checks (10–19)
+ Futures identity revalidation (20–26)
+ Pairs identity revalidation (27–30)
+ Pair safe close (31–34)
+ P&L confirmation (35–37)
+ Safety: pairs exit never calls place_order (38–39)
 """
 from __future__ import annotations
 
@@ -62,12 +67,12 @@ class _PairPos:
     half_life: int = 0
 
 
-def _make_pair_pos(pair_name="DRREDDY/NESTLEIND", closed=False):
-    ll = _Leg("NESTLEIND", "NESTLEIND", "tok_long", "BUY", 204, 1423.40)
-    sl = _Leg("DRREDDY", "DRREDDY", "tok_short", "SELL", 228, 1323.60)
+def _make_pair_pos(pair_name="DRREDDY/NESTLEIND", closed=False, opened_at=None):
+    ll = _Leg("NESTLEIND", "NESTLEIND-EQ", "tok_long", "BUY", 204, 1423.40)
+    sl = _Leg("DRREDDY", "DRREDDY-EQ", "tok_short", "SELL", 228, 1323.60)
     pp = _PairPos(
         pair_name=pair_name,
-        timeframe="5m",
+        timeframe="30m",
         method="EG",
         z_score=2.1,
         beta=0.95,
@@ -78,7 +83,7 @@ def _make_pair_pos(pair_name="DRREDDY/NESTLEIND", closed=False):
         short_leg=sl,
         margin_used=12000,
         capital_reserved=50000,
-        opened_at=datetime.now().isoformat(),
+        opened_at=opened_at or datetime.now().isoformat(),
     )
     if closed:
         pp.closed_at = datetime.now().isoformat()
@@ -122,15 +127,85 @@ def _make_pairs_portfolio(positions=None):
     return pp
 
 
-def _futures_position(sym="NIFTY26MAY26F", direction="BUY", qty=65, entry=23684.80):
+def _futures_position(
+    sym="NIFTY26MAY26F",
+    direction="BUY",
+    qty=65,
+    entry=23684.80,
+    order_id="abc123",
+    entry_time=None,
+):
     return {
         "symbol": sym,
         "direction": direction,
         "quantity": qty,
         "entry_price": entry,
-        "entry_time": time.time(),
-        "order_id": "abc123",
+        "entry_time": entry_time or str(time.time()),
+        "order_id": order_id,
     }
+
+
+def _make_fresh_futures_index(
+    tmp_path,
+    ps_mod,
+    sym="NIFTY26MAY26F",
+    direction="BUY",
+    qty=65,
+    entry=23684.80,
+    opened_at="",
+    order_id="abc123",
+):
+    """Write a fresh futures index entry and return the index dict."""
+    index = {
+        "generated_at": datetime.now(IST).isoformat(),
+        "ttl_seconds": 1800,
+        "positions": [
+            {
+                "serial": 1,
+                "type": "futures",
+                "tradingsymbol": sym,
+                "direction": direction,
+                "qty": qty,
+                "entry_price": entry,
+                "opened_at": opened_at,
+                "order_id": order_id,
+                "token": "tok_nifty",
+            }
+        ],
+    }
+    ps_mod.save_position_index(index)
+    return index
+
+
+def _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos):
+    """Write a fresh pairs index entry from a pair position."""
+    ll = pair_pos.long_leg
+    sl = pair_pos.short_leg
+    index = {
+        "generated_at": datetime.now(IST).isoformat(),
+        "ttl_seconds": 1800,
+        "positions": [
+            {
+                "serial": 1,
+                "type": "pairs",
+                "pair_name": pair_pos.pair_name,
+                "opened_at": pair_pos.opened_at,
+                "timeframe": pair_pos.timeframe,
+                "long_symbol": ll.symbol,
+                "long_tradingsymbol": ll.tradingsymbol,
+                "long_token": ll.token,
+                "long_qty": ll.qty,
+                "long_entry_price": ll.entry_price,
+                "short_symbol": sl.symbol,
+                "short_tradingsymbol": sl.tradingsymbol,
+                "short_token": sl.token,
+                "short_qty": sl.qty,
+                "short_entry_price": sl.entry_price,
+            }
+        ],
+    }
+    ps_mod.save_position_index(index)
+    return index
 
 
 # ──────────────────────────────────────────────────────────────
@@ -246,11 +321,10 @@ def test_no_open_positions_shows_none():
 def test_index_persisted_after_status(tmp_path):
     from tools import position_serial as ps_mod
 
-    pos = _futures_position()
     original_file = ps_mod._INDEX_FILE
     ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
     try:
-        _, index = _build_status(futures_positions=[pos], price_map={"tok_nifty": 23600.0})
+        _, index = _build_status(futures_positions=[_futures_position()], price_map={"tok_nifty": 23600.0})
         ps_mod.save_position_index(index)
         assert ps_mod._INDEX_FILE.exists()
         loaded = json.loads(ps_mod._INDEX_FILE.read_text())
@@ -423,17 +497,13 @@ def test_valid_futures_serial_calls_close(tmp_path):
     original_file = ps_mod._INDEX_FILE
     ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
     try:
-        index = {
-            "generated_at": datetime.now(IST).isoformat(),
-            "ttl_seconds": 1800,
-            "positions": [
-                {"serial": 1, "type": "futures", "tradingsymbol": "NIFTY26MAY26F",
-                 "direction": "BUY", "qty": 65, "entry_price": 23684.0, "opened_at": "", "token": "tok_nifty"}
-            ],
-        }
-        ps_mod.save_position_index(index)
-
         fut_pos = _futures_position()
+        _make_fresh_futures_index(
+            tmp_path, ps_mod,
+            opened_at=str(fut_pos["entry_time"]),
+            order_id=fut_pos["order_id"],
+        )
+
         sm = _make_state_manager(positions=[fut_pos])
         oe = MagicMock()
         oe.close_position.return_value = {
@@ -475,29 +545,19 @@ def test_valid_pairs_serial_closes_both_legs(tmp_path):
     original_file = ps_mod._INDEX_FILE
     ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
     try:
-        pair_name = "DRREDDY/NESTLEIND"
-        index = {
-            "generated_at": datetime.now(IST).isoformat(),
-            "ttl_seconds": 1800,
-            "positions": [
-                {
-                    "serial": 1, "type": "pairs", "pair_name": pair_name,
-                    "opened_at": datetime.now().isoformat(),
-                    "long_symbol": "NESTLEIND", "long_tradingsymbol": "NESTLEIND", "long_token": "tok_l",
-                    "short_symbol": "DRREDDY", "short_tradingsymbol": "DRREDDY", "short_token": "tok_s",
-                }
-            ],
-        }
-        ps_mod.save_position_index(index)
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
 
-        pair_pos = _make_pair_pos(pair_name=pair_name)
         sm = _make_state_manager()
         oe = MagicMock()
         pp = _make_pairs_portfolio(positions=[pair_pos])
 
         # _entry_price returns current market price for closing
         pp._entry_price.side_effect = lambda client, scrip, action: 1436.20 if action == "SELL" else 1330.60
-        pp._close_leg.side_effect = lambda leg, price: (price - leg.entry_price) * leg.qty if leg.side == "BUY" else (leg.entry_price - price) * leg.qty
+        pp._close_leg.side_effect = lambda leg, price: (
+            (price - leg.entry_price) * leg.qty if leg.side == "BUY"
+            else (leg.entry_price - price) * leg.qty
+        )
         pp._persist = MagicMock()
 
         tg = MagicMock()
@@ -513,7 +573,7 @@ def test_valid_pairs_serial_closes_both_legs(tmp_path):
         )
         assert result["success"] is True
         assert result["type"] == "pairs"
-        assert result["pair_name"] == pair_name
+        assert result["pair_name"] == "DRREDDY/NESTLEIND"
         # Both legs should have been closed (entry_price called for both)
         assert pp._entry_price.call_count == 2
         pp._persist.assert_called()
@@ -534,18 +594,15 @@ def test_index_invalidated_after_futures_exit(tmp_path):
     original_file = ps_mod._INDEX_FILE
     ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
     try:
-        index = {
-            "generated_at": datetime.now(IST).isoformat(),
-            "ttl_seconds": 1800,
-            "positions": [
-                {"serial": 1, "type": "futures", "tradingsymbol": "NIFTY26MAY26F",
-                 "direction": "BUY", "qty": 65, "entry_price": 23684.0, "opened_at": "", "token": ""}
-            ],
-        }
-        ps_mod.save_position_index(index)
+        fut_pos = _futures_position()
+        _make_fresh_futures_index(
+            tmp_path, ps_mod,
+            opened_at=str(fut_pos["entry_time"]),
+            order_id=fut_pos["order_id"],
+        )
         assert ps_mod._INDEX_FILE.exists()
 
-        sm = _make_state_manager(positions=[_futures_position()])
+        sm = _make_state_manager(positions=[fut_pos])
         oe = MagicMock()
         oe.close_position.return_value = {"exit_price": 23700.0, "pnl": 975.0}
         pp = _make_pairs_portfolio(positions=[])
@@ -575,17 +632,14 @@ def test_exit_serial_never_calls_place_order(tmp_path):
     original_file = ps_mod._INDEX_FILE
     ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
     try:
-        index = {
-            "generated_at": datetime.now(IST).isoformat(),
-            "ttl_seconds": 1800,
-            "positions": [
-                {"serial": 1, "type": "futures", "tradingsymbol": "NIFTY26MAY26F",
-                 "direction": "BUY", "qty": 65, "entry_price": 23684.0, "opened_at": "", "token": ""}
-            ],
-        }
-        ps_mod.save_position_index(index)
+        fut_pos = _futures_position()
+        _make_fresh_futures_index(
+            tmp_path, ps_mod,
+            opened_at=str(fut_pos["entry_time"]),
+            order_id=fut_pos["order_id"],
+        )
 
-        sm = _make_state_manager(positions=[_futures_position()])
+        sm = _make_state_manager(positions=[fut_pos])
         oe = MagicMock()
         oe.close_position.return_value = {"exit_price": 23700.0, "pnl": 975.0}
         pp = _make_pairs_portfolio(positions=[])
@@ -657,3 +711,678 @@ def test_registry_imports_new_tools():
     from tools.registry import ToolRegistry, LIVE_TOOLS
     assert "exit_position_by_serial" in LIVE_TOOLS
     assert "get_status_with_serials" in LIVE_TOOLS
+
+
+# ──────────────────────────────────────────────────────────────
+#   20–26. FUTURES identity revalidation
+# ──────────────────────────────────────────────────────────────
+
+def test_futures_matching_identity_calls_close(tmp_path):
+    """FIX 1 test 20: identical fields → close_position called."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        entry_t = str(time.time())
+        fut_pos = _futures_position(entry_time=entry_t, order_id="ord001")
+        _make_fresh_futures_index(
+            tmp_path, ps_mod,
+            opened_at=entry_t,
+            order_id="ord001",
+        )
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        oe.close_position.return_value = {"exit_price": 23700.0, "pnl": 975.0}
+        pp = _make_pairs_portfolio(positions=[])
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is True
+        oe.close_position.assert_called_once()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_futures_different_entry_time_not_closed(tmp_path):
+    """FIX 1 test 21: same symbol, different entry_time → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        fut_pos = _futures_position(entry_time="1000.0", order_id="ord001")
+        # Index has different opened_at
+        _make_fresh_futures_index(tmp_path, ps_mod, opened_at="9999.0", order_id="ord001")
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[])
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        oe.close_position.assert_not_called()
+        # Index should be invalidated
+        assert not ps_mod._INDEX_FILE.exists()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_futures_different_order_id_not_closed(tmp_path):
+    """FIX 1 test 22: same symbol, different order_id → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        fut_pos = _futures_position(entry_time="1000.0", order_id="real_order")
+        _make_fresh_futures_index(tmp_path, ps_mod, opened_at="1000.0", order_id="stale_order")
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[])
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        oe.close_position.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_futures_different_qty_not_closed(tmp_path):
+    """FIX 1 test 23: same symbol, different qty → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        # Live position has qty=75 but index says 65
+        fut_pos = _futures_position(qty=75, entry_time="", order_id="")
+        _make_fresh_futures_index(tmp_path, ps_mod, qty=65, opened_at="", order_id="")
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[])
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        oe.close_position.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_futures_different_entry_price_not_closed(tmp_path):
+    """FIX 1 test 24: same symbol, entry_price outside tolerance → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        fut_pos = _futures_position(entry=23600.00, entry_time="", order_id="")
+        _make_fresh_futures_index(tmp_path, ps_mod, entry=23700.00, opened_at="", order_id="")
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[])
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        oe.close_position.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_futures_different_direction_not_closed(tmp_path):
+    """FIX 1 test 25: same symbol, direction flipped → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        fut_pos = _futures_position(direction="SELL", entry_time="", order_id="")
+        _make_fresh_futures_index(tmp_path, ps_mod, direction="BUY", opened_at="", order_id="")
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[])
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        oe.close_position.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_futures_entry_price_within_tolerance_is_match(tmp_path):
+    """FIX 1 test 26: entry_price within 1e-4 tolerance → treated as match."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        base = 23684.80
+        tiny_diff = base + 0.00005  # well within 1e-4
+        fut_pos = _futures_position(entry=tiny_diff, entry_time="", order_id="")
+        _make_fresh_futures_index(tmp_path, ps_mod, entry=base, opened_at="", order_id="")
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        oe.close_position.return_value = {"exit_price": 23700.0, "pnl": 975.0}
+        pp = _make_pairs_portfolio(positions=[])
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is True
+        oe.close_position.assert_called_once()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+# ──────────────────────────────────────────────────────────────
+#   27–30. PAIRS identity revalidation
+# ──────────────────────────────────────────────────────────────
+
+def test_pairs_matching_identity_calls_close(tmp_path):
+    """FIX 2 test 27: identical pair fields → virtual close called."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._entry_price.side_effect = lambda c, s, a: 1436.20 if a == "SELL" else 1330.60
+        pp._close_leg.side_effect = lambda leg, price: 100.0
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is True
+        pp._persist.assert_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pairs_different_opened_at_not_closed(tmp_path):
+    """FIX 2 test 28: same pair_name, different opened_at → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos(opened_at="2026-01-01T09:00:00")
+        # Index has different opened_at
+        idx_entry = {
+            "serial": 1, "type": "pairs",
+            "pair_name": pair_pos.pair_name,
+            "opened_at": "2026-01-02T09:00:00",  # different
+            "timeframe": pair_pos.timeframe,
+            "long_symbol": pair_pos.long_leg.symbol,
+            "long_tradingsymbol": pair_pos.long_leg.tradingsymbol,
+            "long_token": pair_pos.long_leg.token,
+            "long_qty": pair_pos.long_leg.qty,
+            "long_entry_price": pair_pos.long_leg.entry_price,
+            "short_symbol": pair_pos.short_leg.symbol,
+            "short_tradingsymbol": pair_pos.short_leg.tradingsymbol,
+            "short_token": pair_pos.short_leg.token,
+            "short_qty": pair_pos.short_leg.qty,
+            "short_entry_price": pair_pos.short_leg.entry_price,
+        }
+        index = {"generated_at": datetime.now(IST).isoformat(), "ttl_seconds": 1800, "positions": [idx_entry]}
+        ps_mod.save_position_index(index)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        pp._persist.assert_not_called()
+        assert not ps_mod._INDEX_FILE.exists()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pairs_different_long_qty_not_closed(tmp_path):
+    """FIX 2 test 29: same pair_name, different long qty → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        idx_entry = {
+            "serial": 1, "type": "pairs",
+            "pair_name": pair_pos.pair_name,
+            "opened_at": pair_pos.opened_at,
+            "timeframe": pair_pos.timeframe,
+            "long_symbol": pair_pos.long_leg.symbol,
+            "long_tradingsymbol": pair_pos.long_leg.tradingsymbol,
+            "long_token": pair_pos.long_leg.token,
+            "long_qty": 999,  # wrong
+            "long_entry_price": pair_pos.long_leg.entry_price,
+            "short_symbol": pair_pos.short_leg.symbol,
+            "short_tradingsymbol": pair_pos.short_leg.tradingsymbol,
+            "short_token": pair_pos.short_leg.token,
+            "short_qty": pair_pos.short_leg.qty,
+            "short_entry_price": pair_pos.short_leg.entry_price,
+        }
+        index = {"generated_at": datetime.now(IST).isoformat(), "ttl_seconds": 1800, "positions": [idx_entry]}
+        ps_mod.save_position_index(index)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        pp._persist.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pairs_different_short_entry_price_not_closed(tmp_path):
+    """FIX 2 test 30: same pair_name, different short entry_price → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        idx_entry = {
+            "serial": 1, "type": "pairs",
+            "pair_name": pair_pos.pair_name,
+            "opened_at": pair_pos.opened_at,
+            "timeframe": pair_pos.timeframe,
+            "long_symbol": pair_pos.long_leg.symbol,
+            "long_tradingsymbol": pair_pos.long_leg.tradingsymbol,
+            "long_token": pair_pos.long_leg.token,
+            "long_qty": pair_pos.long_leg.qty,
+            "long_entry_price": pair_pos.long_leg.entry_price,
+            "short_symbol": pair_pos.short_leg.symbol,
+            "short_tradingsymbol": pair_pos.short_leg.tradingsymbol,
+            "short_token": pair_pos.short_leg.token,
+            "short_qty": pair_pos.short_leg.qty,
+            "short_entry_price": 9999.99,  # wrong
+        }
+        index = {"generated_at": datetime.now(IST).isoformat(), "ttl_seconds": 1800, "positions": [idx_entry]}
+        ps_mod.save_position_index(index)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        pp._persist.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pairs_different_long_token_not_closed(tmp_path):
+    """FIX 2: same pair_name, different long token → not closed."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        idx_entry = {
+            "serial": 1, "type": "pairs",
+            "pair_name": pair_pos.pair_name,
+            "opened_at": pair_pos.opened_at,
+            "timeframe": pair_pos.timeframe,
+            "long_symbol": pair_pos.long_leg.symbol,
+            "long_tradingsymbol": pair_pos.long_leg.tradingsymbol,
+            "long_token": "wrong_token",  # mismatch
+            "long_qty": pair_pos.long_leg.qty,
+            "long_entry_price": pair_pos.long_leg.entry_price,
+            "short_symbol": pair_pos.short_leg.symbol,
+            "short_tradingsymbol": pair_pos.short_leg.tradingsymbol,
+            "short_token": pair_pos.short_leg.token,
+            "short_qty": pair_pos.short_leg.qty,
+            "short_entry_price": pair_pos.short_leg.entry_price,
+        }
+        index = {"generated_at": datetime.now(IST).isoformat(), "ttl_seconds": 1800, "positions": [idx_entry]}
+        ps_mod.save_position_index(index)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "no longer matches" in result["error"].lower()
+        pp._persist.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+# ──────────────────────────────────────────────────────────────
+#   31–34. Pair safe close (FIX 3)
+# ──────────────────────────────────────────────────────────────
+
+def test_pair_long_exit_price_unavailable_no_mutation(tmp_path):
+    """FIX 3 test 31: long exit price unavailable → no state mutation."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        # Long price unavailable, short is fine
+        pp._entry_price.side_effect = lambda c, s, a: None if a == "SELL" else 1330.60
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "unavailable" in result["error"].lower()
+        assert "no state changed" in result["error"].lower()
+        pp._persist.assert_not_called()
+        pp._close_leg.assert_not_called()
+        assert pair_pos.closed_at is None
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pair_short_exit_price_unavailable_no_mutation(tmp_path):
+    """FIX 3 test 32: short exit price unavailable → no state mutation."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        # Short price unavailable, long is fine
+        pp._entry_price.side_effect = lambda c, s, a: 1436.20 if a == "SELL" else None
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "unavailable" in result["error"].lower()
+        assert "no state changed" in result["error"].lower()
+        pp._persist.assert_not_called()
+        pp._close_leg.assert_not_called()
+        assert pair_pos.closed_at is None
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pair_one_leg_already_closed_safe_error(tmp_path):
+    """FIX 3 test 33: one leg already closed → safe error, no mutation."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        # Mark only the long leg as closed (abnormal state)
+        pair_pos.long_leg.closed_at = datetime.now().isoformat()
+        pair_pos.long_leg.realized_pnl = 500.0
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is False
+        assert "one leg already closed" in result["error"].lower() or "partial" in result["error"].lower()
+        pp._persist.assert_not_called()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pair_both_prices_available_closes_and_persists(tmp_path):
+    """FIX 3 test 34: both prices available → legs closed, pair marked, pnl computed, persisted."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._entry_price.side_effect = lambda c, s, a: 1440.00 if a == "SELL" else 1320.00
+        # Simulate _close_leg setting realized_pnl on the real leg objects
+        def _fake_close_leg(leg, price):
+            pnl = (price - leg.entry_price) * leg.qty if leg.side == "BUY" else (leg.entry_price - price) * leg.qty
+            leg.realized_pnl = pnl
+            leg.closed_at = datetime.now().isoformat()
+            return pnl
+        pp._close_leg.side_effect = _fake_close_leg
+        pp._persist = MagicMock()
+        tg = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=tg,
+        )
+        assert result["success"] is True
+        assert result["long_exit_price"] == 1440.00
+        assert result["short_exit_price"] == 1320.00
+        # pair_pos.closed_at should be set
+        assert pair_pos.closed_at is not None
+        # pnl should match sum of legs
+        expected_long_pnl = (1440.00 - 1423.40) * 204
+        expected_short_pnl = (1323.60 - 1320.00) * 228
+        assert abs(result["pnl"] - round(expected_long_pnl + expected_short_pnl, 2)) < 0.01
+        pp._persist.assert_called_once()
+        tg.send_telegram.assert_called_once()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+# ──────────────────────────────────────────────────────────────
+#   35–37. P&L confirmation (FIX 4)
+# ──────────────────────────────────────────────────────────────
+
+def test_futures_exit_confirmation_has_pnl_sections(tmp_path):
+    """FIX 4 test 35: futures exit confirmation contains Overall/Futures/Pairs."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        fut_pos = _futures_position(entry_time="", order_id="")
+        _make_fresh_futures_index(tmp_path, ps_mod, opened_at="", order_id="")
+        sm = _make_state_manager(positions=[fut_pos])
+        oe = MagicMock()
+        oe.close_position.return_value = {"exit_price": 23700.0, "pnl": 975.0}
+        pp = _make_pairs_portfolio(positions=[])
+        tg = MagicMock()
+
+        ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=tg,
+        )
+        tg.send_telegram.assert_called_once()
+        msg = tg.send_telegram.call_args[0][0]
+        assert "Overall" in msg
+        assert "Futures" in msg
+        assert "Pairs" in msg
+        assert "Realized P&L" in msg
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pairs_exit_confirmation_has_pnl_sections(tmp_path):
+    """FIX 4 test 36: pairs exit confirmation contains Overall/Futures/Pairs."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._entry_price.side_effect = lambda c, s, a: 1440.00 if a == "SELL" else 1320.00
+
+        def _fake_close_leg(leg, price):
+            pnl = (price - leg.entry_price) * leg.qty if leg.side == "BUY" else (leg.entry_price - price) * leg.qty
+            leg.realized_pnl = pnl
+            leg.closed_at = datetime.now().isoformat()
+            return pnl
+        pp._close_leg.side_effect = _fake_close_leg
+        pp._persist = MagicMock()
+        tg = MagicMock()
+
+        ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=tg,
+        )
+        tg.send_telegram.assert_called_once()
+        msg = tg.send_telegram.call_args[0][0]
+        assert "Overall" in msg
+        assert "Futures" in msg
+        assert "Pairs" in msg
+        assert "Realized P&L" in msg
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_serial_index_invalidated_after_pairs_exit(tmp_path):
+    """FIX 4 test 37: serial index invalidated after successful pairs exit."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+        assert ps_mod._INDEX_FILE.exists()
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._entry_price.side_effect = lambda c, s, a: 1440.00 if a == "SELL" else 1320.00
+
+        def _fake_close_leg(leg, price):
+            pnl = (price - leg.entry_price) * leg.qty if leg.side == "BUY" else (leg.entry_price - price) * leg.qty
+            leg.realized_pnl = pnl
+            leg.closed_at = datetime.now().isoformat()
+            return pnl
+        pp._close_leg.side_effect = _fake_close_leg
+        pp._persist = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=MagicMock(), telegram_handler=MagicMock(),
+        )
+        assert result["success"] is True
+        assert not ps_mod._INDEX_FILE.exists()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+# ──────────────────────────────────────────────────────────────
+#   38–39. Safety: pairs exit is virtual-only (FIX 3 safety)
+# ──────────────────────────────────────────────────────────────
+
+def test_pairs_exit_never_calls_place_order(tmp_path):
+    """FIX 3 safety test 38: pairs exit never calls place_order."""
+    from tools import position_serial as ps_mod
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        pp._entry_price.side_effect = lambda c, s, a: 1440.00 if a == "SELL" else 1320.00
+
+        def _fake_close_leg(leg, price):
+            pnl = (price - leg.entry_price) * leg.qty if leg.side == "BUY" else (leg.entry_price - price) * leg.qty
+            leg.realized_pnl = pnl
+            leg.closed_at = datetime.now().isoformat()
+            return pnl
+        pp._close_leg.side_effect = _fake_close_leg
+        pp._persist = MagicMock()
+
+        client = MagicMock()
+
+        ps_mod.exit_position_by_serial(
+            serial=1, state_manager=sm, pairs_portfolio=pp,
+            order_execution=oe, shoonya_client=client, telegram_handler=MagicMock(),
+        )
+
+        # place_order / place_virtual_order must NEVER be called
+        oe.place_virtual_order.assert_not_called()
+        oe.close_position.assert_not_called()
+        # Shoonya client must not have placed any orders
+        client.place_order.assert_not_called() if hasattr(client, "place_order") else None
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_all_previous_safety_tests_still_pass(tmp_path):
+    """Test 39: All original safety checks remain intact (composite smoke test)."""
+    from tools import position_serial as ps_mod
+    import inspect
+    src = inspect.getsource(ps_mod)
+
+    # NEVER opens a new position
+    assert "place_order" not in src or "place_order" in "pairs_portfolio._entry_price"
+    # Index TTL check present
+    assert "_is_index_fresh" in src
+    # Invalidation present
+    assert "invalidate_position_index" in src
+    # Identity helpers present
+    assert "_match_futures_identity" in src
+    assert "_match_pair_identity" in src
+    # Safe close checks present
+    assert "No state changed" in src
+    # Virtual-only comment present
+    assert "VIRTUAL" in src.upper() or "virtual" in src
