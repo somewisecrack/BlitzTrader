@@ -217,51 +217,32 @@ def _match_pair_identity(index_entry: dict, live_pos) -> tuple[bool, str]:
 
 
 # ──────────────────────────────────────────────────────────────
-#   P&L SUMMARY HELPER
+#   P&L SUMMARY HELPERS
 # ──────────────────────────────────────────────────────────────
 
-def _build_pnl_summary(futures_state: dict, pairs_portfolio) -> str:
+def _build_updated_pnl_summary(
+    state_manager,
+    pairs_portfolio,
+    live_feed=None,
+    shoonya_client=None,
+    active_tokens=None,
+) -> str:
+    """Build the Overall/Futures/Pairs P&L sections only (no Open Positions list).
+
+    Delegates to build_status_message() so unrealized P&L uses live_feed/shoonya_client,
+    and pairs P&L comes from the real pairs_portfolio (not a null stub).
     """
-    Build the Overall / Futures / Pairs P&L summary block (no Open Positions list).
-
-    Mirrors the P&L header in build_status_message().
-    """
-    futures_realized = float(futures_state.get("daily_pnl", 0) or 0)
-    futures_positions = futures_state.get("positions", []) or []
-
-    # Unrealized futures — we have no live-feed access here, so sum from positions
-    # where current_price is unknown; callers that have a feed can pass enriched state.
-    # For the confirmation message we omit unrealized (best-effort, consistent with
-    # existing Telegram messaging style — realized P&L is the key number).
-    futures_unrealized = float(futures_state.get("_unrealized_cache", 0) or 0)
-    futures_total = futures_realized + futures_unrealized
-
-    pairs_status = pairs_portfolio.get_status()
-    pairs_realized = float(pairs_status.get("realized_pnl", 0) or 0)
-    pairs_unrealized = float(pairs_status.get("unrealized_pnl", 0) or 0)
-    pairs_total = pairs_realized + pairs_unrealized
-
-    overall_realized = futures_realized + pairs_realized
-    overall_unrealized = futures_unrealized + pairs_unrealized
-    overall_total = overall_realized + overall_unrealized
-
-    lines = [
-        "Overall",
-        f"- Realized P&L: ₹{overall_realized:+,.2f}",
-        f"- Unrealized P&L: ₹{overall_unrealized:+,.2f}",
-        f"- Total P&L: ₹{overall_total:+,.2f}",
-        "",
-        "Futures",
-        f"- Realized P&L: ₹{futures_realized:+,.2f}",
-        f"- Unrealized P&L: ₹{futures_unrealized:+,.2f}",
-        f"- Total P&L: ₹{futures_total:+,.2f}",
-        "",
-        "Pairs",
-        f"- Realized P&L: ₹{pairs_realized:+,.2f}",
-        f"- Unrealized P&L: ₹{pairs_unrealized:+,.2f}",
-        f"- Total P&L: ₹{pairs_total:+,.2f}",
-    ]
-    return "\n".join(lines)
+    full, _ = build_status_message(
+        state_manager=state_manager,
+        pairs_portfolio=pairs_portfolio,
+        live_feed=live_feed,
+        shoonya_client=shoonya_client,
+        active_tokens=active_tokens,
+    )
+    # Truncate at "Open Positions" section if present
+    marker = "\nOpen Positions"
+    idx = full.find(marker)
+    return full[:idx].rstrip() if idx != -1 else full
 
 
 # ──────────────────────────────────────────────────────────────
@@ -580,6 +561,8 @@ def exit_position_by_serial(
         return _exit_futures_by_serial(
             serial, entry, state_manager, order_execution,
             telegram_handler, live_feed, active_tokens,
+            pairs_portfolio=pairs_portfolio,
+            shoonya_client=shoonya_client,
         )
     elif pos_type == "pairs":
         return _exit_pairs_by_serial(
@@ -598,6 +581,8 @@ def _exit_futures_by_serial(
     telegram_handler,
     live_feed,
     active_tokens: dict,
+    pairs_portfolio=None,
+    shoonya_client=None,
 ) -> dict:
     """Close a futures position identified by serial."""
     tradingsymbol = entry.get("tradingsymbol", "")
@@ -651,8 +636,11 @@ def _exit_futures_by_serial(
     pnl = result.get("pnl", 0.0)
     exit_price = result.get("exit_price")
 
-    # FIX 4: build P&L summary and invalidate index
-    pnl_summary = _build_pnl_summary(state_manager.get_state(), _NullPairsPortfolio())
+    # FIX 4: build P&L summary using real pairs_portfolio and live prices
+    pnl_summary = _build_updated_pnl_summary(
+        state_manager, pairs_portfolio,
+        live_feed=live_feed, shoonya_client=shoonya_client, active_tokens=active_tokens,
+    )
     invalidate_position_index()
 
     exit_price_str = f"₹{exit_price:.2f}" if exit_price is not None else "N/A"
@@ -793,8 +781,11 @@ def _exit_pairs_by_serial(
 
     total_pnl = live_pos.pnl
 
-    # FIX 4: P&L summary; invalidate AFTER state is settled
-    pnl_summary = _build_pnl_summary(state_manager.get_state(), pairs_portfolio)
+    # FIX 4: P&L summary using real pairs_portfolio and live prices; invalidate AFTER state is settled
+    pnl_summary = _build_updated_pnl_summary(
+        state_manager, pairs_portfolio,
+        live_feed=live_feed, shoonya_client=shoonya_client, active_tokens=active_tokens,
+    )
     invalidate_position_index()
 
     tg_msg = (
@@ -817,17 +808,3 @@ def _exit_pairs_by_serial(
         "message": tg_msg,
     }
 
-
-# ──────────────────────────────────────────────────────────────
-#   INTERNAL STUB
-# ──────────────────────────────────────────────────────────────
-
-class _NullPairsPortfolio:
-    """Minimal stand-in used to build P&L summary right after a futures close."""
-
-    def get_status(self) -> dict:
-        return {
-            "realized_pnl": 0.0,
-            "unrealized_pnl": 0.0,
-            "net_pnl": 0.0,
-        }

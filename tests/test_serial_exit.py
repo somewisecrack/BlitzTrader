@@ -1386,3 +1386,185 @@ def test_all_previous_safety_tests_still_pass(tmp_path):
     assert "No state changed" in src
     # Virtual-only comment present
     assert "VIRTUAL" in src.upper() or "virtual" in src
+
+
+# ──────────────────────────────────────────────────────────────
+#   40–44. P&L confirmation with real pairs_portfolio (new tests)
+# ──────────────────────────────────────────────────────────────
+
+def test_futures_exit_confirmation_includes_real_pairs_pnl(tmp_path):
+    """Test 40: Futures exit confirmation shows Pairs realized P&L from real pairs_portfolio."""
+    from tools import position_serial as ps_mod
+
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        fut_pos = _futures_position(entry_time="", order_id="")
+        _make_fresh_futures_index(tmp_path, ps_mod, opened_at="", order_id="")
+
+        sm = _make_state_manager(positions=[fut_pos], daily_pnl=800.0)
+        oe = MagicMock()
+        oe.close_position.return_value = {"exit_price": 23700.0, "pnl": 975.0}
+
+        # Real pairs portfolio with non-zero realized P&L
+        pp = MagicMock()
+        pp.positions = []
+        pp.get_status.return_value = {
+            "realized_pnl": 5000.0,
+            "unrealized_pnl": 1200.0,
+            "net_pnl": 6200.0,
+            "positions": [],
+        }
+        tg = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1,
+            state_manager=sm,
+            pairs_portfolio=pp,
+            order_execution=oe,
+            shoonya_client=MagicMock(),
+            telegram_handler=tg,
+        )
+        assert result["success"] is True
+        tg.send_telegram.assert_called_once()
+        msg = tg.send_telegram.call_args[0][0]
+        # Pairs section must be present
+        assert "Pairs" in msg
+        # Realized P&L must NOT be ₹0.00 — real value of 5000.0 should appear
+        assert "₹0.00" not in msg.split("Pairs")[-1].split("\n")[1]
+        assert "+5,000.00" in msg or "5000" in msg
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_futures_exit_uses_updated_post_exit_realized_pnl(tmp_path):
+    """Test 41: Futures exit confirmation reflects updated realized P&L after close."""
+    from tools import position_serial as ps_mod
+
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        fut_pos = _futures_position(entry_time="", order_id="")
+        _make_fresh_futures_index(tmp_path, ps_mod, opened_at="", order_id="")
+
+        # Simulate state manager returning updated P&L after close.
+        # First call is inside _exit_futures_by_serial for identity check (positions still open).
+        # Second call is inside _build_updated_pnl_summary → build_status_message (post-close).
+        call_count = [0]
+        def _get_state():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Identity check — position still present, original P&L
+                return {
+                    "daily_pnl": 1234.0,
+                    "daily_pnl_pct": 0.5,
+                    "positions": [fut_pos],
+                    "virtual_capital": 1_000_000,
+                    "available_balance": 950_000,
+                    "margin_used": 50_000,
+                }
+            else:
+                # Post-close summary — updated realized P&L, position gone
+                return {
+                    "daily_pnl": 3210.0,
+                    "daily_pnl_pct": 0.5,
+                    "positions": [],
+                    "virtual_capital": 1_000_000,
+                    "available_balance": 950_000,
+                    "margin_used": 50_000,
+                }
+
+        sm = MagicMock()
+        sm.get_state.side_effect = _get_state
+        sm.get_open_positions.return_value = [fut_pos]
+
+        oe = MagicMock()
+        oe.close_position.return_value = {"exit_price": 23700.0, "pnl": 975.0}
+
+        pp = MagicMock()
+        pp.positions = []
+        pp.get_status.return_value = {"realized_pnl": 0.0, "unrealized_pnl": 0.0, "net_pnl": 0.0, "positions": []}
+        tg = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1,
+            state_manager=sm,
+            pairs_portfolio=pp,
+            order_execution=oe,
+            shoonya_client=MagicMock(),
+            telegram_handler=tg,
+        )
+        assert result["success"] is True
+        msg = tg.send_telegram.call_args[0][0]
+        # The confirmation must include the updated futures realized P&L (3210.0)
+        assert "3,210.00" in msg or "3210" in msg
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_pairs_exit_confirmation_includes_updated_pairs_realized_pnl(tmp_path):
+    """Test 42: Pairs exit confirmation shows updated pairs realized P&L after close."""
+    from tools import position_serial as ps_mod
+
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        pair_pos = _make_pair_pos()
+        _make_fresh_pairs_index(tmp_path, ps_mod, pair_pos)
+
+        sm = _make_state_manager()
+        oe = MagicMock()
+
+        pp = _make_pairs_portfolio(positions=[pair_pos])
+        # After closing the pair, get_status returns updated realized P&L
+        pp.get_status.return_value = {
+            "realized_pnl": 4500.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 4500.0,
+            "positions": [],
+        }
+        pp._entry_price.side_effect = lambda c, s, a: 1440.00 if a == "SELL" else 1320.00
+
+        def _fake_close_leg(leg, price):
+            pnl = (price - leg.entry_price) * leg.qty if leg.side == "BUY" else (leg.entry_price - price) * leg.qty
+            leg.realized_pnl = pnl
+            leg.closed_at = datetime.now().isoformat()
+            return pnl
+        pp._close_leg.side_effect = _fake_close_leg
+        pp._persist = MagicMock()
+        tg = MagicMock()
+
+        result = ps_mod.exit_position_by_serial(
+            serial=1,
+            state_manager=sm,
+            pairs_portfolio=pp,
+            order_execution=oe,
+            shoonya_client=MagicMock(),
+            telegram_handler=tg,
+        )
+        assert result["success"] is True
+        msg = tg.send_telegram.call_args[0][0]
+        assert "Pairs" in msg
+        # Updated realized P&L of 4500.0 must appear
+        assert "4,500.00" in msg or "4500" in msg
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
+def test_null_pairs_portfolio_not_in_module():
+    """Test 43: _NullPairsPortfolio has been removed from the module."""
+    import tools.position_serial as ps_mod
+    assert not hasattr(ps_mod, "_NullPairsPortfolio"), (
+        "_NullPairsPortfolio should have been removed; it was masking real pairs P&L"
+    )
+
+
+def test_build_pnl_summary_not_in_module():
+    """Test 44: _build_pnl_summary has been replaced by _build_updated_pnl_summary."""
+    import tools.position_serial as ps_mod
+    assert not hasattr(ps_mod, "_build_pnl_summary"), (
+        "_build_pnl_summary should have been removed; use _build_updated_pnl_summary"
+    )
+    assert hasattr(ps_mod, "_build_updated_pnl_summary"), (
+        "_build_updated_pnl_summary must exist"
+    )
