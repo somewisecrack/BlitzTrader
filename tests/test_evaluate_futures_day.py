@@ -29,6 +29,8 @@ from scripts.evaluate_futures_day import (
     compute_trade_stats,
     detect_patterns,
     build_review_markdown,
+    build_loss_clusters_section,
+    _enrich_trades_from_journal,
     is_futures_symbol,
     _epoch_to_date,
 )
@@ -403,3 +405,188 @@ class TestBuildReviewMarkdown:
         assert "emitted_signal" not in md.lower()
         # Must have the correct trade count
         assert "Futures trades executed: 7" in md
+
+
+# ---------------------------------------------------------------------------
+# Test: _enrich_trades_from_journal
+# ---------------------------------------------------------------------------
+
+# Journal text fixture for enrichment tests
+_JOURNAL_ENRICHMENT = """\
+# BlitzTrader Daily Journal
+
+## Decision Log
+
+### 09:20:00 — ENTER_SHORT
+**Instrument:** NIFTY26MAY26F
+**Strategy applied:** VP-15 Evening Star
+
+### 09:20:30 — ENTER_SHORT
+**Instrument:** BANKNIFTY26MAY26F
+**Strategy applied:** VP-15 Evening Star
+
+### 10:35:00 — ENTER_LONG
+**Instrument:** BANKNIFTY26MAY26F
+**Strategy applied:** VP-24 Pivot Bounce S2
+"""
+
+
+class TestEnrichTradesFromJournal:
+
+    def _make_trade(self, symbol, direction, time_str, pnl=-100.0, strategy="—"):
+        return {
+            "time": time_str,
+            "symbol": symbol,
+            "direction": direction,
+            "strategy": strategy,
+            "pnl": pnl,
+            "quantity": 30,
+            "entry_price": 50000.0,
+            "exit_price": 49900.0,
+        }
+
+    def test_exact_timestamp_match_fills_strategy(self):
+        trade = self._make_trade("NIFTY26MAY26F", "SELL", "09:20:00")
+        result = _enrich_trades_from_journal([trade], _JOURNAL_ENRICHMENT)
+        assert result[0]["strategy"] == "VP-15 Evening Star"
+
+    def test_within_120s_tolerance_fills_strategy(self):
+        # Trade at 09:21:00, journal at 09:20:00 — 60s difference, within tolerance
+        trade = self._make_trade("BANKNIFTY26MAY26F", "SELL", "09:21:00")
+        result = _enrich_trades_from_journal([trade], _JOURNAL_ENRICHMENT)
+        assert result[0]["strategy"] == "VP-15 Evening Star"
+
+    def test_nearest_match_wins_when_multiple_within_tolerance(self):
+        # Two BANKNIFTY SELL journal entries: 09:20:00 and 09:20:30
+        # Trade at 09:20:40 — distance 40s from 09:20:00, 10s from 09:20:30
+        trade = self._make_trade("BANKNIFTY26MAY26F", "SELL", "09:20:40")
+        result = _enrich_trades_from_journal([trade], _JOURNAL_ENRICHMENT)
+        # Nearest is 09:20:30 — both are VP-15 Evening Star in fixture
+        assert result[0]["strategy"] == "VP-15 Evening Star"
+
+    def test_no_match_leaves_strategy_as_dash(self):
+        # Trade at 14:00:00 — no journal entry within 120s
+        trade = self._make_trade("NIFTY26MAY26F", "SELL", "14:00:00")
+        result = _enrich_trades_from_journal([trade], _JOURNAL_ENRICHMENT)
+        assert result[0]["strategy"] == "—"
+
+    def test_pnl_always_comes_from_live_state_not_journal(self):
+        trade = self._make_trade("NIFTY26MAY26F", "SELL", "09:20:00", pnl=-999.0)
+        result = _enrich_trades_from_journal([trade], _JOURNAL_ENRICHMENT)
+        # P&L must remain -999.0 (from live_state), not altered by journal
+        assert result[0]["pnl"] == -999.0
+
+    def test_already_has_strategy_not_overwritten(self):
+        trade = self._make_trade("NIFTY26MAY26F", "SELL", "09:20:00", strategy="VP-01 Counter Bull Trap")
+        result = _enrich_trades_from_journal([trade], _JOURNAL_ENRICHMENT)
+        # Should not be overwritten since it's already non-empty and not '—'
+        assert result[0]["strategy"] == "VP-01 Counter Bull Trap"
+
+    def test_empty_journal_text_returns_trades_unchanged(self):
+        trade = self._make_trade("NIFTY26MAY26F", "SELL", "09:20:00")
+        result = _enrich_trades_from_journal([trade], "")
+        assert result[0]["strategy"] == "—"
+
+    def test_backward_compat_old_trade_without_strategy_key(self):
+        """Old live_state trade records without 'strategy' key must load as '—'."""
+        trade = {
+            "time": "09:20:00",
+            "symbol": "NIFTY26MAY26F",
+            "direction": "SELL",
+            "pnl": -500.0,
+            # No 'strategy' key at all
+        }
+        # enrich should not crash
+        result = _enrich_trades_from_journal([trade], _JOURNAL_ENRICHMENT)
+        # Should fill strategy from journal
+        assert result[0].get("strategy", "—") == "VP-15 Evening Star"
+
+
+# ---------------------------------------------------------------------------
+# Test: build_loss_clusters_section
+# ---------------------------------------------------------------------------
+
+class TestBuildLossClustersSection:
+
+    def _make_trade_with_strategy(self, symbol, strategy, direction, pnl):
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "direction": direction,
+            "pnl": pnl,
+            "time": "09:00:00",
+        }
+
+    def test_loss_clusters_present_when_losing_trades_with_known_strategy(self):
+        trades = [
+            self._make_trade_with_strategy("BANKNIFTY", "VP-15 Evening Star", "SELL", -5000.0),
+            self._make_trade_with_strategy("BANKNIFTY", "VP-15 Evening Star", "SELL", -7000.0),
+        ]
+        section = build_loss_clusters_section(trades)
+        assert "## Loss Clusters" in section
+        assert "VP-15 Evening Star" in section
+        assert "BANKNIFTY" in section
+        assert "SELL" in section
+
+    def test_loss_clusters_sums_pnl_for_same_cluster(self):
+        trades = [
+            self._make_trade_with_strategy("BANKNIFTY", "VP-15 Evening Star", "SELL", -5000.0),
+            self._make_trade_with_strategy("BANKNIFTY", "VP-15 Evening Star", "SELL", -7000.0),
+        ]
+        section = build_loss_clusters_section(trades)
+        # Total P&L should be -12000
+        assert "-12,000" in section or "₹-12,000" in section
+
+    def test_loss_clusters_worst_first(self):
+        trades = [
+            self._make_trade_with_strategy("BANKNIFTY", "VP-24 Pivot Bounce S2", "BUY", -2000.0),
+            self._make_trade_with_strategy("BANKNIFTY", "VP-15 Evening Star", "SELL", -9000.0),
+        ]
+        section = build_loss_clusters_section(trades)
+        lines = section.splitlines()
+        data_rows = [l for l in lines if l.startswith("|") and "---" not in l and "Symbol" not in l]
+        # VP-15 Evening Star with -9000 should appear before VP-24 Pivot Bounce S2 with -2000
+        assert data_rows[0].count("VP-15 Evening Star") > 0 or "-9,000" in data_rows[0]
+
+    def test_loss_clusters_omits_unknown_strategy_rows(self):
+        trades = [
+            self._make_trade_with_strategy("BANKNIFTY", "—", "SELL", -5000.0),
+            self._make_trade_with_strategy("BANKNIFTY", "VP-15 Evening Star", "SELL", -3000.0),
+        ]
+        section = build_loss_clusters_section(trades)
+        # '—' rows should be omitted
+        assert "| BANKNIFTY | — |" not in section
+        assert "VP-15 Evening Star" in section
+
+    def test_loss_clusters_all_unknown_strategy_message(self):
+        trades = [
+            self._make_trade_with_strategy("BANKNIFTY", "—", "SELL", -5000.0),
+            self._make_trade_with_strategy("NIFTY", "—", "SELL", -2000.0),
+        ]
+        section = build_loss_clusters_section(trades)
+        assert "unavailable" in section.lower()
+
+    def test_loss_clusters_no_losses_message(self):
+        trades = [
+            self._make_trade_with_strategy("NIFTY", "VP-02 Counter Bear Trap", "BUY", 1000.0),
+        ]
+        section = build_loss_clusters_section(trades)
+        assert "No losing executed trades today." in section
+
+    def test_loss_clusters_section_before_rejected_signals_in_review(self):
+        trades = [
+            self._make_trade_with_strategy("BANKNIFTY", "VP-15 Evening Star", "SELL", -5000.0),
+        ]
+        rejected = [{
+            "time": "09:30:00", "symbol": "NIFTY26MAY26F",
+            "strategy": "VP-01 Counter Bull Trap", "reason": "ADX too weak"
+        }]
+        stats = compute_trade_stats(trades)
+        md = build_review_markdown(
+            REVIEW_DATE, trades, rejected, stats, [], [], []
+        )
+        loss_pos = md.find("## Loss Clusters")
+        rejected_pos = md.find("## Rejected Signals")
+        assert loss_pos != -1
+        assert rejected_pos != -1
+        assert loss_pos < rejected_pos, "Loss Clusters must appear before Rejected Signals"

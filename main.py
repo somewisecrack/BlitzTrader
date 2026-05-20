@@ -1071,6 +1071,7 @@ class BlitzTrader:
                     order_type="MARKET",
                     stop_loss=signal.get("stop_loss"),
                     target=signal.get("target"),
+                    strategy=signal.get("strategy", ""),
                 )
                 status = str(result.get("status", "")).upper()
                 if status in {"FILLED", "PENDING"}:

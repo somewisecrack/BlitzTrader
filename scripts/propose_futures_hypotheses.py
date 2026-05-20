@@ -65,6 +65,7 @@ _MAX_REVIEW_CHARS = 2_500
 
 _SECTION_PRIORITY = (
     "Summary",
+    "Loss Clusters",
     "Executed Trades",
     "Rejected Signals",
     "Patterns Observed",
@@ -74,6 +75,7 @@ _SECTION_PRIORITY = (
 
 _SECTION_MIN_BUDGETS = {
     "Summary": 350,
+    "Loss Clusters": 300,
     "Executed Trades": 650,
     "Rejected Signals": 650,
     "Patterns Observed": 350,
@@ -277,6 +279,13 @@ RULES:
 - Each hypothesis must be directly backtestable by a Python script using yfinance OHLCV data.
 - Do NOT depend on subjective chart reading; use only objective numeric conditions.
 
+PRIORITIZATION:
+- First, look at the ## Loss Clusters section for actual executed losing trades.
+- Propose hypotheses targeting the (symbol, strategy, direction) combinations with the largest actual losses.
+- If ## Loss Clusters is present and non-empty, you MUST propose hypotheses from it.
+- Do NOT propose a hypothesis based solely on a rejected signal if there are executed losses available.
+- Only fall back to rejected signals if there were no executed losses today.
+
 OUTPUT FORMAT:
 Respond with a valid JSON array ONLY. No markdown, no prose, no code fences.
 Each element must be a JSON object with EXACTLY these keys:
@@ -381,10 +390,53 @@ def _reject_pairs_content(hyp: dict) -> str | None:
     return _scan(hyp)
 
 
+def _extract_loss_tuples(review_text: str) -> set[tuple[str, str, str]]:
+    """Parse the ## Loss Clusters section and return a set of (symbol, strategy, direction).
+
+    Returns an empty set if the section is absent, empty, or unparseable.
+    """
+    # Find the Loss Clusters section
+    m = re.search(
+        r"## Loss Clusters\s*\n(.*?)(?=\n## |\Z)",
+        review_text,
+        re.DOTALL,
+    )
+    if not m:
+        return set()
+
+    section_body = m.group(1)
+    result: set[tuple[str, str, str]] = set()
+
+    # Parse markdown table rows: | Symbol | Strategy | Direction | Count | Total P&L |
+    # Skip header and divider rows
+    for line in section_body.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        # cols[0]="" cols[1]=Symbol cols[2]=Strategy cols[3]=Direction cols[4]=Count cols[5]=P&L cols[6]=""
+        if len(cols) < 6:
+            continue
+        sym = cols[1]
+        strategy = cols[2]
+        direction = cols[3]
+        # Skip header rows and divider rows
+        if not sym or "---" in sym or sym.lower() == "symbol":
+            continue
+        if not strategy or "---" in strategy:
+            continue
+        if not direction or direction.upper() not in ("BUY", "SELL"):
+            continue
+        result.add((sym, strategy, direction.upper()))
+
+    return result
+
+
 def _validate_gemini_hypothesis(
     raw: dict,
     review_date_iso: str,
     strategies_in_review: set[str],
+    executed_loss_tuples: set[tuple[str, str, str]] | None = None,
 ) -> tuple[bool, str]:
     """Validate a single raw hypothesis dict from Gemini output.
 
@@ -414,6 +466,23 @@ def _validate_gemini_hypothesis(
         return False, f"strategy not in SUPPORTED_STRATEGIES: {strategy!r}"
     if strategy not in strategies_in_review:
         return False, f"strategy not present in today's review: {strategy!r}"
+
+    # If executed loss tuples are provided, reject candidates whose strategy was
+    # only seen in rejected signals and not in any executed loss
+    if executed_loss_tuples is not None and len(executed_loss_tuples) > 0:
+        symbol = raw.get("symbol", "").upper()
+        direction = (raw.get("direction") or "").upper()
+        # Accept if (symbol, strategy, direction) is in executed losses
+        exact_match = (symbol, strategy, direction) in executed_loss_tuples
+        # Also accept if (symbol, strategy) appears with ANY direction in executed losses
+        sym_strat_match = any(
+            t[0] == symbol and t[1] == strategy for t in executed_loss_tuples
+        )
+        if not exact_match and not sym_strat_match:
+            return (
+                False,
+                f"strategy seen only in rejected signals, not in executed losses: {strategy!r}",
+            )
 
     # Strip unknown keys to a safe subset before calling validate_hypothesis
     safe = {
@@ -508,9 +577,14 @@ def call_gemini(
     # Cap to max_hypotheses before validation
     candidates = candidates[:max_hypotheses]
 
+    # Extract executed loss tuples from full review text for Fix E validation
+    executed_loss_tuples = _extract_loss_tuples(review_text)
+
     validated = []
     for i, raw in enumerate(candidates):
-        ok, reason = _validate_gemini_hypothesis(raw, review_date_iso, strategies_in_review)
+        ok, reason = _validate_gemini_hypothesis(
+            raw, review_date_iso, strategies_in_review, executed_loss_tuples
+        )
         if not ok:
             print(
                 f"  [Gemini] Rejected candidate {i + 1}: {reason}",

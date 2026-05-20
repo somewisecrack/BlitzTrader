@@ -51,6 +51,7 @@ compact_review = _mod.compact_review
 extract_strategies_from_review = _mod.extract_strategies_from_review
 write_no_proposals_artifact = _mod.write_no_proposals_artifact
 _extract_response_text = _mod._extract_response_text
+_extract_loss_tuples = _mod._extract_loss_tuples
 
 
 # ---------------------------------------------------------------------------
@@ -1197,3 +1198,170 @@ class TestGeminiPromptContainsPrioritizedSections:
             assert not snippet.startswith("---\nzzz"), (
                 "Log Issues content should not appear at the start of the review in the prompt"
             )
+
+
+# ---------------------------------------------------------------------------
+# _extract_loss_tuples
+# ---------------------------------------------------------------------------
+
+_LOSS_CLUSTERS_REVIEW = textwrap.dedent("""\
+    # Futures Daily Review — 2026-05-20
+
+    ## Summary
+    - Date: 2026-05-20
+    - Futures trades executed: 5
+
+    ## Loss Clusters
+
+    | Symbol | Strategy | Direction | Count | Total P&L |
+    |--------|----------|-----------|-------|-----------|
+    | BANKNIFTY | VP-15 Evening Star | SELL | 3 | ₹-12,138.00 |
+    | BANKNIFTY | VP-24 Pivot Bounce S2 | BUY | 2 | ₹-9,804.00 |
+
+    ## Rejected Signals
+
+    | Time | Symbol | Strategy | Reason |
+    |------|--------|----------|--------|
+    | 11:32:41 | BANKNIFTY26MAY26F | VPA No Demand | volume too low |
+""")
+
+_REVIEW_WITH_NO_LOSS_CLUSTERS = textwrap.dedent("""\
+    # Futures Daily Review — 2026-05-20
+
+    ## Summary
+    - No trades today.
+
+    ## Rejected Signals
+    | Time | Symbol | Strategy | Reason |
+""")
+
+
+class TestExtractLossTuples:
+    def test_parses_loss_clusters_section(self):
+        tuples = _extract_loss_tuples(_LOSS_CLUSTERS_REVIEW)
+        assert ("BANKNIFTY", "VP-15 Evening Star", "SELL") in tuples
+        assert ("BANKNIFTY", "VP-24 Pivot Bounce S2", "BUY") in tuples
+
+    def test_returns_empty_set_when_section_absent(self):
+        tuples = _extract_loss_tuples(_REVIEW_WITH_NO_LOSS_CLUSTERS)
+        assert tuples == set()
+
+    def test_returns_empty_set_on_empty_string(self):
+        assert _extract_loss_tuples("") == set()
+
+    def test_does_not_include_rejected_signals_rows(self):
+        tuples = _extract_loss_tuples(_LOSS_CLUSTERS_REVIEW)
+        # VPA No Demand is in Rejected Signals not Loss Clusters
+        for t in tuples:
+            assert t[1] != "VPA No Demand"
+
+
+# ---------------------------------------------------------------------------
+# _validate_gemini_hypothesis — executed loss filter
+# ---------------------------------------------------------------------------
+
+class TestValidateGeminiHypothesisLossFilter:
+    """Candidates targeting rejected-only strategies must be rejected when losses exist."""
+
+    def _loss_tuples(self):
+        return {
+            ("BANKNIFTY", "VP-15 Evening Star", "SELL"),
+        }
+
+    def test_candidate_rejected_when_strategy_only_in_rejected_signals(self):
+        """VPA No Demand only in rejected signals — must be rejected when executed losses exist."""
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        # VPA No Demand must be a supported strategy for this test to be meaningful
+        if "VPA No Demand" not in SUPPORTED_STRATEGIES:
+            pytest.skip("VPA No Demand not in SUPPORTED_STRATEGIES in this environment")
+        bad = {
+            **_VALID_GEMINI_CANDIDATE,
+            "strategy": "VPA No Demand",
+            "direction": "SELL",
+            "claim": "Block VPA No Demand SELL when volume too low",
+        }
+        strategies_with_vpa = _STRATEGIES_IN_REVIEW | {"VPA No Demand"}
+        ok, reason = _validate_gemini_hypothesis(
+            bad, _REVIEW_DATE_ISO, strategies_with_vpa, self._loss_tuples()
+        )
+        assert not ok
+        assert "rejected signals" in reason.lower() or "executed losses" in reason.lower()
+
+    def test_candidate_accepted_when_strategy_in_executed_losses(self):
+        """VP-15 Evening Star is in executed losses — must pass the loss filter."""
+        candidate = {
+            **_VALID_GEMINI_CANDIDATE,
+            "strategy": "VP-15 Evening Star",
+            "direction": "SELL",
+            "claim": "Block VP-15 Evening Star SELL on BANKNIFTY when RSI14 < 30",
+        }
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        if "VP-15 Evening Star" not in SUPPORTED_STRATEGIES:
+            pytest.skip("VP-15 Evening Star not in SUPPORTED_STRATEGIES")
+        strategies = {"VP-15 Evening Star"}
+        ok, reason = _validate_gemini_hypothesis(
+            candidate, _REVIEW_DATE_ISO, strategies, self._loss_tuples()
+        )
+        assert ok, reason
+
+    def test_validation_falls_back_when_loss_tuples_empty(self):
+        """When loss_tuples is empty, the loss filter is not applied."""
+        ok, reason = _validate_gemini_hypothesis(
+            _VALID_GEMINI_CANDIDATE, _REVIEW_DATE_ISO, _STRATEGIES_IN_REVIEW,
+            executed_loss_tuples=set()
+        )
+        assert ok, reason
+
+    def test_validation_falls_back_when_loss_tuples_none(self):
+        """When loss_tuples is None, the loss filter is not applied."""
+        ok, reason = _validate_gemini_hypothesis(
+            _VALID_GEMINI_CANDIDATE, _REVIEW_DATE_ISO, _STRATEGIES_IN_REVIEW,
+            executed_loss_tuples=None
+        )
+        assert ok, reason
+
+    def test_accepts_same_symbol_strategy_different_direction(self):
+        """If (symbol, strategy) appears in losses even with different direction, accept."""
+        # Add BANKNIFTY VP-01 Counter Bull Trap BUY to loss tuples
+        loss_tuples = {("BANKNIFTY", "VP-01 Counter Bull Trap", "BUY")}
+        # Candidate proposes VP-01 SELL — (symbol, strategy) matches, direction differs
+        ok, reason = _validate_gemini_hypothesis(
+            _VALID_GEMINI_CANDIDATE, _REVIEW_DATE_ISO, _STRATEGIES_IN_REVIEW,
+            executed_loss_tuples=loss_tuples
+        )
+        assert ok, reason
+
+
+# ---------------------------------------------------------------------------
+# compact_review — Loss Clusters section in priority
+# ---------------------------------------------------------------------------
+
+class TestCompactReviewLossClusters:
+    def test_loss_clusters_appears_before_rejected_signals_in_compact_review(self):
+        sections = {
+            "Summary": "Short summary.",
+            "Loss Clusters": "| BANKNIFTY | VP-15 Evening Star | SELL | 3 | ₹-12,138 |",
+            "Executed Trades": "| t | s |\n|---|---|\n| 09:00 | BANKNIFTY |",
+            "Rejected Signals": "| t | s |\n|---|---|\n| 09:10 | NIFTY |",
+        }
+        review = _make_review(sections)
+        result = compact_review(review)
+        loss_pos = result.find("## Loss Clusters")
+        rej_pos = result.find("## Rejected Signals")
+        assert loss_pos != -1, "Loss Clusters section should appear in compact review"
+        assert rej_pos != -1
+        assert loss_pos < rej_pos, "Loss Clusters must appear before Rejected Signals"
+
+    def test_loss_clusters_gets_budget_allocation(self):
+        # Large sections around it should not starve Loss Clusters completely
+        sections = {
+            "Summary": "S" * 4000,
+            "Loss Clusters": "LOSS_CLUSTER_MARKER",
+            "Executed Trades": "E" * 1000,
+            "Rejected Signals": "R" * 1000,
+        }
+        review = _make_review(sections)
+        result = compact_review(review)
+        assert "LOSS_CLUSTER_MARKER" in result, (
+            "Loss Clusters should receive budget allocation and not be starved"
+        )

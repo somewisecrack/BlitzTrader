@@ -147,6 +147,7 @@ class OrderExecutionTools:
         price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         target: Optional[float] = None,
+        strategy: str = "",
     ) -> dict:
         """
         Place a virtual order (MARKET or LIMIT).
@@ -159,6 +160,7 @@ class OrderExecutionTools:
         :param price:      Required for LIMIT orders, ignored for MARKET
         :param stop_loss:  Optional stop-loss price for auto-close
         :param target:     Optional target price for auto-close
+        :param strategy:   Strategy name that triggered this order (metadata only)
         :returns: Order confirmation or error
         """
         direction = direction.upper()
@@ -290,6 +292,7 @@ class OrderExecutionTools:
             fill["margin_used"] = margin_required
             fill["stop_loss"] = stop_loss
             fill["target"] = target
+            fill["strategy"] = strategy
             return self._process_fill(fill)
 
         else:
@@ -309,6 +312,7 @@ class OrderExecutionTools:
                 "best_ask_at_placement": best_ask,
                 "stop_loss": stop_loss,
                 "target": target,
+                "strategy": strategy,
             }
             self._state.add_pending_order(pending)
             logger.info(
@@ -423,6 +427,7 @@ class OrderExecutionTools:
             "entry_time": position.get("entry_time"),
             "exit_time": time.time(),
             "entry_order_id": order_id,
+            "strategy": position.get("strategy", ""),
         })
 
         logger.info(f"CLOSED: {symbol} @ ₹{fill['fill_price']:.2f}, P&L: ₹{pnl:,.2f}")
@@ -592,6 +597,7 @@ class OrderExecutionTools:
                 fill["margin_used"] = margin_required
                 fill["stop_loss"] = order.get("stop_loss")
                 fill["target"] = order.get("target")
+                fill["strategy"] = order.get("strategy", "")
                 self._state.remove_pending_order(order["order_id"])
                 self._process_fill(fill)
                 logger.info(
@@ -1043,6 +1049,7 @@ class OrderExecutionTools:
             "order_id": fill["order_id"],
             "stop_loss": fill.get("stop_loss"),
             "target": fill.get("target"),
+            "strategy": fill.get("strategy", ""),
         }
         self._state.add_position(position)
 

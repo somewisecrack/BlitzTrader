@@ -266,6 +266,142 @@ def parse_journal(journal_path: Path) -> dict:
     return result
 
 
+# ── Journal-based strategy enrichment ─────────────────────────────────────────
+
+
+def _enrich_trades_from_journal(trades: list[dict], journal_text: str) -> list[dict]:
+    """Enrich executed trades that have missing/empty strategy with data from journal.
+
+    For each trade with strategy == '—' or '':
+      - Find ENTER_LONG / ENTER_SHORT journal entries for the same symbol+direction
+        within 120 seconds of the trade's entry_time.
+      - If exactly one match: fill strategy from journal.
+      - If multiple matches: pick nearest timestamp.
+      - If no match: leave strategy as '—'.
+
+    P&L always comes from live_state (never overwritten by journal).
+
+    Args:
+        trades: list of trade dicts from parse_live_state (may be mutated in-place).
+        journal_text: raw text of the day's journal file.
+
+    Returns:
+        The same list with strategy fields enriched where possible.
+    """
+    if not trades or not journal_text:
+        return trades
+
+    # Parse ENTER_LONG / ENTER_SHORT entries from the journal text
+    HEADING_RE = re.compile(
+        r"^###\s+(\d{1,2}:\d{2}:\d{2})\s+[-—]\s+(ENTER_LONG|ENTER_SHORT)\s*$",
+        re.IGNORECASE,
+    )
+    KV_RE = re.compile(r"^\*\*([^*:]+):\*\*\s*(.+)")
+    KEY_MAP = {
+        "instrument": "symbol",
+        "strategy applied": "strategy",
+    }
+
+    journal_entries: list[dict] = []
+    current: dict | None = None
+
+    for raw_line in journal_text.splitlines():
+        line = raw_line.strip()
+        heading_m = HEADING_RE.match(line)
+        if heading_m:
+            if current is not None:
+                journal_entries.append(current)
+            time_str = heading_m.group(1)
+            action = heading_m.group(2).upper()
+            direction = "BUY" if action == "ENTER_LONG" else "SELL"
+            current = {"time_str": time_str, "direction": direction}
+            continue
+        if current is None:
+            continue
+        kv_m = KV_RE.match(line)
+        if kv_m:
+            raw_key = kv_m.group(1).strip().lower()
+            val = kv_m.group(2).strip()
+            canonical = KEY_MAP.get(raw_key, raw_key.replace(" ", "_"))
+            current[canonical] = val
+
+    if current is not None:
+        journal_entries.append(current)
+
+    # Convert journal HH:MM:SS strings to seconds-since-midnight for matching
+    def _hms_to_seconds(hms: str) -> int | None:
+        parts = hms.split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+            return h * 3600 + m * 60 + s
+        except ValueError:
+            return None
+
+    # Build a lookup of journal entries keyed by (symbol_logical, direction)
+    # symbol_logical: strip the expiry suffix, keep NIFTY / BANKNIFTY
+    def _logical(sym: str) -> str:
+        sym = sym.strip().upper()
+        if sym.startswith("BANKNIFTY"):
+            return "BANKNIFTY"
+        if sym.startswith("NIFTY"):
+            return "NIFTY"
+        return sym
+
+    journal_by_sym_dir: dict[tuple, list[dict]] = {}
+    for e in journal_entries:
+        sym_j = e.get("symbol", "")
+        if not sym_j or not is_futures_symbol(sym_j):
+            continue
+        strategy_j = e.get("strategy", "")
+        if not strategy_j or "—" in strategy_j:
+            continue
+        secs = _hms_to_seconds(e.get("time_str", ""))
+        if secs is None:
+            continue
+        key = (_logical(sym_j), e.get("direction", ""))
+        journal_by_sym_dir.setdefault(key, []).append({
+            "secs": secs,
+            "strategy": strategy_j,
+        })
+
+    # Enrich each trade that lacks a strategy
+    TOLERANCE_SECS = 120
+
+    for trade in trades:
+        strat = trade.get("strategy", "")
+        if strat and strat != "—":
+            continue  # already has strategy
+
+        # Derive trade entry time in seconds-since-midnight (IST)
+        entry_epoch = None
+        time_str = trade.get("time", "")
+        if time_str and time_str != "—":
+            entry_epoch_secs = _hms_to_seconds(time_str)
+        else:
+            entry_epoch_secs = None
+
+        sym_t = _logical(trade.get("symbol", ""))
+        dir_t = trade.get("direction", "").upper()
+        key = (sym_t, dir_t)
+        candidates = journal_by_sym_dir.get(key, [])
+
+        if not candidates or entry_epoch_secs is None:
+            continue
+
+        # Filter within tolerance
+        within = [c for c in candidates if abs(c["secs"] - entry_epoch_secs) <= TOLERANCE_SECS]
+        if not within:
+            continue
+
+        # Pick nearest
+        best = min(within, key=lambda c: abs(c["secs"] - entry_epoch_secs))
+        trade["strategy"] = best["strategy"]
+
+    return trades
+
+
 # ── Log parsing ────────────────────────────────────────────────────────────────
 
 
@@ -420,6 +556,71 @@ def detect_patterns(executed: list, rejected: list) -> list:
 # ── Output formatting ─────────────────────────────────────────────────────────
 
 
+def build_loss_clusters_section(executed: list) -> str:
+    """Build the ## Loss Clusters section from executed trades.
+
+    Groups losing trades (pnl < 0) by (symbol, strategy, direction), sums P&L,
+    counts trades.  Omits rows where strategy is '—' (unknown).
+    Sorts by total P&L ascending (worst first).
+
+    Returns the full section text (including heading).
+    """
+    # Gather losing trades with known strategy
+    cluster_map: dict[tuple, dict] = {}
+    all_losses_have_unknown_strategy = True
+    has_any_loss = False
+
+    for t in executed:
+        pnl_raw = t.get("pnl")
+        if pnl_raw is None:
+            continue
+        try:
+            pnl_val = float(pnl_raw)
+        except (TypeError, ValueError):
+            continue
+        if pnl_val >= 0:
+            continue
+
+        has_any_loss = True
+        sym = t.get("symbol", "")
+        strategy = (t.get("strategy") or "").strip()
+        if not strategy or strategy == "—":
+            continue
+
+        all_losses_have_unknown_strategy = False
+        direction = t.get("direction", "").upper()
+        key = (sym, strategy, direction)
+        if key not in cluster_map:
+            cluster_map[key] = {"count": 0, "total_pnl": 0.0}
+        cluster_map[key]["count"] += 1
+        cluster_map[key]["total_pnl"] += pnl_val
+
+    lines = ["## Loss Clusters"]
+
+    if not has_any_loss:
+        lines.append("No losing executed trades today.")
+        return "\n".join(lines)
+
+    if all_losses_have_unknown_strategy:
+        lines.append("Strategy names unavailable for executed losses — see Executed Trades.")
+        return "\n".join(lines)
+
+    if not cluster_map:
+        lines.append("No losing executed trades with known strategy today.")
+        return "\n".join(lines)
+
+    # Sort by total P&L ascending (worst first)
+    rows = sorted(cluster_map.items(), key=lambda kv: kv[1]["total_pnl"])
+
+    lines.append("| Symbol | Strategy | Direction | Count | Total P&L |")
+    lines.append("|--------|----------|-----------|-------|-----------|")
+    for (sym, strategy, direction), agg in rows:
+        lines.append(
+            f"| {sym} | {strategy} | {direction} | {agg['count']} | ₹{agg['total_pnl']:+,.2f} |"
+        )
+    return "\n".join(lines)
+
+
 def build_review_markdown(
     review_date: date,
     executed: list,
@@ -492,6 +693,11 @@ def build_review_markdown(
             lines.append(f"| {time_val} | {sym} | {direction} | {strategy} | {pnl_str} |")
     else:
         lines.append("_No futures trades executed on this date._")
+    lines.append("")
+
+    # Loss clusters (grouped executed losses by strategy — primary target for Gemini)
+    loss_clusters_section = build_loss_clusters_section(executed)
+    lines.append(loss_clusters_section)
     lines.append("")
 
     # Rejected signals table
@@ -590,8 +796,15 @@ def main():
 
     # ── SOURCE 2: Journal (fallback for executed trades if live_state.json empty) ──
     # Always parse journal for REJECTED signals (not recorded in live_state.json)
+    # Also used to enrich strategy names on executed trades from live_state.json.
     print(f"[evaluate_futures_day] Reading journal: {journal_path}")
     journal_data = parse_journal(journal_path)
+    journal_text_raw = ""
+    if journal_path.exists():
+        try:
+            journal_text_raw = journal_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
     if not all_executed and journal_data["executed"]:
         # Fallback: use journal ENTER_LONG/ENTER_SHORT entries
@@ -600,6 +813,15 @@ def main():
         print(f"  Using journal fallback: {len(all_executed)} executed trade(s)")
     elif not journal_path.exists():
         print("  (journal not found, skipping)")
+
+    # Enrich strategy names on executed trades from journal (Fix B)
+    if all_executed and journal_text_raw:
+        before_enrich = sum(1 for t in all_executed if (t.get("strategy") or "—") == "—")
+        all_executed = _enrich_trades_from_journal(all_executed, journal_text_raw)
+        after_enrich = sum(1 for t in all_executed if (t.get("strategy") or "—") == "—")
+        enriched_count = before_enrich - after_enrich
+        if enriched_count > 0:
+            print(f"  Journal enrichment: filled strategy for {enriched_count} trade(s)")
 
     # Rejected signals always come from journal
     all_rejected = journal_data["rejected"]
