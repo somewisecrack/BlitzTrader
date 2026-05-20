@@ -75,6 +75,7 @@ from pairs.scanner import PairScanner
 from pairs.portfolio import PairPortfolio
 from broker.shoonya_client import ShoonyaClient, assert_client_identity
 from broker.live_feed import LiveFeedManager
+from broker.quote_cache import QuoteCache
 from tools.state_manager import StateManager
 from tools.virtual_ledger import VirtualLedger
 from tools.market_data import MarketDataTools
@@ -129,9 +130,10 @@ class BlitzTrader:
         self._active_tokens = None
         self._llm_disabled_reason = None
         self._llm_disabled_notified = False
+        self._quote_cache = None
         # Pairs trading
         self._pairs_scanner = PairScanner()
-        self._pairs_portfolio = PairPortfolio(PAIRS_STATE_FILE)
+        self._pairs_portfolio = PairPortfolio(PAIRS_STATE_FILE)  # quote_cache injected after feed starts
         self._pairs_candidates: list = []
         self._pairs_scan_done: bool = False
         self._pairs_opened: bool = False
@@ -319,6 +321,11 @@ class BlitzTrader:
         # Update recorder token map now that futures tsyms are resolved
         # (DataRecorder was created before futures lookup — update it now)
         self._data_recorder.update_token_map(active_tokens)
+
+        # Create shared QuoteCache and inject into PairPortfolio
+        self._quote_cache = QuoteCache(shoonya_client=self._shoonya, live_feed=self._feed)
+        self._pairs_portfolio = PairPortfolio(PAIRS_STATE_FILE, quote_cache=self._quote_cache)
+        logger.info("✓ QuoteCache created and wired into PairPortfolio")
 
         # 3. State manager
         self._state = StateManager(STATE_FILE, VIRTUAL_CAPITAL)
@@ -696,6 +703,27 @@ class BlitzTrader:
                 logger.info("Pairs EOD close result: %s", pairs_close)
                 pairs_status = self._pairs_portfolio.get_status()
 
+                # Warn on failed pair closes (Fix D)
+                pairs_failed = pairs_close.get("failed", 0)
+                if pairs_failed > 0:
+                    failed_names = ", ".join(
+                        p["pair_name"] for p in pairs_close.get("failed_pairs", [])
+                    )
+                    for fp in pairs_close.get("failed_pairs", []):
+                        logger.error(
+                            "EOD pairs close FAILED: %s — %s",
+                            fp["pair_name"],
+                            fp.get("reason", "unknown"),
+                        )
+                    if self._telegram:
+                        pairs_closed_count = pairs_close.get("closed", 0)
+                        pairs_total = pairs_closed_count + pairs_failed
+                        self._telegram.send_telegram(
+                            f"⚠️ EOD pairs close: {pairs_closed_count}/{pairs_total} pairs closed.\n"
+                            f"Failed to close: {failed_names}\n"
+                            f"Reason: price unavailable. Final P&L is incomplete."
+                        )
+
                 eod_context = build_eod_context(pairs_summary=self._fmt_pairs_summary(pairs_status))
                 self._run_agent_iteration(
                     eod_context,
@@ -705,15 +733,23 @@ class BlitzTrader:
                 )
                 if self._telegram:
                     pnl, pnl_pct = self._state.get_daily_pnl()
-                    pairs_pnl = pairs_status.get("net_pnl", 0.0)
+                    pairs_pnl = pairs_close.get("total_pnl", pairs_status.get("net_pnl", 0.0))
                     combined_pnl = pnl + pairs_pnl
+                    pairs_closed_count = pairs_close.get("closed", 0)
+                    pairs_total_count = pairs_closed_count + pairs_close.get("failed", 0)
+                    incomplete_note = (
+                        f"\n⚠️ P&L is incomplete — {pairs_close.get('failed', 0)} pair(s) could not be closed."
+                        if pairs_close.get("failed", 0) > 0
+                        else ""
+                    )
                     self._telegram.send_telegram(
                         f"EOD complete.\n"
                         f"Futures — Trades: {self._state.get_state().get('trade_count', 0)} | "
-                        f"P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)\n"
-                        f"Pairs — Open: {pairs_status.get('open_pairs', 0)} closed | "
-                        f"P&L: ₹{pairs_pnl:+,.2f}\n"
+                        f"Realized P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)\n"
+                        f"Pairs — Closed: {pairs_closed_count}/{pairs_total_count} | "
+                        f"Realized P&L: ₹{pairs_pnl:+,.2f}\n"
                         f"Combined P&L: ₹{combined_pnl:+,.2f}"
+                        f"{incomplete_note}"
                     )
                 if self._feed:
                     self._feed.stop()
@@ -794,6 +830,14 @@ class BlitzTrader:
                         max_tool_rounds=6,
                         phase="chat",
                     )
+                    # Detect Gemini 503/UNAVAILABLE and send deterministic fallback
+                    last_err = self._agent.get_last_error() if self._agent else None
+                    if last_err and last_err.get("kind") == "service_unavailable":
+                        self._telegram.send_telegram(
+                            "⚠️ Gemini is temporarily unavailable. "
+                            "Deterministic commands (pnl / status / positions / exit N) "
+                            "still work — just ask."
+                        )
                     consecutive_errors = 0
                 except Exception as e:
                     consecutive_errors += 1

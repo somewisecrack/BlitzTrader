@@ -14,6 +14,61 @@ from collections import deque
 
 logger = logging.getLogger("BlitzTrader.Telegram")
 
+TELEGRAM_MAX_CHARS = 3500  # conservative limit below Telegram's 4096-char cap
+
+
+def send_telegram_safe(bot_token: str, chat_id: str, text: str) -> bool:
+    """
+    Send text to Telegram, splitting on line boundaries if > TELEGRAM_MAX_CHARS.
+
+    Returns True if at least one chunk was sent successfully, False otherwise.
+    Does NOT raise; all exceptions are caught and logged.
+    """
+    import requests as _requests
+
+    def _post(chunk: str) -> bool:
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            resp = _requests.post(
+                url,
+                json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("ok"):
+                return True
+            logger.error("Telegram send failed: %s", data.get("description", "Unknown error"))
+            return False
+        except Exception as exc:
+            logger.error("Telegram send failed: %s", exc)
+            return False
+
+    if len(text) <= TELEGRAM_MAX_CHARS:
+        return _post(text)
+
+    # Split on line boundaries — never cut mid-line
+    lines = text.splitlines(keepends=True)
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        if len(current) + len(line) > TELEGRAM_MAX_CHARS:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current)
+
+    sent_any = False
+    for i, chunk in enumerate(chunks, 1):
+        ok = _post(chunk)
+        if ok:
+            sent_any = True
+        else:
+            logger.error("Telegram send failed chunk %d/%d", i, len(chunks))
+    return sent_any
+
 
 class TelegramHandler:
     """
@@ -103,8 +158,11 @@ class TelegramHandler:
         """
         Send a message to the authorized Telegram user.
 
+        Long messages (> TELEGRAM_MAX_CHARS) are automatically split on line
+        boundaries so Telegram's 4096-char limit is never exceeded.
+
         :param message: Text message to send (supports **bold**, *italic*, \\n)
-        :returns: {status, message_id} or {error}
+        :returns: {status: "sent"} on success, {error: ...} on failure
         """
         if not self._bot_token or not self._user_id:
             logger.warning("Telegram not configured, message not sent")
@@ -120,31 +178,14 @@ class TelegramHandler:
                 f"[Verified] Trades: {trade_count} | P&L: ₹{pnl:+,.2f}"
             )
 
-        try:
-            import requests
-
-            url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
-            payload = {
-                "chat_id": self._user_id,
-                "text": self._format_message(message),
-                "parse_mode": "HTML",
-            }
-
-            resp = requests.post(url, json=payload, timeout=10)
-            data = resp.json()
-
-            if data.get("ok"):
-                msg_id = data.get("result", {}).get("message_id", 0)
-                logger.info(f"Telegram sent: msg_id={msg_id}")
-                return {"status": "sent", "message_id": msg_id}
-            else:
-                error = data.get("description", "Unknown error")
-                logger.error(f"Telegram send failed: {error}")
-                return {"error": error}
-
-        except Exception as e:
-            logger.exception("Failed to send Telegram message")
-            return {"error": str(e)}
+        formatted = self._format_message(message)
+        ok = send_telegram_safe(self._bot_token, self._user_id, formatted)
+        if ok:
+            logger.info("Telegram message sent (len=%d)", len(formatted))
+            return {"status": "sent"}
+        else:
+            logger.error("Telegram send failed (all chunks failed)")
+            return {"error": "send failed"}
 
     # ──────────────────────────────────────────────────────────
     #   COMMAND LISTENER (background thread)

@@ -343,11 +343,42 @@ class AgentLoop:
                         logger.error(f"Rate limit persists: {e}")
                         return None
                 else:
+                    err_str_full = str(e)
+                    # Detect 503/UNAVAILABLE (ServiceUnavailable, DeadlineExceeded,
+                    # grpc UNAVAILABLE, or any message containing "503"/"UNAVAILABLE")
+                    is_unavailable = (
+                        "503" in err_str_full
+                        or "UNAVAILABLE" in err_str_full
+                        or "ServiceUnavailable" in type(e).__name__
+                        or "DeadlineExceeded" in type(e).__name__
+                        or (hasattr(e, "code") and callable(getattr(e, "code", None))
+                            and str(getattr(e, "code", lambda: "")()) == "StatusCode.UNAVAILABLE")
+                    )
+                    if is_unavailable:
+                        self._last_error = {
+                            "kind": "service_unavailable",
+                            "model": active_model,
+                            "message": err_str_full,
+                        }
+                        if attempt < max_retries - 1:
+                            logger.warning(
+                                "Gemini 503/UNAVAILABLE (attempt %d/%d). "
+                                "Waiting %ds before retry...",
+                                attempt + 1, max_retries, delay,
+                            )
+                            time.sleep(delay)
+                            delay = min(delay * 2, 30)
+                            continue
+                        logger.error(
+                            "Gemini 503/UNAVAILABLE after %d attempts — returning None",
+                            max_retries,
+                        )
+                        return None
                     logger.error(f"Gemini API error: {e}")
                     self._last_error = {
                         "kind": "api_error",
                         "model": active_model,
-                        "message": str(e),
+                        "message": err_str_full,
                     }
                     if attempt >= max_retries - 1:
                         return None

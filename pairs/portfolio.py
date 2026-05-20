@@ -58,10 +58,21 @@ class PairPosition:
 
 
 class PairPortfolio:
-    def __init__(self, state_file: Path = PAIRS_STATE_FILE):
+    def __init__(self, state_file: Path = PAIRS_STATE_FILE, quote_cache=None):
+        """
+        Parameters
+        ----------
+        state_file : Path
+            Where pair positions are persisted.
+        quote_cache : QuoteCache | None
+            Shared quote cache (broker.quote_cache.QuoteCache).  Injected by
+            main.py after the feed is started.  When None, _entry_price falls
+            back to direct Shoonya REST calls (used in tests and legacy paths).
+        """
         self._state_file = state_file
         self.capital = PAIRS_GROSS_CAPITAL  # gross deployable capital (base * leverage)
         self.positions: list[PairPosition] = []
+        self._quote_cache = quote_cache  # QuoteCache | None
 
     @staticmethod
     def _rank_candidates(candidates: list[PairCandidate]) -> list[PairCandidate]:
@@ -203,40 +214,102 @@ class PairPortfolio:
         return events
 
     def close_all(self, client: ShoonyaClient) -> dict:
+        """
+        Attempt to close all open pair positions at EOD.
+
+        For each pair, both leg prices must be available before any state is
+        mutated. If either price is missing the pair is added to failed_pairs
+        and left open — no partial-close, no assumed price.
+
+        Returns
+        -------
+        {
+            "closed": int,
+            "failed": int,
+            "total_pnl": float,
+            "failed_pairs": [{"pair_name": str, "reason": str}],
+        }
+        """
         total_pnl = 0.0
-        closed = []
+        closed: list[PairPosition] = []
+        failed_closes: list[dict] = []
+
         for pos in self.positions:
-            pair_pnl = 0.0
+            if pos.closed_at:
+                # Already closed (e.g. via intraday stop-hit) — count realized
+                total_pnl += pos.pnl or 0.0
+                closed.append(pos)
+                continue
+
+            # ── Resolve prices for open legs ─────────────────────
+            long_exit = None
+            short_exit = None
+            missing_legs: list[str] = []
+
             if not pos.long_leg.closed_at:
                 long_exit = self._entry_price(
                     client,
                     ResolvedScrip(pos.long_leg.symbol, pos.long_leg.tradingsymbol, pos.long_leg.token),
                     "SELL",
+                    ttl=5.0,
                 )
-                if long_exit is not None:
-                    pair_pnl += self._close_leg(pos.long_leg, long_exit)
+                if long_exit is None:
+                    missing_legs.append(pos.long_leg.symbol)
             else:
-                pair_pnl += pos.long_leg.realized_pnl or 0.0
+                long_exit = pos.long_leg.exit_price  # already closed
+
             if not pos.short_leg.closed_at:
                 short_exit = self._entry_price(
                     client,
                     ResolvedScrip(pos.short_leg.symbol, pos.short_leg.tradingsymbol, pos.short_leg.token),
                     "BUY",
+                    ttl=5.0,
                 )
-                if short_exit is not None:
-                    pair_pnl += self._close_leg(pos.short_leg, short_exit)
+                if short_exit is None:
+                    missing_legs.append(pos.short_leg.symbol)
+            else:
+                short_exit = pos.short_leg.exit_price  # already closed
+
+            if missing_legs:
+                reason = f"price unavailable for {', '.join(missing_legs)}"
+                logger.warning(
+                    "EOD close FAILED for %s: %s — leaving open, no state mutation",
+                    pos.pair_name,
+                    reason,
+                )
+                failed_closes.append({"pair_name": pos.pair_name, "reason": reason})
+                continue
+
+            # ── Both prices available — close legs and mark pair ──
+            pair_pnl = 0.0
+            if not pos.long_leg.closed_at and long_exit is not None:
+                pair_pnl += self._close_leg(pos.long_leg, long_exit)
+            else:
+                pair_pnl += pos.long_leg.realized_pnl or 0.0
+
+            if not pos.short_leg.closed_at and short_exit is not None:
+                pair_pnl += self._close_leg(pos.short_leg, short_exit)
             else:
                 pair_pnl += pos.short_leg.realized_pnl or 0.0
-            if not pos.long_leg.closed_at or not pos.short_leg.closed_at:
-                continue
+
             pos.closed_at = datetime.now().isoformat()
             pos.pnl = round(pair_pnl, 2)
             total_pnl += pos.pnl
             closed.append(pos)
-            logger.info("CLOSE %s pnl=%.2f", pos.pair_name, pos.pnl)
+            logger.info("EOD CLOSE %s pnl=%.2f", pos.pair_name, pos.pnl)
+
         self._persist()
-        self._append_eod_journal(closed, total_pnl)
-        return {"closed": len(closed), "total_pnl": round(total_pnl, 2)}
+        # Journal only the newly-closed pairs (filter out already-closed that
+        # were added to closed[] above for total_pnl accounting)
+        newly_closed = [p for p in closed if p.closed_at]
+        self._append_eod_journal(newly_closed, total_pnl)
+
+        return {
+            "closed": len(closed),
+            "failed": len(failed_closes),
+            "total_pnl": round(total_pnl, 2),
+            "failed_pairs": failed_closes,
+        }
 
     def get_status(self, client: ShoonyaClient | None = None) -> dict:
         total_realized = 0.0
@@ -304,8 +377,8 @@ class PairPortfolio:
             long_scrip, short_scrip = y, x
             long_weight, short_weight = 1.0, candidate.beta
 
-        long_entry = self._entry_price(client, long_scrip, "BUY")
-        short_entry = self._entry_price(client, short_scrip, "SELL")
+        long_entry = self._entry_price(client, long_scrip, "BUY", ttl=0.0)
+        short_entry = self._entry_price(client, short_scrip, "SELL", ttl=0.0)
         if long_entry is None or short_entry is None:
             logger.warning("Skipping %s/%s: missing entry prices", candidate.x_symbol, candidate.y_symbol)
             return None
@@ -372,13 +445,38 @@ class PairPortfolio:
         )
         return position
 
-    def _entry_price(self, client: ShoonyaClient, scrip: ResolvedScrip, action: str) -> float | None:
+    def _entry_price(
+        self,
+        client: "ShoonyaClient",
+        scrip: "ResolvedScrip",
+        action: str,
+        *,
+        ttl: float = 3.0,
+    ) -> "float | None":
+        """
+        Resolve the best-available price for a scrip via QuoteCache → direct REST.
+
+        Monitoring/status calls use TTL=3 s (pairs equity, slower-moving).
+        EOD close calls should pass ttl=5.0.
+        Order-placement calls (open_candidate) pass ttl=0.0 to always get fresh price.
+        """
+        # Prefer QuoteCache (covers WebSocket → REST with dedup + rate limiting)
+        if getattr(self, "_quote_cache", None) is not None:
+            ba = self._quote_cache.get_best_bid_ask(PAIRS_EXCHANGE, scrip.token, ttl=ttl)
+            if ba is not None:
+                bid, ask = ba
+                return round(ask if action == "BUY" else bid, 2)
+            ltp = self._quote_cache.get_ltp(PAIRS_EXCHANGE, scrip.token, ttl=ttl)
+            if ltp is not None:
+                return round(ltp, 2)
+
+        # Direct REST fallback (used when QuoteCache is not wired in)
         book = client.get_best_bid_ask(PAIRS_EXCHANGE, scrip.token)
-        if not book:
-            last = client.get_last_price(PAIRS_EXCHANGE, scrip.token)
-            return round(last, 2) if last is not None else None
-        bid, ask = book
-        return round(ask if action == "BUY" else bid, 2)
+        if book:
+            bid, ask = book
+            return round(ask if action == "BUY" else bid, 2)
+        last = client.get_last_price(PAIRS_EXCHANGE, scrip.token)
+        return round(last, 2) if last is not None else None
 
     def _margin_per_share(
         self,
