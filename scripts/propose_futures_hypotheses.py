@@ -390,8 +390,28 @@ def _reject_pairs_content(hyp: dict) -> str | None:
     return _scan(hyp)
 
 
+def _logical_symbol(sym: str) -> str:
+    """Normalize a futures tsym to its logical instrument name (NIFTY or BANKNIFTY).
+
+    Examples:
+      BANKNIFTY26MAY26F -> BANKNIFTY
+      NIFTY26MAY26F     -> NIFTY
+      BANKNIFTY         -> BANKNIFTY
+      NIFTY             -> NIFTY
+    """
+    sym = (sym or "").strip().upper()
+    if sym.startswith("BANKNIFTY"):
+        return "BANKNIFTY"
+    if sym.startswith("NIFTY"):
+        return "NIFTY"
+    return sym
+
+
 def _extract_loss_tuples(review_text: str) -> set[tuple[str, str, str]]:
     """Parse the ## Loss Clusters section and return a set of (symbol, strategy, direction).
+
+    Symbol is normalized to its logical name (NIFTY / BANKNIFTY) so that it
+    matches Gemini-proposed symbols which always use bare logical names.
 
     Returns an empty set if the section is absent, empty, or unparseable.
     """
@@ -427,7 +447,8 @@ def _extract_loss_tuples(review_text: str) -> set[tuple[str, str, str]]:
             continue
         if not direction or direction.upper() not in ("BUY", "SELL"):
             continue
-        result.add((sym, strategy, direction.upper()))
+        # Normalize to logical symbol name so bare names (BANKNIFTY) match tsyms (BANKNIFTY26MAY26F)
+        result.add((_logical_symbol(sym), strategy, direction.upper()))
 
     return result
 
@@ -470,7 +491,7 @@ def _validate_gemini_hypothesis(
     # If executed loss tuples are provided, reject candidates whose strategy was
     # only seen in rejected signals and not in any executed loss
     if executed_loss_tuples is not None and len(executed_loss_tuples) > 0:
-        symbol = raw.get("symbol", "").upper()
+        symbol = _logical_symbol(raw.get("symbol", ""))
         direction = (raw.get("direction") or "").upper()
         # Accept if (symbol, strategy, direction) is in executed losses
         exact_match = (symbol, strategy, direction) in executed_loss_tuples

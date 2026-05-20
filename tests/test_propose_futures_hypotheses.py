@@ -1239,6 +1239,7 @@ _REVIEW_WITH_NO_LOSS_CLUSTERS = textwrap.dedent("""\
 class TestExtractLossTuples:
     def test_parses_loss_clusters_section(self):
         tuples = _extract_loss_tuples(_LOSS_CLUSTERS_REVIEW)
+        # Symbol is normalized to logical name (BANKNIFTY, not BANKNIFTY26MAY26F)
         assert ("BANKNIFTY", "VP-15 Evening Star", "SELL") in tuples
         assert ("BANKNIFTY", "VP-24 Pivot Bounce S2", "BUY") in tuples
 
