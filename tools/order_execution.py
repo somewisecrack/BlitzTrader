@@ -18,7 +18,7 @@ IST = pytz.timezone("Asia/Kolkata")
 
 # Known bare logical names that must not be used directly for execution.
 # Callers must use the resolved futures tsym (e.g. NIFTY28APR26F).
-_BARE_LOGICAL_NAMES = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+_BARE_LOGICAL_NAMES = {"NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY"}
 
 
 class OrderExecutionTools:
@@ -183,22 +183,22 @@ class OrderExecutionTools:
                 "error": (
                     f"BLOCKED: bare logical name '{symbol}' not accepted. "
                     f"Use the resolved futures tsym "
-                    f"(e.g. NIFTY28APR26F, BANKNIFTY28APR26F, FINNIFTY28APR26F). "
+                    f"(e.g. NIFTY28APR26F, BANKNIFTY28APR26F). "
                     f"Check the ACTIVE FUTURES INSTRUMENTS section in context for the correct tsym."
                 ),
                 "status": "REJECTED",
             }
 
-        if not (sym_up.startswith("NIFTY") or sym_up.startswith("BANKNIFTY") or sym_up.startswith("FINNIFTY")):
+        if not (sym_up.startswith("NIFTY") or sym_up.startswith("BANKNIFTY")):
             return {
-                "error": "BLOCKED: Only NIFTY, BANKNIFTY, and FINNIFTY futures are allowed.",
+                "error": "BLOCKED: Only NIFTY and BANKNIFTY futures are allowed.",
                 "status": "REJECTED",
             }
         if sym_up.endswith("CE") or sym_up.endswith("PE"):
             return {
                 "error": (
                     "BLOCKED: Options (CE/PE) are disabled for live execution. "
-                    "Use the resolved NIFTY/BANKNIFTY/FINNIFTY futures tsym "
+                    "Use the resolved NIFTY/BANKNIFTY futures tsym "
                     "(e.g. NIFTY28APR26F) instead."
                 ),
                 "status": "REJECTED",
@@ -825,12 +825,15 @@ class OrderExecutionTools:
         }
 
     def _logical_instrument(self, symbol: str) -> Optional[str]:
-        """Map a futures tsym to its logical instrument for no-pyramiding checks."""
+        """Map a futures tsym to its logical instrument for no-pyramiding checks.
+        Only NIFTY and BANKNIFTY are in the active futures universe.
+        """
         sym = (symbol or "").upper()
         if "BANKNIFTY" in sym:
             return "BANKNIFTY"
         if "FINNIFTY" in sym:
-            return "FINNIFTY"
+            # FINNIFTY removed from active universe — do not map to NIFTY
+            return None
         if "NIFTY" in sym:
             return "NIFTY"
         return None
@@ -1015,7 +1018,7 @@ class OrderExecutionTools:
 
         Futures tsyms (e.g. NIFTY28APR26F, BANKNIFTY28APR26F) end with 'F'
         and contain month-year digits; they trade on NFO.
-        Bare index names (NIFTY, BANKNIFTY, FINNIFTY) are on NSE when present.
+        Bare index names (NIFTY, BANKNIFTY) are on NSE when present.
         """
         sym = symbol.upper()
         if any(x in sym for x in ["CE", "PE"]):

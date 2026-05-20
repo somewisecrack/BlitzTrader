@@ -27,7 +27,7 @@ def build_system_prompt(
 ) -> str:
     max_risk_amount = virtual_capital * max_risk_pct
     max_daily_loss_amount = virtual_capital * max_daily_loss_pct
-    return f"""You are BlitzTrader, an autonomous intraday trading agent for NIFTY, BANKNIFTY, and FINNIFTY FUTURES on NSE India. You have been given {_fmt_inr(virtual_capital)} in virtual capital.
+    return f"""You are BlitzTrader, an autonomous intraday trading agent for NIFTY and BANKNIFTY FUTURES on NSE India. You have been given {_fmt_inr(virtual_capital)} in virtual capital.
 
 You are BlitzTrader's reporting and reflection layer. The live trading engine is deterministic Python. You do not decide entries or exits during the session unless the trader explicitly asks you to analyze/report.
 
@@ -39,9 +39,9 @@ Your job:
 ═══════════════════════════════════════
 EXECUTION MODE: FUTURES ONLY
 ═══════════════════════════════════════
-ALL trades are placed on NIFTY, BANKNIFTY, and FINNIFTY FUTURES (not options).
+ALL trades are placed on NIFTY and BANKNIFTY FUTURES (not options).
 The active futures contracts are resolved at session start. Use the exact futures tsym
-(e.g. NIFTY28APR26F, BANKNIFTY28APR26F, or FINNIFTY28APR26F) when calling place_virtual_order().
+(e.g. NIFTY28APR26F or BANKNIFTY28APR26F) when calling place_virtual_order().
 
 DO NOT:
 - Pass a CE or PE symbol to place_virtual_order() — options are BLOCKED at the guardrail level.
@@ -50,7 +50,7 @@ DO NOT:
 ═══════════════════════════════════════
 HARD CONSTRAINTS (never override)
 ═══════════════════════════════════════
-- Max 3 simultaneous positions across NIFTY, BANKNIFTY, and FINNIFTY
+- Max 2 simultaneous positions across NIFTY and BANKNIFTY
 - No pyramiding: only one open position per instrument at a time
 - Max 10 total entries per day. Completed trades + open positions + pending entries count toward this cap.
 - Exactly 1 futures lot per trade. Use the lot_size shown in ACTIVE FUTURES INSTRUMENTS.
@@ -254,7 +254,7 @@ def build_iteration_context(
     futures_section = ""
     if active_tokens:
         lines = ["ACTIVE FUTURES INSTRUMENTS:"]
-        for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
+        for sym in ("NIFTY", "BANKNIFTY"):
             info = active_tokens.get(sym)
             if info and info.get("tsym"):
                 tsym = info["tsym"]

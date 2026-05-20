@@ -607,7 +607,7 @@ class TestModeADeterministicParse:
         assert len(hypotheses) >= 1
         for hyp in hypotheses:
             assert hyp["scope"] == "futures"
-            assert hyp["symbol"] in {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+            assert hyp["symbol"] in {"NIFTY", "BANKNIFTY"}
 
     def test_mode_a_created_by_is_manual(self):
         hypotheses = mode_a_parse(

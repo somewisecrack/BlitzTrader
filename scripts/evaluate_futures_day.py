@@ -30,10 +30,10 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY"}
 # Match bare logical names and common tsym patterns like NIFTY28APR26F
 _FUTURES_TSYM_RE = re.compile(
-    r"\b(NIFTY|BANKNIFTY|FINNIFTY)(\d{2}[A-Z]{3}\d{2}F)?\b", re.IGNORECASE
+    r"\b(NIFTY|BANKNIFTY)(\d{2}[A-Z]{3}\d{2}F)?\b", re.IGNORECASE
 )
 
 MAX_OUTPUT_BYTES = 1_000_000  # 1 MB
@@ -101,7 +101,7 @@ def parse_live_state(live_state_path: Path, review_date: date) -> list[dict]:
       time, symbol, direction, strategy, pnl, quantity, entry_price, exit_price
 
     Only returns trades whose entry_time falls on review_date (IST).
-    Only returns futures trades (NIFTY/BANKNIFTY/FINNIFTY).
+    Only returns futures trades (NIFTY/BANKNIFTY).
     Never returns placeholder rows.
     """
     if not live_state_path.exists():

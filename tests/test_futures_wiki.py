@@ -151,10 +151,16 @@ class TestValidateHypothesis:
         assert "unsupported" in err.lower() or "unknown_field" in err.lower()
 
     def test_accepts_all_valid_symbols(self):
-        for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
+        for sym in ("NIFTY", "BANKNIFTY"):
             hyp = _minimal_hypothesis(symbol=sym)
             ok, err = validate_hypothesis(hyp)
             assert ok is True, f"Expected {sym} to be valid, got err={err!r}"
+
+    def test_rejects_finnifty_symbol(self):
+        """FINNIFTY is no longer in the active futures universe and must be rejected."""
+        hyp = _minimal_hypothesis(symbol="FINNIFTY")
+        ok, err = validate_hypothesis(hyp)
+        assert ok is False, "FINNIFTY should be rejected — removed from active futures universe"
 
     def test_accepts_optional_direction_absent(self):
         hyp = _minimal_hypothesis()

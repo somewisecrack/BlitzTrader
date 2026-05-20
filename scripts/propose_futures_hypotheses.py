@@ -53,7 +53,7 @@ except ImportError as e:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY"}
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_OUTPUT_BYTES = 64_000   # 64 KB ceiling per hypothesis file
 
@@ -266,7 +266,7 @@ def extract_strategies_from_review(review_text: str) -> set[str]:
 _GEMINI_PROMPT_TEMPLATE = """\
 You are a post-market quantitative research assistant for futures trading.
 
-You have been given a compact daily review of NIFTY/BANKNIFTY/FINNIFTY futures signals.
+You have been given a compact daily review of NIFTY/BANKNIFTY futures signals.
 Your task is to propose a small number of filter hypotheses that could block low-quality signals.
 
 RULES:
@@ -281,7 +281,7 @@ OUTPUT FORMAT:
 Respond with a valid JSON array ONLY. No markdown, no prose, no code fences.
 Each element must be a JSON object with EXACTLY these keys:
   "scope"              : must be the string "futures"
-  "symbol"             : one of "NIFTY", "BANKNIFTY", "FINNIFTY"
+  "symbol"             : one of "NIFTY", "BANKNIFTY"
   "strategy"           : exact strategy name as it appears in the review (e.g. "VP-01 Counter Bull Trap")
   "claim"              : one sentence describing what signal condition to block
   "direction"          : "BUY" or "SELL"

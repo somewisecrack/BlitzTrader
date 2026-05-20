@@ -142,10 +142,14 @@ class TestBankniftyResolvesCorrectly(unittest.TestCase):
 
 
 class TestFinniftyResolvesCorrectly(unittest.TestCase):
-    """FINNIFTY is a supported front-month FUTIDX instrument."""
+    """Broker-level resolution test for FINNIFTY.
+    NOTE: FINNIFTY is NOT in the active trading universe (TRADE_SYMBOLS).
+    This test verifies the broker client can still resolve it if ever queried,
+    and that it does NOT bleed into NIFTY resolution.
+    """
 
     def test_finnifty_resolves_to_finnifty_not_nifty(self):
-        """FINNIFTY query must select FINNIFTY and preserve Shoonya lot size."""
+        """FINNIFTY query must select FINNIFTY and preserve Shoonya lot size (broker-level)."""
         expiry = _future_expiry(18)
         scrips = [
             _make_scrip("NIFTY28APR26F", "FUTIDX", expiry, token="11111", lot_size=25),

@@ -404,7 +404,7 @@ class TestBacktestScript:
         src = pathlib.Path(_REPO_ROOT / "scripts" / "backtest_futures_hypothesis.py").read_text()
         assert "^NSEI" in src, "TICKER_MAP must contain ^NSEI for NIFTY"
         assert "^NSEBANK" in src, "TICKER_MAP must contain ^NSEBANK for BANKNIFTY"
-        assert "NIFTY_FIN_SERVICE.NS" in src, "TICKER_MAP must contain NIFTY_FIN_SERVICE.NS for FINNIFTY"
+        assert "NIFTY_FIN_SERVICE.NS" not in src, "TICKER_MAP must NOT contain NIFTY_FIN_SERVICE.NS — FINNIFTY removed"
 
     def test_backtest_no_synthetic_ema_crossover(self):
         src = pathlib.Path(_REPO_ROOT / "scripts" / "backtest_futures_hypothesis.py").read_text()

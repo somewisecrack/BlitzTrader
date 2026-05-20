@@ -36,8 +36,6 @@ def _make_executor():
         sym = symbol.upper()
         if "BANKNIFTY" in sym:
             return 15
-        if "FINNIFTY" in sym:
-            return 60
         if "NIFTY" in sym:
             return 25
         return None
@@ -150,13 +148,6 @@ def _make_executor():
             "tsym": "BANKNIFTY28APR26F",
             "expiry": "28-APR-2026",
             "lot_size": 15,
-        },
-        "FINNIFTY": {
-            "exchange": "NFO",
-            "token": "66689",
-            "tsym": "FINNIFTY28APR26F",
-            "expiry": "28-APR-2026",
-            "lot_size": 60,
         },
     }
 
@@ -324,8 +315,8 @@ class TestExecutionEnforcement(unittest.TestCase):
         self.assertNotIn("BLOCKED: Options", error_msg,
                          f"Futures tsym should not be blocked by CE/PE check: {result}")
 
-    def test_valid_finnifty_futures_tsym_accepted(self):
-        """FINNIFTY28APR26F must be a valid futures execution symbol."""
+    def test_finnifty_futures_tsym_rejected(self):
+        """FINNIFTY28APR26F must be BLOCKED — FINNIFTY removed from active futures universe."""
         self.executor._feed.get_best_bid_ask.return_value = (23995.0, 24005.0)
         result = self.executor.place_virtual_order(
             symbol="FINNIFTY28APR26F",
@@ -333,11 +324,9 @@ class TestExecutionEnforcement(unittest.TestCase):
             quantity=60,
             stop_loss=23850.0,
         )
-        error_msg = result.get("error", "")
-        self.assertNotIn("BLOCKED: bare logical", error_msg,
-                         f"FINNIFTY futures tsym should not be blocked by bare-name check: {result}")
-        self.assertNotIn("Only NIFTY", error_msg,
-                         f"FINNIFTY should be in the allowed futures set: {result}")
+        self.assertIn("BLOCKED", result.get("error", ""),
+                      f"FINNIFTY futures tsym should now be blocked: {result}")
+        self.assertEqual(result.get("status"), "REJECTED")
 
     def test_rejects_more_than_one_nifty_lot_even_with_tight_stop(self):
         """Tight SL must not permit oversized futures quantity."""
@@ -498,9 +487,9 @@ class TestExecutionEnforcement(unittest.TestCase):
         self.assertEqual(result.get("status"), "REJECTED")
         self.assertIn("SELL stop_loss must be above entry", result.get("error", ""))
 
-    def test_one_each_nifty_banknifty_finnifty_allowed_but_fourth_blocked(self):
-        """With three enabled instruments, no-pyramiding caps live positions at 3."""
-        self.executor._max_positions = 3
+    def test_one_each_nifty_banknifty_allowed_but_third_blocked(self):
+        """With two enabled instruments, no-pyramiding caps live positions at 2."""
+        self.executor._max_positions = 2
         self.executor._state.get_state.return_value = {
             "is_stopped": False,
             "is_paused": False,
@@ -531,39 +520,18 @@ class TestExecutionEnforcement(unittest.TestCase):
             "virtual_capital": 500_000,
             "margin_used": 200_000,
         }
-        self.executor._feed.get_best_bid_ask.return_value = (23995.0, 24005.0)
         third = self.executor.place_virtual_order(
-            symbol="FINNIFTY28APR26F",
-            direction="BUY",
-            quantity=60,
-            stop_loss=23850.0,
-        )
-        self.assertNotEqual(third.get("status"), "REJECTED", third)
-
-        self.executor._state.get_state.return_value = {
-            "is_stopped": False,
-            "is_paused": False,
-            "positions": [
-                {"symbol": "NIFTY28APR26F"},
-                {"symbol": "BANKNIFTY28APR26F"},
-                {"symbol": "FINNIFTY28APR26F"},
-            ],
-            "daily_pnl": 0.0,
-            "virtual_capital": 500_000,
-            "margin_used": 300_000,
-        }
-        fourth = self.executor.place_virtual_order(
             symbol="NIFTY28APR26F",
             direction="BUY",
             quantity=25,
             stop_loss=23900.0,
         )
-        self.assertEqual(fourth.get("status"), "REJECTED")
-        self.assertIn("maximum 3 open positions", fourth.get("error", ""))
+        # The third attempt is blocked either by max positions OR by no-pyramiding
+        self.assertEqual(third.get("status"), "REJECTED")
 
-    def test_no_pyramiding_blocks_finnifty_not_as_nifty(self):
-        """FINNIFTY exposure is tracked separately from plain NIFTY."""
-        self.executor._max_positions = 3
+    def test_no_pyramiding_blocks_banknifty_not_as_nifty(self):
+        """BANKNIFTY exposure is tracked separately from plain NIFTY."""
+        self.executor._max_positions = 2
         self.executor._state.get_state.return_value = {
             "is_stopped": False,
             "is_paused": False,
@@ -574,29 +542,30 @@ class TestExecutionEnforcement(unittest.TestCase):
             "virtual_capital": 500_000,
             "margin_used": 100_000,
         }
-        finnifty = self.executor.place_virtual_order(
-            symbol="FINNIFTY28APR26F",
+        self.executor._feed.get_best_bid_ask.return_value = (56010.0, 56020.0)
+        banknifty = self.executor.place_virtual_order(
+            symbol="BANKNIFTY28APR26F",
             direction="BUY",
-            quantity=60,
-            stop_loss=23850.0,
+            quantity=15,
+            stop_loss=55900.0,
         )
-        self.assertNotEqual(finnifty.get("status"), "REJECTED", finnifty)
+        self.assertNotEqual(banknifty.get("status"), "REJECTED", banknifty)
 
         self.executor._state.get_state.return_value = {
             "is_stopped": False,
             "is_paused": False,
             "positions": [
-                {"symbol": "FINNIFTY28APR26F", "direction": "BUY", "quantity": 60},
+                {"symbol": "BANKNIFTY28APR26F", "direction": "BUY", "quantity": 15},
             ],
             "daily_pnl": 0.0,
             "virtual_capital": 500_000,
             "margin_used": 100_000,
         }
         duplicate = self.executor.place_virtual_order(
-            symbol="FINNIFTY28APR26F",
+            symbol="BANKNIFTY28APR26F",
             direction="SELL",
-            quantity=60,
-            stop_loss=24050.0,
+            quantity=15,
+            stop_loss=56200.0,
         )
         self.assertEqual(duplicate.get("status"), "REJECTED")
         self.assertIn("No pyramiding", duplicate.get("error", ""))
@@ -1020,16 +989,14 @@ class TestVirtualLedgerSizing(unittest.TestCase):
 
         ledger = VirtualLedger()
         self.assertEqual(ledger.get_lot_size("BANKNIFTY28APR26F"), 15)
-        self.assertEqual(ledger.get_lot_size("FINNIFTY28APR26F"), 60)
         self.assertEqual(ledger.get_lot_size("NIFTY28APR26F"), 25)
 
     def test_dynamic_lot_size_override_from_shoonya_metadata(self):
         from tools.virtual_ledger import VirtualLedger
 
-        ledger = VirtualLedger(lot_sizes={"NIFTY": 65, "BANKNIFTY": 30, "FINNIFTY": 60})
+        ledger = VirtualLedger(lot_sizes={"NIFTY": 65, "BANKNIFTY": 30})
         self.assertEqual(ledger.get_lot_size("NIFTY28APR26F"), 65)
         self.assertEqual(ledger.get_lot_size("BANKNIFTY28APR26F"), 30)
-        self.assertEqual(ledger.get_lot_size("FINNIFTY28APR26F"), 60)
 
     def test_banknifty_margin_uses_banknifty_lot_size(self):
         from tools.virtual_ledger import VirtualLedger

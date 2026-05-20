@@ -23,7 +23,6 @@ class VirtualLedger:
     # metadata when available because NSE lot sizes can change.
     DEFAULT_LOT_SIZES = {
         "BANKNIFTY": 15,
-        "FINNIFTY": 60,
         "NIFTY": 25,
     }
 
@@ -31,7 +30,6 @@ class VirtualLedger:
     # RMS by OrderExecutionTools; this is retained for tests/offline fallback.
     DEFAULT_MARGIN_PER_LOT = {
         "BANKNIFTY": 100_000,
-        "FINNIFTY": 100_000,
         "NIFTY": 100_000,
     }
 
@@ -59,9 +57,13 @@ class VirtualLedger:
                     self.MARGIN_PER_LOT[symbol.upper()] = parsed_margin
 
     def _logical_instrument(self, symbol: str) -> Optional[str]:
-        """Classify symbols without mistaking FINNIFTY/BANKNIFTY for NIFTY."""
+        """Classify symbols without mistaking BANKNIFTY for NIFTY.
+        FINNIFTY is no longer in the active futures universe — return None for it.
+        """
         symbol_upper = symbol.upper()
-        for index in ("BANKNIFTY", "FINNIFTY", "NIFTY"):
+        if "FINNIFTY" in symbol_upper:
+            return None
+        for index in ("BANKNIFTY", "NIFTY"):
             if index in symbol_upper:
                 return index
         return None

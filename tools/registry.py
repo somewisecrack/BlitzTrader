@@ -294,7 +294,7 @@ class ToolRegistry:
             {
                 "name": "get_spot_price",
                 "description": (
-                    "Get current spot/futures-resolved price for NIFTY, BANKNIFTY, or FINNIFTY. "
+                    "Get current spot/futures-resolved price for NIFTY or BANKNIFTY. "
                     "Returns spot_price, change, change_pct, high, low, open."
                 ),
                 "input_schema": {
@@ -302,8 +302,8 @@ class ToolRegistry:
                     "properties": {
                         "index": {
                             "type": "string",
-                            "description": "Index name: 'NIFTY', 'BANKNIFTY', or 'FINNIFTY'",
-                            "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+                            "description": "Index name: 'NIFTY' or 'BANKNIFTY'",
+                            "enum": ["NIFTY", "BANKNIFTY"],
                         }
                     },
                     "required": ["index"],
@@ -316,7 +316,7 @@ class ToolRegistry:
                 "description": (
                     "Get LTP, best bid, best ask for a specific futures trading symbol. "
                     "Use this to check the current price of an active futures contract "
-                    "(e.g. NIFTY28APR26F, BANKNIFTY28APR26F, FINNIFTY28APR26F). "
+                    "(e.g. NIFTY28APR26F, BANKNIFTY28APR26F). "
                     "Do NOT use for option symbols — options are not used in live execution."
                 ),
                 "input_schema": {
@@ -374,7 +374,7 @@ class ToolRegistry:
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Trading symbol e.g. 'NIFTY', 'BANKNIFTY', or 'FINNIFTY'",
+                            "description": "Trading symbol e.g. 'NIFTY' or 'BANKNIFTY'",
                         },
                         "interval": {
                             "type": "string",
@@ -389,7 +389,7 @@ class ToolRegistry:
             {
                 "name": "get_strategy_signals",
                 "description": (
-                    "Deterministically scan recent NIFTY/BANKNIFTY/FINNIFTY candles for approved "
+                    "Deterministically scan recent NIFTY/BANKNIFTY candles for approved "
                     "price-action, VSA/VPA confirmation, and daily first-hour strategy setups. "
                     "Use this every market-analysis iteration so entries are not missed by "
                     "manual LLM inspection. "
@@ -401,8 +401,8 @@ class ToolRegistry:
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "NIFTY, BANKNIFTY, FINNIFTY, or BOTH",
-                            "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "BOTH"],
+                            "description": "NIFTY, BANKNIFTY, or BOTH",
+                            "enum": ["NIFTY", "BANKNIFTY", "BOTH"],
                             "default": "BOTH",
                         },
                         "lookback_bars": {

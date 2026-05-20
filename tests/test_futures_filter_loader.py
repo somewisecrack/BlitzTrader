@@ -364,7 +364,7 @@ class TestJSONFilterLoading:
         signals_to_check = [
             {"symbol": "NIFTY", "strategy": "VP-01", "direction": "SELL"},
             {"symbol": "BANKNIFTY", "strategy": "VP-07", "direction": "BUY"},
-            {"symbol": "FINNIFTY", "strategy": "VP-19", "direction": "SELL"},
+            {"symbol": "BANKNIFTY", "strategy": "VP-19", "direction": "SELL"},
         ]
         for sig in signals_to_check:
             ok, reason = apply_promoted_filters(sig, {"rsi14": 10, "adx14": 5}, [])

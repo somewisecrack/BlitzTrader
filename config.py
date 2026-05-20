@@ -131,8 +131,8 @@ RCLONE_FOLDER = _optional_env("RCLONE_FOLDER", "BlitzTrader")
 # ──────────────────────────────────────────────────────────────
 
 VIRTUAL_CAPITAL = 1_000_000  # ₹10,00,000
-TRADE_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY")
-MAX_POSITIONS = 3
+TRADE_SYMBOLS = ("NIFTY", "BANKNIFTY")
+MAX_POSITIONS = 2
 
 # ──────────────────────────────────────────────────────────────
 #   PAIRS TRADING PARAMETERS

@@ -4,7 +4,7 @@ tests/test_evaluate_futures_day.py
 Regression tests for scripts/evaluate_futures_day.py — Issue 2 fix.
 
 Covers:
-  - 10 trades counted from fixture live_state.json (not 123)
+  - 7 NIFTY/BANKNIFTY trades counted from fixture live_state.json (not 123; FINNIFTY excluded)
   - Placeholder "—" rows ignored
   - emitted_signal_keys not parsed as trades
   - Rejected signal count = 3 (not polluted by placeholders)
@@ -52,7 +52,8 @@ def _make_live_state(trades: list) -> dict:
     return {"trades": trades, "daily_pnl": -156, "virtual_capital": 1000000}
 
 
-# Fixture: the 10 real trades from 2026-05-18
+# Fixture: the 10 real trades from 2026-05-18 (includes 3 FINNIFTY historical trades;
+# parse_live_state now filters these out since FINNIFTY is not in the active universe)
 FIXTURE_TRADES = [
     {"symbol": "BANKNIFTY26MAY26F", "direction": "SELL", "quantity": 30,
      "entry_price": 53190.0, "exit_price": 53199.6, "pnl": -288.0,
@@ -93,12 +94,14 @@ FIXTURE_TRADES = [
 
 class TestParseLiveState:
 
-    def test_10_trades_from_fixture(self, tmp_path):
-        """Exactly 10 trades should be parsed from the fixture live_state.json."""
+    def test_7_trades_from_fixture(self, tmp_path):
+        """Exactly 7 NIFTY/BANKNIFTY trades should be parsed from the fixture.
+        The fixture contains 3 FINNIFTY trades which are excluded since FINNIFTY
+        was removed from the active futures universe."""
         ls_path = tmp_path / "live_state.json"
         ls_path.write_text(json.dumps(_make_live_state(FIXTURE_TRADES)))
         trades = parse_live_state(ls_path, REVIEW_DATE)
-        assert len(trades) == 10, f"Expected 10, got {len(trades)}"
+        assert len(trades) == 7, f"Expected 7 (NIFTY+BANKNIFTY only), got {len(trades)}"
 
     def test_no_placeholder_rows(self, tmp_path):
         """No trade should have '—' as symbol."""
@@ -120,7 +123,7 @@ class TestParseLiveState:
         ls_path = tmp_path / "live_state.json"
         ls_path.write_text(json.dumps(_make_live_state(extra_trades)))
         trades = parse_live_state(ls_path, REVIEW_DATE)
-        assert len(trades) == 10  # INFY excluded
+        assert len(trades) == 7  # INFY excluded; FINNIFTY excluded (removed from active universe)
 
     def test_different_date_trades_excluded(self, tmp_path):
         """Trades from a different date should not appear."""
@@ -166,8 +169,9 @@ class TestParseLiveState:
         ls_path = tmp_path / "live_state.json"
         ls_path.write_text(json.dumps(state))
         trades = parse_live_state(ls_path, REVIEW_DATE)
-        assert len(trades) == 10, (
-            f"emitted_signal_keys must not be counted as trades; got {len(trades)}"
+        assert len(trades) == 7, (
+            f"emitted_signal_keys must not be counted as trades; "
+            f"got {len(trades)} (expected 7 NIFTY+BANKNIFTY trades, FINNIFTY excluded)"
         )
 
 
@@ -220,13 +224,15 @@ JOURNAL_WITH_PLACEHOLDER_REJECT = """# BlitzTrader Daily Journal — 18 May 2026
 
 class TestJournalRejectedSignals:
 
-    def test_rejected_count_is_3(self, tmp_path):
-        """Exactly 3 real rejected signals should be parsed."""
+    def test_rejected_count_is_1(self, tmp_path):
+        """Exactly 1 real rejected signal should be parsed.
+        The fixture has 3 rejects but 2 are FINNIFTY — excluded since FINNIFTY
+        was removed from the active futures universe. Only the BANKNIFTY reject survives."""
         p = tmp_path / "20260518.md"
         p.write_text(JOURNAL_WITH_3_REJECTS)
         result = parse_journal(p)
-        assert len(result["rejected"]) == 3, (
-            f"Expected 3 rejected signals, got {len(result['rejected'])}"
+        assert len(result["rejected"]) == 1, (
+            f"Expected 1 rejected signal (BANKNIFTY only), got {len(result['rejected'])}"
         )
 
     def test_placeholder_rows_ignored(self, tmp_path):
@@ -256,16 +262,17 @@ class TestJournalRejectedSignals:
 class TestComputeTradeStats:
 
     def test_stats_from_fixture(self, tmp_path):
-        """stats must show total=10, wins=4, losses=6, net_pnl=-156."""
+        """stats must show total=7, wins=1, losses=6, net_pnl=-18042.
+        FINNIFTY trades are excluded from the active universe."""
         ls_path = tmp_path / "live_state.json"
         ls_path.write_text(json.dumps(_make_live_state(FIXTURE_TRADES)))
         trades = parse_live_state(ls_path, REVIEW_DATE)
         stats = compute_trade_stats(trades)
-        assert stats["total"] == 10
-        assert stats["wins"] == 4
+        assert stats["total"] == 7
+        assert stats["wins"] == 1
         assert stats["losses"] == 6
-        # Net P&L: -288+8310-2700-1626-2394+5694+3882-16705+9168-3497 = -156
-        assert stats["net_pnl"] == pytest.approx(-156.0, abs=1.0)
+        # Net P&L: -288-2700-1626-2394-16705+9168-3497 = -18042
+        assert stats["net_pnl"] == pytest.approx(-18042.0, abs=1.0)
         assert stats["pnl_known"] is True
 
     def test_no_trades_returns_zero_stats(self):
@@ -327,8 +334,8 @@ class TestBuildReviewMarkdown:
         stats = compute_trade_stats(executed)
         patterns = detect_patterns(executed, rejected)
         md = build_review_markdown(REVIEW_DATE, executed, rejected, stats, patterns, [], [])
-        assert "Futures trades executed: 10" in md, (
-            "Review should show exactly 10 trades"
+        assert "Futures trades executed: 7" in md, (
+            "Review should show exactly 7 trades (NIFTY+BANKNIFTY only, FINNIFTY excluded)"
         )
 
     def test_no_placeholder_rows_in_table(self, tmp_path):
@@ -362,14 +369,14 @@ class TestBuildReviewMarkdown:
         executed, _ = self._get_trades_and_rejected(tmp_path)
         stats = compute_trade_stats(executed)
         md = build_review_markdown(REVIEW_DATE, executed, [], stats, [], [], [])
-        assert "Wins: 4" in md
+        assert "Wins: 1" in md
         assert "Losses: 6" in md
 
     def test_rejected_count_in_summary(self, tmp_path):
         executed, rejected = self._get_trades_and_rejected(tmp_path)
         stats = compute_trade_stats(executed)
         md = build_review_markdown(REVIEW_DATE, executed, rejected, stats, [], [], [])
-        assert "Rejected signals: 3" in md
+        assert "Rejected signals: 1" in md
 
     def test_no_unknown_reason_in_output(self, tmp_path):
         executed, rejected = self._get_trades_and_rejected(tmp_path)
@@ -395,4 +402,4 @@ class TestBuildReviewMarkdown:
         assert "123" not in md, "Review must not show 123 trades"
         assert "emitted_signal" not in md.lower()
         # Must have the correct trade count
-        assert "Futures trades executed: 10" in md
+        assert "Futures trades executed: 7" in md

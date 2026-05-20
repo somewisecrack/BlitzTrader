@@ -53,12 +53,6 @@ def _bot_with_state(state: dict) -> BlitzTrader:
             "tsym": "BANKNIFTY28APR26F",
             "lot_size": 15,
         },
-        "FINNIFTY": {
-            "exchange": "NFO",
-            "token": "66689",
-            "tsym": "FINNIFTY28APR26F",
-            "lot_size": 60,
-        },
     }
     return bot
 
@@ -148,30 +142,22 @@ class TestEventDrivenGatekeeper(unittest.TestCase):
         self.assertEqual(tradeable, [])
         self.assertIn("No new entries after", blocked[0]["blocked_reason"])
 
-    def test_python_review_allows_finnifty_vp01_when_indicators_align(self):
+    def test_finnifty_signal_blocked_not_in_active_universe(self):
+        """FINNIFTY signals must be blocked because FINNIFTY is no longer in the active futures universe."""
         bot = _bot_with_state(_state())
-        bot._market_data = MagicMock()
-        bot._market_data.get_indicators.return_value = {
-            "current_price": 26200.0,
-            "ema20": 26220.0,
-            "adx14": 25.0,
-            "rsi14": 42.0,
-            "avg_volume_20": 1000.0,
-            "ema_stacked_bull": False,
-            "ema_stacked_bear": True,
-        }
-
-        approved, _context, reason = bot._review_signal_python({
-            "symbol": "FINNIFTY",
-            "interval": "5",
-            "strategy": "VP-01 Counter Bull Trap",
-            "direction": "SELL",
-            "stop_loss": 26250.0,
-            "target": 26100.0,
-        })
-
-        self.assertTrue(approved)
-        self.assertIn("Python approved", reason)
+        tradeable, blocked = bot._filter_tradeable_signals(
+            [{
+                "symbol": "FINNIFTY",
+                "interval": "5",
+                "strategy": "VP-01 Counter Bull Trap",
+                "direction": "SELL",
+                "entry_reference": 26200.0,
+                "stop_loss": 26250.0,
+            }],
+            IST.localize(datetime(2026, 4, 22, 10, 0)),
+        )
+        self.assertEqual(tradeable, [])
+        self.assertEqual(len(blocked), 1)
 
     def test_python_review_accepts_valid_nifty_signal(self):
         bot = _bot_with_state(_state())

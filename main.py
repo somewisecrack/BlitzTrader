@@ -285,7 +285,7 @@ class BlitzTrader:
 
         # Resolve front-month futures for traded instruments so we get real
         # volume data.  Fall back to index tokens only where we have a known
-        # index token; FINNIFTY trades only if its futures contract resolves.
+        # index token (NIFTY, BANKNIFTY).
         active_tokens = dict(NSE_TOKENS)  # starts with VIX index token
         for sym in TRADE_SYMBOLS:
             fut = self._shoonya.get_front_month_futures_token(sym)
@@ -1175,12 +1175,16 @@ class BlitzTrader:
 
     @staticmethod
     def _logical_instrument(symbol: str) -> str | None:
-        """Map logical names and futures tsyms to the base instrument."""
+        """Map logical names and futures tsyms to the base instrument.
+        Only NIFTY and BANKNIFTY are in the active futures universe.
+        FINNIFTY is explicitly excluded — return None so the signal is blocked.
+        """
         sym = (symbol or "").upper()
         if "BANKNIFTY" in sym:
             return "BANKNIFTY"
         if "FINNIFTY" in sym:
-            return "FINNIFTY"
+            # FINNIFTY removed from active futures universe — do not map to NIFTY
+            return None
         if "NIFTY" in sym:
             return "NIFTY"
         return None

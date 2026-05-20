@@ -1,7 +1,7 @@
 """
 futures_filter_loader.py — Load active promoted filters and apply them to live signals.
 
-Scope: futures only (NIFTY, BANKNIFTY, FINNIFTY).
+Scope: futures only (NIFTY, BANKNIFTY).
 Filters are Python-driven post-backtest guardrails.
 LLM/Gemini never touches live trade decisions.
 """
@@ -17,7 +17,7 @@ logger = logging.getLogger("BlitzTrader.FuturesFilterLoader")
 # Constants
 # ---------------------------------------------------------------------------
 
-FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY"}
 
 SUPPORTED_FILTER_FIELDS = {
     "rsi14_lt",

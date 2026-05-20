@@ -31,7 +31,7 @@ from pathlib import Path
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-BARE_LOGICAL = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+BARE_LOGICAL = {"NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY"}
 
 # Regex for futures tsym: starts with NIFTY or BANKNIFTY, has digits + month, ends with F
 _FUTURES_RE = re.compile(r"^(NIFTY|BANKNIFTY)\d{2}[A-Z]{3}\d{2}F$", re.IGNORECASE)

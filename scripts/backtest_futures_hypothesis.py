@@ -59,12 +59,11 @@ except ImportError as e:
 # Constants
 # ---------------------------------------------------------------------------
 
-FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY"}
 
 TICKER_MAP = {
     "NIFTY":     "^NSEI",
     "BANKNIFTY": "^NSEBANK",
-    "FINNIFTY":  "NIFTY_FIN_SERVICE.NS",
 }
 
 MAX_OUTPUT_BYTES = 1_000_000

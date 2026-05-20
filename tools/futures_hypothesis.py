@@ -1,7 +1,7 @@
 """
 futures_hypothesis.py — Hypothesis and backtest result data models for the BlitzTrader wiki system.
 
-Scope: futures only (NIFTY, BANKNIFTY, FINNIFTY).
+Scope: futures only (NIFTY, BANKNIFTY).
 LLM/Gemini is postmarket research only — never a live gatekeeper.
 All live trading decisions remain 100% Python-driven.
 """
@@ -19,7 +19,7 @@ logger = logging.getLogger("BlitzTrader.FuturesHypothesis")
 # Constants
 # ---------------------------------------------------------------------------
 
-FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+FUTURES_SYMBOLS = {"NIFTY", "BANKNIFTY"}
 
 VALID_STATUSES = {"proposed", "backtested", "promoted", "rejected"}
 
