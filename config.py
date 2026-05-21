@@ -143,8 +143,10 @@ MAX_POSITIONS = 2
 PAIRS_BASE_CAPITAL = 500_000         # ₹5,00,000 (base capital)
 PAIRS_LEVERAGE = 2                   # 2:1 leverage ratio
 PAIRS_GROSS_CAPITAL = PAIRS_BASE_CAPITAL * PAIRS_LEVERAGE  # ₹10,00,000 (total deployable)
+# Selection cap: open at most this many pairs (top-ranked by Monte Carlo probability)
+PAIRS_MAX_SELECTED = 5
 # Per-pair allocation is computed dynamically: PAIRS_GROSS_CAPITAL / n_selected_pairs
-# No hard cap on number of pairs — concentration rule limits via stock-level check
+# With 5 pairs: ₹10,00,000 / 5 = ₹2,00,000 per pair
 
 PAIRS_STATE_FILE = RUNTIME_STORAGE_DIR / "pairs_state.json"
 PAIRS_EXCHANGE = "NSE"

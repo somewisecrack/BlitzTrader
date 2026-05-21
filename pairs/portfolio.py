@@ -11,6 +11,7 @@ from config import (
     JOURNALS_DIR,
     PAIRS_BASE_CAPITAL,
     PAIRS_GROSS_CAPITAL,
+    PAIRS_MAX_SELECTED,
     PAIRS_EXCHANGE,
     PAIRS_PRODUCT,
     PAIRS_STATE_FILE,
@@ -120,33 +121,57 @@ class PairPortfolio:
             logger.warning("No candidates to allocate")
             return []
 
-        # 1. Rank deterministically
+        # 1. Rank deterministically: prob_profit desc → |z_score| desc → half_life asc
         ranked = self._rank_candidates(candidates)
         # 2. Deduplicate unordered pairs (INFY/SBIN == SBIN/INFY — keep better-ranked)
         deduped = self._deduplicate_unordered(ranked)
-        # 3. Stock concentration filter: no ticker in > 2 final selected pairs
-        selected = self._apply_concentration_filter(deduped, max_per_stock=2)
+        # (Concentration filter removed: repeat stocks are allowed — top-N by MC rank)
 
-        if not selected:
-            logger.warning("No pairs survived ranking/dedup/concentration filters")
+        if not deduped:
+            logger.warning("No pairs survived ranking/dedup filters")
             return []
 
-        # 4. Dynamic per-pair allocation: never exceed gross capital
-        per_pair_capital = float(PAIRS_GROSS_CAPITAL / len(selected))
+        # 3. Target count: cap at PAIRS_MAX_SELECTED; allocate capital based on target
+        target = min(PAIRS_MAX_SELECTED, len(deduped))
+        per_pair_capital = float(PAIRS_GROSS_CAPITAL / target)
         logger.info(
-            "Selected %d pairs after filters; per-pair gross = ₹%,.0f",
-            len(selected),
+            "Targeting top %d pairs (eligible after dedup: %d); "
+            "per-pair gross = ₹%.0f (total = ₹%.0f)",
+            target,
+            len(deduped),
             per_pair_capital,
+            PAIRS_GROSS_CAPITAL,
         )
 
+        # 4. Open candidates in rank order; on failure try next-ranked replacement
+        #    until `target` pairs are opened or the eligible queue is exhausted.
         opened: list[PairPosition] = []
-        for candidate in selected:
+        for candidate in deduped:
+            if len(opened) >= target:
+                break
             pos = self._open_candidate(client, candidate, per_pair_capital)
             if pos:
                 opened.append(pos)
+            else:
+                logger.warning(
+                    "Open failed for %s/%s — trying next ranked eligible pair",
+                    candidate.x_symbol,
+                    candidate.y_symbol,
+                )
+
+        if len(opened) < target:
+            unused = per_pair_capital * (target - len(opened))
+            logger.warning(
+                "Opened %d/%d targeted pairs; Rs %.0f gross capital unused — "
+                "no further eligible pairs remaining",
+                len(opened),
+                target,
+                unused,
+            )
+
         self.positions = opened
         self._persist()
-        self._write_journal(opened)
+        self._write_journal(opened, per_pair_capital, target)
         return opened
 
     def monitor_open_positions(self, client: ShoonyaClient) -> list[dict]:
@@ -554,16 +579,27 @@ class PairPortfolio:
     #   JOURNALING (writes to BlitzTrader JOURNALS_DIR)
     # ──────────────────────────────────────────────────────────
 
-    def _write_journal(self, positions: list[PairPosition]) -> None:
+    def _write_journal(
+        self,
+        positions: list[PairPosition],
+        per_pair_capital: float | None = None,
+        target: int | None = None,
+    ) -> None:
         day = datetime.now().strftime("%Y%m%d")
         path = JOURNALS_DIR / f"{day}_pairs.md"
+        _target = target if target is not None else len(positions)
+        _per_pair = per_pair_capital if per_pair_capital is not None else (
+            self.capital / _target if _target else 0.0
+        )
         lines = [
             f"# BlitzTrader — Pairs Journal — {datetime.now().strftime('%d %b %Y')}",
             "",
             "## Opened Pairs",
             "",
             f"- **Pairs Capital:** ₹{self.capital:,.0f}",
+            f"- **Pairs Targeted:** {_target}",
             f"- **Pairs Opened:** {len(positions)}",
+            f"- **Capital Reserved per Pair:** ₹{_per_pair:,.0f}",
             "",
         ]
         for pos in positions:

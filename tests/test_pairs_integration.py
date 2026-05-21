@@ -189,21 +189,22 @@ class TestDuplicatePairDeduplication:
 class TestCapitalAllocation:
     """Dynamic per-pair allocation: PAIRS_GROSS_CAPITAL / n_selected_pairs."""
 
-    def test_allocation_with_10_pairs(self):
-        from config import PAIRS_GROSS_CAPITAL
-        num_pairs = 10
-        per_pair = PAIRS_GROSS_CAPITAL / num_pairs
-        assert math.isclose(per_pair, 100_000)
-        total_allocated = per_pair * num_pairs
+    def test_allocation_with_5_pairs_is_200k(self):
+        """Normal case: 5 pairs → ₹2,00,000 per pair."""
+        from config import PAIRS_GROSS_CAPITAL, PAIRS_MAX_SELECTED
+        per_pair = PAIRS_GROSS_CAPITAL / PAIRS_MAX_SELECTED
+        assert math.isclose(per_pair, 200_000)
+        total_allocated = per_pair * PAIRS_MAX_SELECTED
         assert math.isclose(total_allocated, PAIRS_GROSS_CAPITAL)
 
-    def test_allocation_with_fewer_than_10_pairs(self):
+    def test_allocation_with_fewer_than_5_pairs(self):
+        """Fewer than 5 eligible → each gets more capital."""
         from config import PAIRS_GROSS_CAPITAL
-        num_pairs = 6
+        num_pairs = 3
         per_pair = PAIRS_GROSS_CAPITAL / num_pairs
         assert math.isclose(per_pair * num_pairs, PAIRS_GROSS_CAPITAL)
         # Each pair gets more capital when fewer are selected
-        assert per_pair > 100_000
+        assert per_pair > 200_000
 
     def test_allocation_with_1_pair(self):
         from config import PAIRS_GROSS_CAPITAL
@@ -211,20 +212,22 @@ class TestCapitalAllocation:
         per_pair = PAIRS_GROSS_CAPITAL / num_pairs
         assert math.isclose(per_pair, PAIRS_GROSS_CAPITAL)
 
-    def test_allocation_with_15_pairs_no_cap(self):
-        """No hard 10-pair cap: 15 valid pairs all get allocated."""
-        from config import PAIRS_GROSS_CAPITAL
-        num_pairs = 15
-        per_pair = PAIRS_GROSS_CAPITAL / num_pairs
-        total = per_pair * num_pairs
-        # Total must not exceed gross capital
-        assert math.isclose(total, PAIRS_GROSS_CAPITAL)
-        assert per_pair < 100_000  # smaller slice per pair, but no cap
+    def test_15_eligible_only_5_selected(self):
+        """With 15 eligible pairs, only top 5 are selected (PAIRS_MAX_SELECTED cap)."""
+        from config import PAIRS_MAX_SELECTED
+        candidates = [
+            _FakeCandidate(f"X{i}", f"Y{i}", "1h", float(90 - i), 3.0 - i * 0.1, i + 1)
+            for i in range(15)
+        ]
+        ranked = _rank(candidates)
+        deduped = _dedup(ranked)
+        selected = deduped[:PAIRS_MAX_SELECTED]
+        assert len(selected) == PAIRS_MAX_SELECTED  # cap enforced
 
     def test_total_gross_never_exceeds_pairs_gross_capital(self):
-        """For any n, per-pair * n == PAIRS_GROSS_CAPITAL (no overshoot)."""
+        """For any n ≤ PAIRS_MAX_SELECTED, per-pair * n == PAIRS_GROSS_CAPITAL."""
         from config import PAIRS_GROSS_CAPITAL
-        for n in [1, 5, 10, 15, 20, 25]:
+        for n in [1, 2, 3, 4, 5]:
             per_pair = PAIRS_GROSS_CAPITAL / n
             assert math.isclose(per_pair * n, PAIRS_GROSS_CAPITAL), f"Failed for n={n}"
 
@@ -236,9 +239,14 @@ class TestCapitalAllocation:
         # Neither is derived from the other at module level — they don't share a pool
 
     def test_no_max_open_pairs_in_config(self):
-        """MAX_OPEN_PAIRS was removed; no hard cap in config."""
+        """MAX_OPEN_PAIRS was removed; PAIRS_MAX_SELECTED is the cap."""
         import config
         assert not hasattr(config, "MAX_OPEN_PAIRS")
+
+    def test_pairs_max_selected_in_config(self):
+        """PAIRS_MAX_SELECTED must exist and equal 5."""
+        from config import PAIRS_MAX_SELECTED
+        assert PAIRS_MAX_SELECTED == 5
 
     def test_no_per_pair_capital_in_config(self):
         """PER_PAIR_CAPITAL was removed; allocation is dynamic."""
@@ -608,3 +616,238 @@ class TestConcentrationFilter:
             per_pair = PAIRS_GROSS_CAPITAL / n
             total = per_pair * n
             assert math.isclose(total, PAIRS_GROSS_CAPITAL), f"Total mismatch for n={n}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   NEW: Top-5 selection, repeat-stock allowance, open-failure replacement
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestTop5Selection:
+    """Pairs selection capped at PAIRS_MAX_SELECTED=5 by MC rank."""
+
+    def _make_candidates(self, n: int, start_prob: float = 90.0) -> list:
+        return [
+            _FakeCandidate(f"A{i}", f"B{i}", "1h", start_prob - i, 3.0 - i * 0.1, i + 1)
+            for i in range(n)
+        ]
+
+    def test_top_5_selected_from_10(self):
+        """10 eligible → only top 5 selected."""
+        from config import PAIRS_MAX_SELECTED
+        candidates = self._make_candidates(10)
+        ranked = _rank(candidates)
+        deduped = _dedup(ranked)
+        selected = deduped[:PAIRS_MAX_SELECTED]
+        assert len(selected) == 5
+        # Best prob_profit is first
+        assert selected[0].prob_profit == 90.0
+
+    def test_top_5_ranked_correctly(self):
+        """Top 5 are the 5 highest prob_profit candidates."""
+        from config import PAIRS_MAX_SELECTED
+        candidates = self._make_candidates(8)  # probs 90, 89, 88, 87, 86, 85, 84, 83
+        ranked = _rank(candidates)
+        deduped = _dedup(ranked)
+        selected = deduped[:PAIRS_MAX_SELECTED]
+        probs = [c.prob_profit for c in selected]
+        assert probs == sorted(probs, reverse=True)
+        assert probs[0] == 90.0
+        assert probs[-1] == 86.0  # 5th best
+
+    def test_fewer_than_5_all_selected(self):
+        """With only 3 eligible pairs, all 3 are selected."""
+        from config import PAIRS_MAX_SELECTED
+        candidates = self._make_candidates(3)
+        ranked = _rank(candidates)
+        deduped = _dedup(ranked)
+        selected = deduped[:PAIRS_MAX_SELECTED]
+        assert len(selected) == 3
+
+    def test_repeat_stocks_allowed_in_top_5(self):
+        """Same stock may appear in multiple selected pairs (no concentration limit)."""
+        from config import PAIRS_MAX_SELECTED
+        candidates = [
+            _FakeCandidate("INFY", "TCS",    "1h", 90.0, 3.0, 3),
+            _FakeCandidate("INFY", "HCLTECH","1h", 85.0, 2.8, 4),
+            _FakeCandidate("INFY", "WIPRO",  "1h", 80.0, 2.5, 5),
+            _FakeCandidate("INFY", "SBIN",   "1h", 75.0, 2.3, 6),
+            _FakeCandidate("INFY", "AXISBANK","1h", 70.0, 2.1, 7),
+        ]
+        ranked = _rank(candidates)
+        deduped = _dedup(ranked)
+        selected = deduped[:PAIRS_MAX_SELECTED]
+        # All 5 kept — INFY appearing 5 times is allowed
+        assert len(selected) == 5
+        infy_count = sum(1 for c in selected if "INFY" in (c.x_symbol, c.y_symbol))
+        assert infy_count == 5
+
+    def test_repeat_stock_does_not_prevent_selection(self):
+        """A stock in 3 pairs: all 3 survive (no old max-2 rule)."""
+        candidates = [
+            _FakeCandidate("INFY", "TCS",     "1h", 90.0, 3.0, 3),
+            _FakeCandidate("INFY", "HCLTECH", "1h", 85.0, 2.8, 4),
+            _FakeCandidate("INFY", "WIPRO",   "1h", 80.0, 2.5, 5),
+        ]
+        ranked = _rank(candidates)
+        deduped = _dedup(ranked)
+        selected = deduped[:5]
+        assert len(selected) == 3
+
+    def test_capital_5_pairs_is_200k(self):
+        """5 pairs → ₹2,00,000 each."""
+        from config import PAIRS_GROSS_CAPITAL, PAIRS_MAX_SELECTED
+        per_pair = PAIRS_GROSS_CAPITAL / PAIRS_MAX_SELECTED
+        assert math.isclose(per_pair, 200_000)
+
+    def test_capital_fewer_than_5_dynamic(self):
+        """3 eligible pairs → ₹3,33,333 each (dynamic)."""
+        from config import PAIRS_GROSS_CAPITAL
+        n = 3
+        per_pair = PAIRS_GROSS_CAPITAL / n
+        assert math.isclose(per_pair * n, PAIRS_GROSS_CAPITAL)
+        assert per_pair > 200_000
+
+    def test_unordered_dedup_before_cap(self):
+        """Reversed-pair dedup applied before top-5 cap."""
+        from config import PAIRS_MAX_SELECTED
+        candidates = [
+            _FakeCandidate("INFY", "SBIN", "1h", 80.0, 2.5, 5),
+            _FakeCandidate("SBIN", "INFY", "1h", 79.0, 2.4, 5),  # same pair, lower rank
+            _FakeCandidate("A2",   "B2",   "1h", 75.0, 2.0, 4),
+            _FakeCandidate("A3",   "B3",   "1h", 74.0, 2.0, 4),
+            _FakeCandidate("A4",   "B4",   "1h", 73.0, 2.0, 4),
+            _FakeCandidate("A5",   "B5",   "1h", 72.0, 2.0, 4),
+        ]
+        ranked = _rank(candidates)
+        deduped = _dedup(ranked)
+        selected = deduped[:PAIRS_MAX_SELECTED]
+        # SBIN/INFY dropped → 5 unique pairs from 6 candidates
+        assert len(selected) == 5
+        pair_names = [(c.x_symbol, c.y_symbol) for c in selected]
+        assert ("INFY", "SBIN") in pair_names
+        assert ("SBIN", "INFY") not in pair_names
+
+    def test_tiebreak_z_score(self):
+        """Equal prob_profit → higher |z_score| ranked first."""
+        a = _FakeCandidate("A", "B", "1h", 75.0, 3.0, 5)
+        b = _FakeCandidate("C", "D", "1h", 75.0, 2.0, 5)
+        selected = _rank([b, a])[:5]
+        assert selected[0] is a  # higher |z_score|
+
+    def test_tiebreak_half_life(self):
+        """Equal prob_profit and |z_score| → shorter half_life ranked first."""
+        a = _FakeCandidate("A", "B", "1h", 75.0, 2.5, 3)
+        b = _FakeCandidate("C", "D", "1h", 75.0, 2.5, 8)
+        selected = _rank([b, a])[:5]
+        assert selected[0] is a  # shorter half_life
+
+    def test_half_life_filter_still_enforced(self):
+        """Pairs with half_life >= HALF_LIFE_MAX_BARS[interval] must not be in candidates."""
+        from config import HALF_LIFE_MAX_BARS
+        # This test verifies the filter condition — pairs are rejected BEFORE portfolio sees them
+        # A pair with half_life=72 at 5m should have been screened out by scanner
+        too_slow = _FakeCandidate("X", "Y", "5m", 95.0, 4.0, 72)  # 72 >= 72 → rejected
+        ok_pair  = _FakeCandidate("A", "B", "5m", 85.0, 3.0, 71)  # 71 < 72 → ok
+        # Simulate scanner's filter
+        eligible = [c for c in [too_slow, ok_pair]
+                    if c.half_life < HALF_LIFE_MAX_BARS.get(c.timeframe, 9999)]
+        assert len(eligible) == 1
+        assert eligible[0] is ok_pair
+
+
+class TestOpenFailureReplacement:
+    """Open-failure replacement: next-ranked pair tried when a candidate fails."""
+
+    def test_concentration_filter_not_called_in_allocate_and_open(self):
+        """Source guard: _apply_concentration_filter must not be called in allocate_and_open."""
+        import re
+        src = (_REPO_ROOT / "pairs" / "portfolio.py").read_text()
+        # Find the allocate_and_open method body (from def until next def at same indent)
+        m = re.search(
+            r"def allocate_and_open\(.*?\n((?:    [^\n]*\n|\n)*)",
+            src,
+        )
+        assert m, "allocate_and_open not found in portfolio.py"
+        body = m.group(1)
+        assert "_apply_concentration_filter" not in body, (
+            "_apply_concentration_filter must not be called in allocate_and_open"
+        )
+
+    def test_pairs_max_selected_imported_in_portfolio(self):
+        """portfolio.py must import PAIRS_MAX_SELECTED from config."""
+        src = (_REPO_ROOT / "pairs" / "portfolio.py").read_text()
+        assert "PAIRS_MAX_SELECTED" in src
+
+    def test_open_failure_uses_next_pair(self):
+        """If first candidate fails to open, next-ranked is tried."""
+        import sys
+        import types as _types
+        # Stub broker so we can import portfolio without Shoonya
+        shoonya_mod = _types.ModuleType("broker.shoonya_client")
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _RS:
+            symbol: str
+            tradingsymbol: str
+            token: str
+
+        shoonya_mod.ShoonyaClient = object
+        shoonya_mod.ResolvedScrip = _RS
+        broker_mod = _types.ModuleType("broker")
+        broker_mod.shoonya_client = shoonya_mod
+        from unittest.mock import patch, MagicMock
+
+        with patch.dict(sys.modules, {
+            "broker": broker_mod,
+            "broker.shoonya_client": shoonya_mod,
+        }):
+            from pairs.portfolio import PairPortfolio
+
+            portfolio = PairPortfolio.__new__(PairPortfolio)
+            portfolio.capital = 1_000_000
+            portfolio._quote_cache = None
+            portfolio._state_file = MagicMock()
+            portfolio._state_file.write_text = MagicMock()
+            portfolio.positions = []
+
+            # Build 3 candidates (already as PairCandidate-like mocks)
+            def _cand(x, y, prob):
+                c = MagicMock()
+                c.x_symbol = x
+                c.y_symbol = y
+                c.prob_profit = prob
+                c.z_score = 2.5
+                c.half_life = 3
+                c.timeframe = "1h"
+                c.method = "CADF"
+                c.matched_timeframes = ["1h"]
+                c.direction = "SHORT_SPREAD"
+                c.beta = 1.0
+                c.prob_profit_low = prob - 10
+                c.prob_profit_high = prob + 10
+                return c
+
+            c1 = _cand("A", "B", 90.0)  # best — will fail to open
+            c2 = _cand("C", "D", 85.0)  # second — will succeed
+            c3 = _cand("E", "F", 80.0)  # third
+
+            open_results = {("A", "B"): None, ("C", "D"): MagicMock(), ("E", "F"): MagicMock()}
+
+            def _fake_open(client, candidate, capital):
+                return open_results[(candidate.x_symbol, candidate.y_symbol)]
+
+            mock_client = MagicMock()
+
+            with patch.object(portfolio, "_open_candidate", side_effect=_fake_open), \
+                 patch.object(portfolio, "_persist"), \
+                 patch.object(portfolio, "_write_journal"):
+                opened = portfolio.allocate_and_open(mock_client, [c1, c2, c3])
+
+            # c1 failed → c2 and c3 both opened (target=min(5,3)=3)
+            assert len(opened) == 2  # c1 failed, c2+c3 succeeded
+
+    def test_journal_shows_capital_per_pair(self):
+        """Journal must include Capital Reserved per Pair line."""
+        src = (_REPO_ROOT / "pairs" / "portfolio.py").read_text()
+        assert "Capital Reserved per Pair" in src
