@@ -1366,3 +1366,88 @@ class TestCompactReviewLossClusters:
         assert "LOSS_CLUSTER_MARKER" in result, (
             "Loss Clusters should receive budget allocation and not be starved"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: VP-24 Pivot Rejection P in SUPPORTED_STRATEGIES (Fix A regression)
+# ---------------------------------------------------------------------------
+
+class TestVP24InSupportedStrategies:
+    """Ensure VP-24 Pivot Rejection P and siblings are in SUPPORTED_STRATEGIES."""
+
+    def test_vp24_pivot_rejection_p_in_supported(self):
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        assert "VP-24 Pivot Rejection P" in SUPPORTED_STRATEGIES, (
+            "VP-24 Pivot Rejection P must be in SUPPORTED_STRATEGIES"
+        )
+
+    def test_vp24_pivot_rejection_r1_in_supported(self):
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        assert "VP-24 Pivot Rejection R1" in SUPPORTED_STRATEGIES
+
+    def test_vp24_pivot_bounce_s1_in_supported(self):
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        assert "VP-24 Pivot Bounce S1" in SUPPORTED_STRATEGIES
+
+    def test_vp24_pivot_bounce_s2_in_supported(self):
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        assert "VP-24 Pivot Bounce S2" in SUPPORTED_STRATEGIES
+
+    def test_adx_gapper_in_supported(self):
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+        assert "ADX Gapper" in SUPPORTED_STRATEGIES
+
+    def test_vp24_gemini_candidate_passes_validation_when_in_review(self):
+        """A Gemini candidate for VP-24 Pivot Rejection P must pass _validate_gemini_hypothesis."""
+        review_text = (
+            "## Loss Clusters\n"
+            "| BANKNIFTY | VP-24 Pivot Rejection P | SELL | 1 | ₹-4,464 |\n"
+        )
+        strategies_in_review = extract_strategies_from_review(review_text)
+        assert "VP-24 Pivot Rejection P" in strategies_in_review, (
+            "extract_strategies_from_review must find VP-24 Pivot Rejection P in review text"
+        )
+        candidate = {
+            "scope": "futures",
+            "symbol": "BANKNIFTY",
+            "strategy": "VP-24 Pivot Rejection P",
+            "claim": "Block VP-24 Pivot Rejection P SELL when ADX14 < 20",
+            "direction": "SELL",
+            "filter": {"block_when": {"adx14_lt": 20.0}},
+            "rationale": "VP-24 Pivot Rejection P SELL failed when ADX14 was low.",
+            "source_review_date": "2026-05-21",
+            "created_by": "gemini",
+            "status": "proposed",
+        }
+        ok, reason = _validate_gemini_hypothesis(candidate, "2026-05-21", strategies_in_review)
+        assert ok, f"VP-24 Pivot Rejection P candidate should pass validation: {reason}"
+
+    def test_vp99_invented_still_rejected(self):
+        """VP-99 Invented must not pass validation even if present in review text."""
+        strategies_in_review = {"VP-99 Invented"}  # not in SUPPORTED_STRATEGIES
+        candidate = {
+            "scope": "futures",
+            "symbol": "BANKNIFTY",
+            "strategy": "VP-99 Invented",
+            "claim": "Block VP-99 SELL when ADX14 < 20",
+            "direction": "SELL",
+            "filter": {"block_when": {"adx14_lt": 20.0}},
+            "rationale": "Invented strategy.",
+            "source_review_date": "2026-05-21",
+            "created_by": "gemini",
+            "status": "proposed",
+        }
+        ok, reason = _validate_gemini_hypothesis(candidate, "2026-05-21", strategies_in_review)
+        assert not ok
+        assert "SUPPORTED_STRATEGIES" in reason
+
+    def test_extract_strategies_finds_vp24_in_review(self):
+        """extract_strategies_from_review finds VP-24 Pivot Rejection P in a review containing it."""
+        review_with_vp24 = (
+            "## Loss Clusters\n"
+            "| BANKNIFTY | VP-24 Pivot Rejection P | SELL | 1 | ₹-4,464 |\n"
+            "| BANKNIFTY | VP-24 Pivot Rejection R1 | SELL | 1 | ₹-2,100 |\n"
+        )
+        result = extract_strategies_from_review(review_with_vp24)
+        assert "VP-24 Pivot Rejection P" in result
+        assert "VP-24 Pivot Rejection R1" in result

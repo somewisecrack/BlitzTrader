@@ -37,7 +37,7 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    from tools.futures_strategy_engine import scan_candles, SUPPORTED_STRATEGIES
+    from tools.futures_strategy_engine import scan_candles, SUPPORTED_STRATEGIES, LIVE_ONLY_STRATEGIES
 except ImportError as e:
     print(
         f"ERROR: Could not import tools.futures_strategy_engine: {e}\n"
@@ -829,6 +829,39 @@ def main() -> None:
             "promotion_decision": {
                 "promote": False,
                 "reason":  "unsupported strategy",
+            },
+        }
+        _write_result(result, wiki_dir, hyp_id)
+        sys.exit(0)
+
+    # ── Skip live-only strategies cleanly ────────────────────────────────────
+    # These strategies require real-time context (prev-day pivots/CPR, first-hour
+    # detection, daily LBR/RSI) that is not available in OHLCV backtest data.
+    # Running scan_candles() on them would return 0 signals and produce meaningless
+    # stats.  Skip cleanly with status="skipped" and exit 0.
+    if strategy in LIVE_ONLY_STRATEGIES:
+        skip_reason = (
+            "strategy requires live context (pivots/CPR) not available in OHLCV backtest"
+        )
+        print(
+            f"[backtest_futures_hypothesis] Skipping '{strategy}': {skip_reason}"
+        )
+        result = {
+            "hypothesis_id":      hyp_id,
+            "status":             "skipped",
+            "symbol":             symbol,
+            "ticker":             ticker,
+            "strategy":           strategy,
+            "requested_interval": requested_interval,
+            "requested_period":   requested_period,
+            "period":             requested_period,
+            "interval":           requested_interval,
+            "fallback_used":      False,
+            "attempts":           [],
+            "skip_reason":        skip_reason,
+            "promotion_decision": {
+                "promote": False,
+                "reason":  skip_reason,
             },
         }
         _write_result(result, wiki_dir, hyp_id)

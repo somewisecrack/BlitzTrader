@@ -11,41 +11,103 @@ Output: list of signal dicts (same shape as live get_strategy_signals())
 # ---------------------------------------------------------------------------
 
 SUPPORTED_STRATEGIES = {
+    # ── Strategies backtestable on OHLCV alone ──────────────────────────────
     "VP-01 Counter Bull Trap",
     "VP-02 Counter Bear Trap",
     "VP-05 3EMA Trend",
     "VP-07 Wicks Pullback",
+    "VP-08 V-Reversal",
+    "VP-09 Power Candle Pullback",
+    "VP-13 Open Drive",
     "VP-14 Morning Star",
     "VP-15 Evening Star",
+    "VP-16 GCR Green Candle Retracement",
+    "VP-17 RCR Red Candle Retracement",
     "VP-18 M-Pattern Double Top",
     "VP-19 W-Pattern Double Bottom",
     "VP-21 Extreme Candle Reversal",
+    "VP-22 Supply Zone Reversal",
+    "VPA Hanging Man",
+    "VPA No Demand",
+    "VSA Buying Climax",
+    "VSA Bag Holding",
+    "VSA Upthrust",
+    "VSA Hidden Upthrust",
+    "VSA Shakeout Intraday",
+    # ── Live-only strategies (require prev-day pivots/CPR/OHLC context) ─────
+    "VP-10 First Candle Open",
+    "VP-20 CPR Reversal",
+    "VP-24 Pivot Bounce P",
+    "VP-24 Pivot Bounce S1",
+    "VP-24 Pivot Bounce S2",
+    "VP-24 Pivot Rejection P",
+    "VP-24 Pivot Rejection R1",
+    "VP-24 Pivot Rejection R2",
+    "Momentum Pinball",
+    "80-20 Reversal",
+    "ADX Gapper",
+}
+
+# Strategies that exist in live get_strategy_signals() but CANNOT be reliably
+# backtested using OHLCV data alone.  They require real-time context such as
+# previous-day pivot/CPR levels, first-hour detection, or daily LBR/RSI.
+# The backtest script skips these cleanly rather than returning 0-signal garbage.
+LIVE_ONLY_STRATEGIES = {
+    "VP-10 First Candle Open",       # needs real-time 09:15 IST detection
+    "VP-20 CPR Reversal",            # needs prev-day CPR
+    "VP-24 Pivot Bounce P",          # needs prev-day pivot
+    "VP-24 Pivot Bounce S1",         # needs prev-day pivot
+    "VP-24 Pivot Bounce S2",         # needs prev-day pivot
+    "VP-24 Pivot Rejection P",       # needs prev-day pivot
+    "VP-24 Pivot Rejection R1",      # needs prev-day pivot
+    "VP-24 Pivot Rejection R2",      # needs prev-day pivot
+    "Momentum Pinball",              # needs LBR/RSI from daily data
+    "80-20 Reversal",                # needs prev-day OHLC
+    "ADX Gapper",                    # needs prev-day OHLC
 }
 
 # Which directions each supported strategy can actually emit.
 # Used by hypothesis validation to reject proposals that can never produce trades.
 STRATEGY_DIRECTIONS: dict[str, frozenset[str]] = {
-    "VP-01 Counter Bull Trap":      frozenset({"SELL"}),
-    "VP-02 Counter Bear Trap":      frozenset({"BUY"}),
-    "VP-05 3EMA Trend":             frozenset({"BUY", "SELL"}),
-    "VP-07 Wicks Pullback":         frozenset({"BUY", "SELL"}),
-    "VP-14 Morning Star":           frozenset({"BUY"}),
-    "VP-15 Evening Star":           frozenset({"SELL"}),
-    "VP-18 M-Pattern Double Top":   frozenset({"SELL"}),
-    "VP-19 W-Pattern Double Bottom": frozenset({"BUY"}),
-    "VP-21 Extreme Candle Reversal": frozenset({"BUY", "SELL"}),
+    "VP-01 Counter Bull Trap":           frozenset({"SELL"}),
+    "VP-02 Counter Bear Trap":           frozenset({"BUY"}),
+    "VP-05 3EMA Trend":                  frozenset({"BUY", "SELL"}),
+    "VP-07 Wicks Pullback":              frozenset({"BUY", "SELL"}),
+    "VP-08 V-Reversal":                  frozenset({"BUY"}),
+    "VP-09 Power Candle Pullback":       frozenset({"BUY", "SELL"}),
+    "VP-10 First Candle Open":           frozenset({"BUY", "SELL"}),
+    "VP-13 Open Drive":                  frozenset({"BUY", "SELL"}),
+    "VP-14 Morning Star":                frozenset({"BUY"}),
+    "VP-15 Evening Star":                frozenset({"SELL"}),
+    "VP-16 GCR Green Candle Retracement": frozenset({"BUY"}),
+    "VP-17 RCR Red Candle Retracement":  frozenset({"SELL"}),
+    "VP-18 M-Pattern Double Top":        frozenset({"SELL"}),
+    "VP-19 W-Pattern Double Bottom":     frozenset({"BUY"}),
+    "VP-20 CPR Reversal":                frozenset({"BUY", "SELL"}),
+    "VP-21 Extreme Candle Reversal":     frozenset({"BUY", "SELL"}),
+    "VP-22 Supply Zone Reversal":        frozenset({"SELL"}),
+    "VP-24 Pivot Bounce P":              frozenset({"BUY"}),
+    "VP-24 Pivot Bounce S1":             frozenset({"BUY"}),
+    "VP-24 Pivot Bounce S2":             frozenset({"BUY"}),
+    "VP-24 Pivot Rejection P":           frozenset({"SELL"}),
+    "VP-24 Pivot Rejection R1":          frozenset({"SELL"}),
+    "VP-24 Pivot Rejection R2":          frozenset({"SELL"}),
+    "Momentum Pinball":                  frozenset({"BUY", "SELL"}),
+    "80-20 Reversal":                    frozenset({"BUY", "SELL"}),
+    "ADX Gapper":                        frozenset({"BUY", "SELL"}),
+    "VPA Hanging Man":                   frozenset({"SELL"}),
+    "VPA No Demand":                     frozenset({"SELL"}),
+    "VSA Buying Climax":                 frozenset({"SELL"}),
+    "VSA Bag Holding":                   frozenset({"BUY"}),
+    "VSA Upthrust":                      frozenset({"SELL"}),
+    "VSA Hidden Upthrust":               frozenset({"SELL"}),
+    "VSA Shakeout Intraday":             frozenset({"BUY"}),
 }
 
-# Strategies that require real-time context not available from OHLCV alone.
-UNSUPPORTED_STRATEGIES = {
-    "VP-10 First Candle Open",       # needs real-time 09:15 IST detection
-    "VP-20 CPR Reversal",            # needs prev-day CPR
-    "VP-24 Pivot Bounce",            # needs prev-day pivot
-    "VP-24 Pivot Rejection",         # needs prev-day pivot
-    "Momentum Pinball",              # needs LBR/RSI from daily data
-    "80-20 Reversal",                # needs prev-day OHLC
-    "ADX Gapper",                    # needs prev-day OHLC
-}
+# Legacy alias kept for any code that imported the old name.
+# Points to an empty set — all formerly "unsupported" strategies are now
+# in SUPPORTED_STRATEGIES or LIVE_ONLY_STRATEGIES.
+UNSUPPORTED_STRATEGIES: set[str] = set()
 
 
 # ---------------------------------------------------------------------------

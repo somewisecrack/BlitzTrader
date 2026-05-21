@@ -1010,6 +1010,61 @@ class TestDailyFallback:
     # Test 6: effective_interval already "1d" → no duplicate fallback
     # -----------------------------------------------------------------------
 
+    # -----------------------------------------------------------------------
+    # Test: live-only strategy → skipped cleanly
+    # -----------------------------------------------------------------------
+
+    def test_live_only_strategy_skipped(self, tmp_path):
+        """
+        A hypothesis for VP-24 Pivot Rejection P (a live-only strategy)
+        must exit with status='skipped', promote=False, and no backtest attempt.
+        """
+        hyp = {
+            "id": "HYP-TEST-VP24",
+            "scope": "futures",
+            "symbol": "BANKNIFTY",
+            "strategy": "VP-24 Pivot Rejection P",
+            "direction": "SELL",
+            "status": "proposed",
+            "filter": {"block_when": {"adx14_lt": 20}},
+        }
+        wiki_dir = tmp_path / "wiki"
+        (wiki_dir / "hypotheses").mkdir(parents=True)
+        (wiki_dir / "backtest_results").mkdir(parents=True)
+        hyp_path = wiki_dir / "hypotheses" / "HYP-TEST-VP24.json"
+        hyp_path.write_text(json.dumps(hyp))
+
+        ret = subprocess.run(
+            [
+                sys.executable,
+                "scripts/backtest_futures_hypothesis.py",
+                "--hypothesis", str(hyp_path),
+                "--wiki-dir", str(wiki_dir),
+            ],
+            capture_output=True, text=True,
+            cwd=str(_REPO_ROOT),
+        )
+        assert ret.returncode == 0, f"Live-only skip must exit 0, got:\n{ret.stderr}"
+        result_path = wiki_dir / "backtest_results" / "HYP-TEST-VP24.json"
+        assert result_path.exists(), "Result JSON must be written even for skipped strategies"
+        result_data = json.loads(result_path.read_text())
+        assert result_data.get("status") == "skipped", (
+            f"Live-only strategy must produce status='skipped', got: {result_data.get('status')!r}"
+        )
+        assert "skip_reason" in result_data, "Result must contain skip_reason"
+        assert "live context" in result_data["skip_reason"].lower() or \
+               "pivots" in result_data["skip_reason"].lower(), \
+            f"skip_reason should mention live context: {result_data['skip_reason']!r}"
+        promote = result_data.get("promotion_decision", {}).get("promote", True)
+        assert promote is False, "Skipped strategy must not be promoted"
+
+    def test_vp05_not_in_live_only(self):
+        """VP-05 3EMA Trend must NOT be in LIVE_ONLY_STRATEGIES (it is backtestable)."""
+        from tools.futures_strategy_engine import LIVE_ONLY_STRATEGIES
+        assert "VP-05 3EMA Trend" not in LIVE_ONLY_STRATEGIES, (
+            "VP-05 3EMA Trend is backtestable and must not be in LIVE_ONLY_STRATEGIES"
+        )
+
     def test_already_1d_no_duplicate_fallback(self, tmp_path):
         hyp_path, wiki_dir = self._write_hyp(tmp_path)
         mod = self.mod
