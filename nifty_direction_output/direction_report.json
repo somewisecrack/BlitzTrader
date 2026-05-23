@@ -1,0 +1,226 @@
+{
+  "n1d": {
+    "oos_accuracy_pct": 52.75,
+    "oos_auc": 0.5545,
+    "fold_accuracies": [
+      60.61,
+      48.48,
+      46.97,
+      57.58,
+      45.45,
+      46.97,
+      57.58,
+      58.46
+    ],
+    "mean_fold_acc": 52.76,
+    "std_fold_acc": 5.91,
+    "high_confidence": {
+      "0.55": {
+        "accuracy": 53.24,
+        "n_signals": 447,
+        "coverage_pct": 84.8
+      },
+      "0.6": {
+        "accuracy": 55.8,
+        "n_signals": 371,
+        "coverage_pct": 70.4
+      },
+      "0.65": {
+        "accuracy": 55.63,
+        "n_signals": 284,
+        "coverage_pct": 53.9
+      },
+      "0.7": {
+        "accuracy": 56.76,
+        "n_signals": 222,
+        "coverage_pct": 42.1
+      }
+    },
+    "top15_features": [
+      {
+        "feature": "days_to_month_end",
+        "importance": 0.07585
+      },
+      {
+        "feature": "pct_52w_high",
+        "importance": 0.07178
+      },
+      {
+        "feature": "ret1_z5",
+        "importance": 0.06599
+      },
+      {
+        "feature": "rsi_14",
+        "importance": 0.06468
+      },
+      {
+        "feature": "obv_z20",
+        "importance": 0.04836
+      },
+      {
+        "feature": "cmf_10",
+        "importance": 0.04604
+      },
+      {
+        "feature": "vol_ratio_20",
+        "importance": 0.04564
+      },
+      {
+        "feature": "rsi_5",
+        "importance": 0.04211
+      },
+      {
+        "feature": "rsi_7",
+        "importance": 0.03765
+      },
+      {
+        "feature": "pct_10d_high",
+        "importance": 0.03554
+      },
+      {
+        "feature": "cci_20",
+        "importance": 0.03237
+      },
+      {
+        "feature": "stoch14_k",
+        "importance": 0.03072
+      },
+      {
+        "feature": "rsi_3",
+        "importance": 0.03004
+      },
+      {
+        "feature": "ret_10d",
+        "importance": 0.02965
+      },
+      {
+        "feature": "bb_pct_20",
+        "importance": 0.02735
+      }
+    ],
+    "backtest_60pct": {
+      "conf_threshold": 0.6,
+      "n_long": 217,
+      "n_short": 154,
+      "n_neutral": 949,
+      "coverage_pct": 70.4,
+      "win_rate_pct": 49.33,
+      "avg_ret_pct": 0.068,
+      "strategy_sharpe": 0.379,
+      "bh_sharpe": 0.922,
+      "max_dd_pct": -17.83
+    }
+  },
+  "n2d": {
+    "oos_accuracy_pct": 52.09,
+    "oos_auc": 0.5358,
+    "fold_accuracies": [
+      54.55,
+      56.06,
+      50.0,
+      53.03,
+      40.91,
+      54.55,
+      45.45,
+      62.5
+    ],
+    "mean_fold_acc": 52.13,
+    "std_fold_acc": 6.23,
+    "high_confidence": {
+      "0.55": {
+        "accuracy": 53.79,
+        "n_signals": 448,
+        "coverage_pct": 85.2
+      },
+      "0.6": {
+        "accuracy": 55.14,
+        "n_signals": 370,
+        "coverage_pct": 70.3
+      },
+      "0.65": {
+        "accuracy": 53.87,
+        "n_signals": 297,
+        "coverage_pct": 56.5
+      },
+      "0.7": {
+        "accuracy": 55.26,
+        "n_signals": 228,
+        "coverage_pct": 43.3
+      }
+    },
+    "top15_features": [
+      {
+        "feature": "pct_52w_high",
+        "importance": 0.08448
+      },
+      {
+        "feature": "rsi_14",
+        "importance": 0.08426
+      },
+      {
+        "feature": "pct_10d_high",
+        "importance": 0.07347
+      },
+      {
+        "feature": "cci_20",
+        "importance": 0.06446
+      },
+      {
+        "feature": "rsi_3",
+        "importance": 0.05507
+      },
+      {
+        "feature": "obv_z20",
+        "importance": 0.05342
+      },
+      {
+        "feature": "stoch14_k",
+        "importance": 0.04492
+      },
+      {
+        "feature": "ret_3d",
+        "importance": 0.04181
+      },
+      {
+        "feature": "ema5_ema13",
+        "importance": 0.03816
+      },
+      {
+        "feature": "c_vs_ema21",
+        "importance": 0.03371
+      },
+      {
+        "feature": "bb_pct_20",
+        "importance": 0.03272
+      },
+      {
+        "feature": "rsi_2",
+        "importance": 0.02955
+      },
+      {
+        "feature": "ret_accel",
+        "importance": 0.0295
+      },
+      {
+        "feature": "ema3_ema8",
+        "importance": 0.028
+      },
+      {
+        "feature": "pct_5d_high",
+        "importance": 0.02795
+      }
+    ],
+    "backtest_60pct": {
+      "conf_threshold": 0.6,
+      "n_long": 231,
+      "n_short": 139,
+      "n_neutral": 950,
+      "coverage_pct": 70.3,
+      "win_rate_pct": 55.14,
+      "avg_ret_pct": 0.211,
+      "strategy_sharpe": 0.578,
+      "bh_sharpe": 0.924,
+      "max_dd_pct": -34.18
+    }
+  }
+}
