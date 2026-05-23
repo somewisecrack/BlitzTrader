@@ -1,0 +1,329 @@
+{
+  "indicator_name": "NIFTY Composite Leading Indicator (NCLI)",
+  "formula": "NCLI = clip[ 100 \u00d7 z_252( \u03a3 IC_i \u00d7 rank_pct_252(sub_signal_i) ), -100, 100 ]",
+  "interpretation": {
+    ">40": "STRONG BUY \u2014 high confidence UP tomorrow",
+    "20 to 40": "BUY",
+    "-20 to 20": "NEUTRAL",
+    "-40 to -20": "SELL",
+    "<-40": "STRONG SELL \u2014 high confidence DOWN tomorrow"
+  },
+  "n1d": {
+    "oos_accuracy_pct": 56.16,
+    "threshold_results": {
+      "10": {
+        "accuracy": 55.93,
+        "n_signals": 885,
+        "coverage_pct": 94.9,
+        "long_signals": 440,
+        "short_signals": 445
+      },
+      "20": {
+        "accuracy": 56.0,
+        "n_signals": 841,
+        "coverage_pct": 90.1,
+        "long_signals": 418,
+        "short_signals": 423
+      },
+      "30": {
+        "accuracy": 56.39,
+        "n_signals": 782,
+        "coverage_pct": 83.8,
+        "long_signals": 384,
+        "short_signals": 398
+      },
+      "40": {
+        "accuracy": 56.69,
+        "n_signals": 718,
+        "coverage_pct": 77.0,
+        "long_signals": 353,
+        "short_signals": 365
+      },
+      "50": {
+        "accuracy": 55.56,
+        "n_signals": 657,
+        "coverage_pct": 70.4,
+        "long_signals": 325,
+        "short_signals": 332
+      },
+      "60": {
+        "accuracy": 56.09,
+        "n_signals": 599,
+        "coverage_pct": 64.2,
+        "long_signals": 294,
+        "short_signals": 305
+      },
+      "70": {
+        "accuracy": 56.55,
+        "n_signals": 527,
+        "coverage_pct": 56.5,
+        "long_signals": 255,
+        "short_signals": 272
+      }
+    },
+    "decile_results": {},
+    "backtest_thresh30": {
+      "threshold": 30,
+      "n_long": 384,
+      "n_short": 398,
+      "n_neutral": 150,
+      "coverage_pct": 83.9,
+      "win_rate_pct": 52.69,
+      "avg_ret_pct": 0.157,
+      "strategy_sharpe": 1.485,
+      "bh_sharpe": 0.551,
+      "max_dd_pct": -14.91
+    },
+    "components": [
+      {
+        "rank": 1,
+        "signal": "CMF10",
+        "IC": -0.0897,
+        "direction": "bearish"
+      },
+      {
+        "rank": 2,
+        "signal": "RSI14_rev",
+        "IC": 0.0711,
+        "direction": "bullish"
+      },
+      {
+        "rank": 3,
+        "signal": "BB_rev",
+        "IC": 0.0705,
+        "direction": "bullish"
+      },
+      {
+        "rank": 4,
+        "signal": "PvEMA20_rev",
+        "IC": 0.0643,
+        "direction": "bullish"
+      },
+      {
+        "rank": 5,
+        "signal": "CCI10_rev",
+        "IC": 0.0557,
+        "direction": "bullish"
+      },
+      {
+        "rank": 6,
+        "signal": "PvEMA10_rev",
+        "IC": 0.0521,
+        "direction": "bullish"
+      },
+      {
+        "rank": 7,
+        "signal": "MONTH_END",
+        "IC": -0.0424,
+        "direction": "bearish"
+      },
+      {
+        "rank": 8,
+        "signal": "RSI2_rev",
+        "IC": 0.0364,
+        "direction": "bullish"
+      },
+      {
+        "rank": 9,
+        "signal": "HDFC_ret",
+        "IC": 0.036,
+        "direction": "bullish"
+      },
+      {
+        "rank": 10,
+        "signal": "INR_vs_EMA",
+        "IC": 0.0342,
+        "direction": "bullish"
+      },
+      {
+        "rank": 11,
+        "signal": "RET3_rev",
+        "IC": 0.0328,
+        "direction": "bullish"
+      },
+      {
+        "rank": 12,
+        "signal": "REL_ret",
+        "IC": 0.0324,
+        "direction": "bullish"
+      },
+      {
+        "rank": 13,
+        "signal": "MONTH_START",
+        "IC": -0.0316,
+        "direction": "bearish"
+      },
+      {
+        "rank": 14,
+        "signal": "STOCH5_rev",
+        "IC": 0.0299,
+        "direction": "bullish"
+      },
+      {
+        "rank": 15,
+        "signal": "SPX_mom5",
+        "IC": 0.027,
+        "direction": "bullish"
+      }
+    ]
+  },
+  "n2d": {
+    "oos_accuracy_pct": 56.59,
+    "threshold_results": {
+      "10": {
+        "accuracy": 56.0,
+        "n_signals": 875,
+        "coverage_pct": 93.8,
+        "long_signals": 430,
+        "short_signals": 445
+      },
+      "20": {
+        "accuracy": 56.11,
+        "n_signals": 827,
+        "coverage_pct": 88.6,
+        "long_signals": 409,
+        "short_signals": 418
+      },
+      "30": {
+        "accuracy": 56.46,
+        "n_signals": 774,
+        "coverage_pct": 83.0,
+        "long_signals": 381,
+        "short_signals": 393
+      },
+      "40": {
+        "accuracy": 57.82,
+        "n_signals": 697,
+        "coverage_pct": 74.7,
+        "long_signals": 349,
+        "short_signals": 348
+      },
+      "50": {
+        "accuracy": 58.19,
+        "n_signals": 641,
+        "coverage_pct": 68.7,
+        "long_signals": 325,
+        "short_signals": 316
+      },
+      "60": {
+        "accuracy": 58.46,
+        "n_signals": 585,
+        "coverage_pct": 62.7,
+        "long_signals": 290,
+        "short_signals": 295
+      },
+      "70": {
+        "accuracy": 57.89,
+        "n_signals": 513,
+        "coverage_pct": 55.0,
+        "long_signals": 249,
+        "short_signals": 264
+      }
+    },
+    "decile_results": {},
+    "backtest_thresh30": {
+      "threshold": 30,
+      "n_long": 382,
+      "n_short": 393,
+      "n_neutral": 157,
+      "coverage_pct": 83.2,
+      "win_rate_pct": 55.35,
+      "avg_ret_pct": 0.29,
+      "strategy_sharpe": 1.385,
+      "bh_sharpe": 0.534,
+      "max_dd_pct": -21.35
+    },
+    "components": [
+      {
+        "rank": 1,
+        "signal": "CMF10",
+        "IC": -0.1072,
+        "direction": "bearish"
+      },
+      {
+        "rank": 2,
+        "signal": "BB_rev",
+        "IC": 0.1069,
+        "direction": "bullish"
+      },
+      {
+        "rank": 3,
+        "signal": "RSI14_rev",
+        "IC": 0.0976,
+        "direction": "bullish"
+      },
+      {
+        "rank": 4,
+        "signal": "PvEMA20_rev",
+        "IC": 0.0941,
+        "direction": "bullish"
+      },
+      {
+        "rank": 5,
+        "signal": "PvEMA10_rev",
+        "IC": 0.0854,
+        "direction": "bullish"
+      },
+      {
+        "rank": 6,
+        "signal": "CCI10_rev",
+        "IC": 0.0839,
+        "direction": "bullish"
+      },
+      {
+        "rank": 7,
+        "signal": "RET3_rev",
+        "IC": 0.0754,
+        "direction": "bullish"
+      },
+      {
+        "rank": 8,
+        "signal": "STOCH5_rev",
+        "IC": 0.0693,
+        "direction": "bullish"
+      },
+      {
+        "rank": 9,
+        "signal": "VIX_chg",
+        "IC": 0.0586,
+        "direction": "bullish"
+      },
+      {
+        "rank": 10,
+        "signal": "RSI2_rev",
+        "IC": 0.0561,
+        "direction": "bullish"
+      },
+      {
+        "rank": 11,
+        "signal": "HDFC_ret",
+        "IC": 0.0527,
+        "direction": "bullish"
+      },
+      {
+        "rank": 12,
+        "signal": "ASIA_comp",
+        "IC": 0.0515,
+        "direction": "bullish"
+      },
+      {
+        "rank": 13,
+        "signal": "N225_ret",
+        "IC": 0.0477,
+        "direction": "bullish"
+      },
+      {
+        "rank": 14,
+        "signal": "OBV_slope",
+        "IC": -0.0461,
+        "direction": "bearish"
+      },
+      {
+        "rank": 15,
+        "signal": "BREADTH",
+        "IC": 0.0459,
+        "direction": "bullish"
+      }
+    ]
+  }
+}
