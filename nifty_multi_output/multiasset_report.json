@@ -1,0 +1,264 @@
+{
+  "n1d": {
+    "oos_accuracy_pct": 53.57,
+    "oos_auc": 0.5808,
+    "mean_fold_acc": 53.56,
+    "std_fold_acc": 3.16,
+    "high_confidence": {
+      "0.52": {
+        "accuracy": 62.0,
+        "n_signals": 429,
+        "coverage_pct": 39.8
+      },
+      "0.55": {
+        "accuracy": 71.97,
+        "n_signals": 157,
+        "coverage_pct": 14.6
+      },
+      "0.58": {
+        "accuracy": 76.19,
+        "n_signals": 105,
+        "coverage_pct": 9.7
+      },
+      "0.6": {
+        "accuracy": 80.46,
+        "n_signals": 87,
+        "coverage_pct": 8.1
+      },
+      "0.63": {
+        "accuracy": 83.61,
+        "n_signals": 61,
+        "coverage_pct": 5.7
+      },
+      "0.65": {
+        "accuracy": 83.33,
+        "n_signals": 54,
+        "coverage_pct": 5.0
+      }
+    },
+    "regime_accuracy": {
+      "RANGE": {
+        "accuracy": 56.72,
+        "n_days": 469
+      },
+      "BULL": {
+        "accuracy": 51.01,
+        "n_days": 594
+      }
+    },
+    "top20_features": [
+      {
+        "feature": "day_of_month",
+        "importance": 0.04421
+      },
+      {
+        "feature": "nifty_vs_ema10",
+        "importance": 0.03091
+      },
+      {
+        "feature": "nifty_bb_pct",
+        "importance": 0.03017
+      },
+      {
+        "feature": "nifty_cci20",
+        "importance": 0.02941
+      },
+      {
+        "feature": "nifty_pct52wh",
+        "importance": 0.0287
+      },
+      {
+        "feature": "nifty_stoch14",
+        "importance": 0.02834
+      },
+      {
+        "feature": "is_thursday",
+        "importance": 0.0283
+      },
+      {
+        "feature": "nifty_vs_ema20",
+        "importance": 0.02799
+      },
+      {
+        "feature": "inr_vs_ema10",
+        "importance": 0.02798
+      },
+      {
+        "feature": "nifty_vs_ema50",
+        "importance": 0.02748
+      },
+      {
+        "feature": "consec_x_spx",
+        "importance": 0.0271
+      },
+      {
+        "feature": "nifty_ret1_z20",
+        "importance": 0.02688
+      },
+      {
+        "feature": "hdfc_rsi14",
+        "importance": 0.02677
+      },
+      {
+        "feature": "nifty_willr10",
+        "importance": 0.02676
+      },
+      {
+        "feature": "hdfc_vs_ema20",
+        "importance": 0.02671
+      },
+      {
+        "feature": "vix_x_rsi",
+        "importance": 0.02643
+      },
+      {
+        "feature": "nifty_force_z",
+        "importance": 0.02632
+      },
+      {
+        "feature": "is_friday",
+        "importance": 0.0261
+      },
+      {
+        "feature": "bnk_ret1",
+        "importance": 0.02598
+      },
+      {
+        "feature": "spx_rsi14",
+        "importance": 0.02582
+      }
+    ],
+    "backtest_60pct": {
+      "conf_thresh": 0.6,
+      "n_long": 4,
+      "n_short": 83,
+      "coverage_pct": 8.1,
+      "win_rate_pct": 37.93,
+      "avg_ret_pct": 0.293,
+      "strategy_sharpe": 0.557,
+      "bh_sharpe": 0.512,
+      "max_dd_pct": -7.02
+    }
+  },
+  "n2d": {
+    "oos_accuracy_pct": 50.56,
+    "oos_auc": 0.5463,
+    "mean_fold_acc": 50.54,
+    "std_fold_acc": 5.06,
+    "high_confidence": {
+      "0.52": {
+        "accuracy": 52.59,
+        "n_signals": 734,
+        "coverage_pct": 68.1
+      },
+      "0.55": {
+        "accuracy": 62.28,
+        "n_signals": 228,
+        "coverage_pct": 21.2
+      }
+    },
+    "regime_accuracy": {
+      "RANGE": {
+        "accuracy": 54.16,
+        "n_days": 469
+      },
+      "BULL": {
+        "accuracy": 47.05,
+        "n_days": 593
+      }
+    },
+    "top20_features": [
+      {
+        "feature": "nifty_vs_ema50",
+        "importance": 0.03168
+      },
+      {
+        "feature": "nifty_ema8_21",
+        "importance": 0.03076
+      },
+      {
+        "feature": "near_month_start",
+        "importance": 0.02955
+      },
+      {
+        "feature": "rel_vs_ema20",
+        "importance": 0.02896
+      },
+      {
+        "feature": "spx_rsi14",
+        "importance": 0.02867
+      },
+      {
+        "feature": "nifty_rsi14",
+        "importance": 0.02844
+      },
+      {
+        "feature": "nifty_rsi3",
+        "importance": 0.02785
+      },
+      {
+        "feature": "bnk_vs_ema10",
+        "importance": 0.02746
+      },
+      {
+        "feature": "nifty_ret5",
+        "importance": 0.02732
+      },
+      {
+        "feature": "crude_ret5",
+        "importance": 0.0273
+      },
+      {
+        "feature": "day_of_week",
+        "importance": 0.02727
+      },
+      {
+        "feature": "nifty_rsi5",
+        "importance": 0.02724
+      },
+      {
+        "feature": "nifty_ret1",
+        "importance": 0.02723
+      },
+      {
+        "feature": "rsi2_x_close_pos",
+        "importance": 0.02723
+      },
+      {
+        "feature": "inr_vs_ema10",
+        "importance": 0.02712
+      },
+      {
+        "feature": "spx_ret2",
+        "importance": 0.02684
+      },
+      {
+        "feature": "nifty_ret3_z20",
+        "importance": 0.02669
+      },
+      {
+        "feature": "nifty_rsi2",
+        "importance": 0.02651
+      },
+      {
+        "feature": "nifty_cci10",
+        "importance": 0.02642
+      },
+      {
+        "feature": "bnk_cci10",
+        "importance": 0.02592
+      }
+    ],
+    "backtest_60pct": {
+      "conf_thresh": 0.6,
+      "n_long": 17,
+      "n_short": 11,
+      "coverage_pct": 2.6,
+      "win_rate_pct": 57.14,
+      "avg_ret_pct": 0.161,
+      "strategy_sharpe": 0.074,
+      "bh_sharpe": 0.519,
+      "max_dd_pct": -9.25
+    }
+  }
+}
