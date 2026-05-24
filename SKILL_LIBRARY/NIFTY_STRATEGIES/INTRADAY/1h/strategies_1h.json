@@ -1,0 +1,182 @@
+[
+  {
+    "id": "IT_1H_S1",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "hold_label": "1 bar(s) \u00d7 1h",
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "Price 0.2%+ below VWAP [strong bear]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 2.0,
+        "description": "2+ consecutive down bars [momentum]"
+      },
+      {
+        "signal": "breakdown_5",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Break below 5-bar low [micro BD]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.2,
+      "oos_wr_pct": 63.3,
+      "is_trades": 104,
+      "oos_trades": 60,
+      "oos_return_pct": -10.16,
+      "pvalue": 0.02595,
+      "score": 4.906
+    }
+  },
+  {
+    "id": "IT_1H_S2",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "hold_label": "1 bar(s) \u00d7 1h",
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 30.0,
+        "description": "RSI14 \u2265 30 [not oversold \u2014 room to fall]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 3.0,
+        "description": "3+ consecutive down bars [strong momentum]"
+      },
+      {
+        "signal": "bb_pct",
+        "op": "<=",
+        "threshold": 0.45,
+        "description": "BB%B < 0.45 [lower half \u2014 trending down]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 74.2,
+      "oos_wr_pct": 64.0,
+      "is_trades": 62,
+      "oos_trades": 50,
+      "oos_return_pct": -2.55,
+      "pvalue": 0.03245,
+      "score": 4.525
+    }
+  },
+  {
+    "id": "IT_1H_S3",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "hold_label": "1 bar(s) \u00d7 1h",
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 30.0,
+        "description": "RSI14 \u2265 30 [not oversold \u2014 room to fall]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 2.0,
+        "description": "2+ consecutive down bars [momentum]"
+      },
+      {
+        "signal": "breakdown_10",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Break below 10-bar low [BD]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 72.3,
+      "oos_wr_pct": 66.7,
+      "is_trades": 65,
+      "oos_trades": 45,
+      "oos_return_pct": -2.34,
+      "pvalue": 0.01785,
+      "score": 4.472
+    }
+  },
+  {
+    "id": "IT_1H_S4",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "hold_label": "1 bar(s) \u00d7 1h",
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "Price 0.2%+ below VWAP [strong bear]"
+      },
+      {
+        "signal": "RSI_14",
+        "op": "<=",
+        "threshold": 45.0,
+        "description": "RSI14 \u2264 45 [clear bear momentum]"
+      },
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 30.0,
+        "description": "RSI14 \u2265 30 [not oversold \u2014 room to fall]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 73.4,
+      "oos_wr_pct": 60.4,
+      "is_trades": 64,
+      "oos_trades": 48,
+      "oos_return_pct": -7.4,
+      "pvalue": 0.09671,
+      "score": 4.186
+    }
+  },
+  {
+    "id": "IT_1H_S5",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "hold_label": "1 bar(s) \u00d7 1h",
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": -0.005,
+        "description": "Price 0.5%+ below VWAP [dominant bear]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 2.0,
+        "description": "2+ consecutive down bars [momentum]"
+      },
+      {
+        "signal": "below_ors",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Price below opening range low [ORB SHORT]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 72.6,
+      "oos_wr_pct": 63.2,
+      "is_trades": 73,
+      "oos_trades": 38,
+      "oos_return_pct": -5.66,
+      "pvalue": 0.07165,
+      "score": 3.893
+    }
+  }
+]

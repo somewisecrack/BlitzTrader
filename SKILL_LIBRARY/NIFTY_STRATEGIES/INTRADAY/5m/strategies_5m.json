@@ -1,0 +1,182 @@
+[
+  {
+    "id": "IT_5M_S1",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 3,
+    "hold_label": "3 bar(s) \u00d7 5m",
+    "conditions": [
+      {
+        "signal": "ema9_vs_e21",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "EMA9 < EMA21 by 0.2% [firm downtrend]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 3.0,
+        "description": "3+ consecutive down bars [strong momentum]"
+      },
+      {
+        "signal": "below_ors",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Price below opening range low [ORB SHORT]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 80.0,
+      "oos_wr_pct": 86.7,
+      "is_trades": 20,
+      "oos_trades": 15,
+      "oos_return_pct": -2.52,
+      "pvalue": 0.00369,
+      "score": 3.357
+    }
+  },
+  {
+    "id": "IT_5M_S2",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 18,
+    "hold_label": "18 bar(s) \u00d7 5m",
+    "conditions": [
+      {
+        "signal": "vol_ratio",
+        "op": ">=",
+        "threshold": 1.5,
+        "description": "Volume \u2265 1.5\u00d7 avg [strong participation]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 2.0,
+        "description": "2+ consecutive down bars [momentum]"
+      },
+      {
+        "signal": "below_ors",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Price below opening range low [ORB SHORT]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.9,
+      "oos_wr_pct": 69.2,
+      "is_trades": 32,
+      "oos_trades": 13,
+      "oos_return_pct": -0.75,
+      "pvalue": 0.13342,
+      "score": 2.496
+    }
+  },
+  {
+    "id": "IT_5M_S3",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 3,
+    "hold_label": "3 bar(s) \u00d7 5m",
+    "conditions": [
+      {
+        "signal": "ema9_vs_e21",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "EMA9 < EMA21 by 0.2% [firm downtrend]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 3.0,
+        "description": "3+ consecutive down bars [strong momentum]"
+      },
+      {
+        "signal": "breakdown_5",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Break below 5-bar low [micro BD]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.4,
+      "oos_wr_pct": 73.7,
+      "is_trades": 21,
+      "oos_trades": 19,
+      "oos_return_pct": -8.84,
+      "pvalue": 0.03178,
+      "score": 3.212
+    }
+  },
+  {
+    "id": "IT_5M_S4",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 3,
+    "hold_label": "3 bar(s) \u00d7 5m",
+    "conditions": [
+      {
+        "signal": "ema9_vs_e21",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "EMA9 < EMA21 by 0.2% [firm downtrend]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 3.0,
+        "description": "3+ consecutive down bars [strong momentum]"
+      },
+      {
+        "signal": "breakdown_10",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Break below 10-bar low [BD]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.4,
+      "oos_wr_pct": 73.7,
+      "is_trades": 21,
+      "oos_trades": 19,
+      "oos_return_pct": -8.84,
+      "pvalue": 0.03178,
+      "score": 3.212
+    }
+  },
+  {
+    "id": "IT_5M_S5",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 3,
+    "hold_label": "3 bar(s) \u00d7 5m",
+    "conditions": [
+      {
+        "signal": "ema9_vs_e21",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "EMA9 < EMA21 by 0.2% [firm downtrend]"
+      },
+      {
+        "signal": "e21_vs_e50",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "EMA21 < EMA50 [medium downtrend]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 3.0,
+        "description": "3+ consecutive down bars [strong momentum]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 76.2,
+      "oos_wr_pct": 70.0,
+      "is_trades": 21,
+      "oos_trades": 20,
+      "oos_return_pct": -6.18,
+      "pvalue": 0.05766,
+      "score": 3.13
+    }
+  }
+]
