@@ -1,0 +1,170 @@
+[
+  {
+    "id": "USDINR_1H_S1",
+    "instrument": "USDINR",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 2,
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 30.0,
+        "description": "RSI14 \u2265 30 [not oversold]"
+      },
+      {
+        "signal": "price_vs_open",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Below session open"
+      },
+      {
+        "signal": "dxy_ret",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "DXY down 0.2%+ [dollar weak]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 73.5,
+      "oos_wr_pct": 70.8,
+      "is_trades": 83,
+      "oos_trades": 48,
+      "oos_return_pct": 1.46,
+      "pvalue": 0.00276,
+      "score": 4.907
+    }
+  },
+  {
+    "id": "USDINR_1H_S2",
+    "instrument": "USDINR",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 2,
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Price at/below VWAP [INR strong]"
+      },
+      {
+        "signal": "dxy_ret",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "DXY down 0.2%+ [dollar weak]"
+      },
+      {
+        "signal": "inr_strong_day",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Composite macro = INR strength day"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 75.7,
+      "oos_wr_pct": 71.9,
+      "is_trades": 74,
+      "oos_trades": 32,
+      "oos_return_pct": 0.77,
+      "pvalue": 0.01003,
+      "score": 4.066
+    }
+  },
+  {
+    "id": "USDINR_1H_S3",
+    "instrument": "USDINR",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 4,
+    "conditions": [
+      {
+        "signal": "below_ors",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Below opening range low"
+      },
+      {
+        "signal": "dxy_ret",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "DXY down 0.2%+ [dollar weak]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 86.2,
+      "oos_wr_pct": 86.4,
+      "is_trades": 58,
+      "oos_trades": 22,
+      "oos_return_pct": 2.64,
+      "pvalue": 0.00043,
+      "score": 4.051
+    }
+  },
+  {
+    "id": "USDINR_1H_S4",
+    "instrument": "USDINR",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 3,
+    "conditions": [
+      {
+        "signal": "inr_strong_day",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Composite macro = INR strength day"
+      },
+      {
+        "signal": "gold_ret",
+        "op": "<=",
+        "threshold": -0.005,
+        "description": "Gold down 0.5%+ [risk-on, USD weak]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.2,
+      "oos_wr_pct": 64.1,
+      "is_trades": 52,
+      "oos_trades": 39,
+      "oos_return_pct": 0.89,
+      "pvalue": 0.05406,
+      "score": 4.003
+    }
+  },
+  {
+    "id": "USDINR_1H_S5",
+    "instrument": "USDINR",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 2,
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 30.0,
+        "description": "RSI14 \u2265 30 [not oversold]"
+      },
+      {
+        "signal": "bb_pct",
+        "op": "<=",
+        "threshold": 0.45,
+        "description": "BB%B < 0.45 [lower half]"
+      },
+      {
+        "signal": "consec_dn",
+        "op": ">=",
+        "threshold": 3.0,
+        "description": "3+ consecutive down bars"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 72.0,
+      "oos_wr_pct": 66.7,
+      "is_trades": 50,
+      "oos_trades": 36,
+      "oos_return_pct": -0.74,
+      "pvalue": 0.03262,
+      "score": 4.0
+    }
+  }
+]

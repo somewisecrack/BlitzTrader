@@ -1,0 +1,170 @@
+[
+  {
+    "id": "BANKNIFTY_5M_S1",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 12,
+    "conditions": [
+      {
+        "signal": "price_vs_open",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Below session open"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 70.2,
+      "oos_wr_pct": 66.7,
+      "is_trades": 84,
+      "oos_trades": 48,
+      "oos_return_pct": 5.9,
+      "pvalue": 0.01465,
+      "score": 4.619
+    }
+  },
+  {
+    "id": "BANKNIFTY_5M_S2",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 18,
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Price at/below VWAP"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 72.7,
+      "oos_wr_pct": 75.0,
+      "is_trades": 55,
+      "oos_trades": 32,
+      "oos_return_pct": 10.25,
+      "pvalue": 0.0035,
+      "score": 4.243
+    }
+  },
+  {
+    "id": "BANKNIFTY_5M_S3",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 18,
+    "conditions": [
+      {
+        "signal": "e21_vs_e50",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "EMA21 < EMA50 [medium downtrend]"
+      },
+      {
+        "signal": "vol_ratio",
+        "op": ">=",
+        "threshold": 1.5,
+        "description": "Volume \u2265 1.5\u00d7 avg"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 75.0,
+      "oos_wr_pct": 87.0,
+      "is_trades": 36,
+      "oos_trades": 23,
+      "oos_return_pct": 5.65,
+      "pvalue": 0.00024,
+      "score": 4.17
+    }
+  },
+  {
+    "id": "BANKNIFTY_5M_S4",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 18,
+    "conditions": [
+      {
+        "signal": "ema9_vs_e21",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "EMA9 < EMA21 [downtrend]"
+      },
+      {
+        "signal": "vol_ratio",
+        "op": ">=",
+        "threshold": 1.5,
+        "description": "Volume \u2265 1.5\u00d7 avg"
+      },
+      {
+        "signal": "hdfcbank_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "HDFCBANK down 0.3%+ [largest weight]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.7,
+      "oos_wr_pct": 67.6,
+      "is_trades": 46,
+      "oos_trades": 37,
+      "oos_return_pct": 3.88,
+      "pvalue": 0.02352,
+      "score": 4.11
+    }
+  },
+  {
+    "id": "BANKNIFTY_5M_S5",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 5m",
+    "direction": "SHORT",
+    "hold_bars": 18,
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": "<=",
+        "threshold": 50.0,
+        "description": "RSI14 \u2264 50 [bearish zone]"
+      },
+      {
+        "signal": "vol_ratio",
+        "op": ">=",
+        "threshold": 1.2,
+        "description": "Volume \u2265 1.2\u00d7 avg"
+      },
+      {
+        "signal": "sbin_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "SBIN down 0.3%+ [PSU weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 70.3,
+      "oos_wr_pct": 63.2,
+      "is_trades": 37,
+      "oos_trades": 38,
+      "oos_return_pct": -0.59,
+      "pvalue": 0.07165,
+      "score": 3.893
+    }
+  }
+]

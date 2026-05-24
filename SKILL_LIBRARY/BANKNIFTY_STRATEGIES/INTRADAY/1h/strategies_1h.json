@@ -1,0 +1,158 @@
+[
+  {
+    "id": "BANKNIFTY_1H_S1",
+    "instrument": "BANKNIFTY",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 30.0,
+        "description": "RSI14 \u2265 30 [not oversold]"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 73.1,
+      "oos_wr_pct": 80.6,
+      "is_trades": 156,
+      "oos_trades": 93,
+      "oos_return_pct": 19.34,
+      "pvalue": 0.0,
+      "score": 7.777
+    }
+  },
+  {
+    "id": "BANKNIFTY_1H_S2",
+    "instrument": "BANKNIFTY",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "conditions": [
+      {
+        "signal": "price_vs_open",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Below session open"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 75.3,
+      "oos_wr_pct": 74.2,
+      "is_trades": 170,
+      "oos_trades": 97,
+      "oos_return_pct": 13.68,
+      "pvalue": 0.0,
+      "score": 7.31
+    }
+  },
+  {
+    "id": "BANKNIFTY_1H_S3",
+    "instrument": "BANKNIFTY",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "conditions": [
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      },
+      {
+        "signal": "hdfcbank_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "HDFCBANK down 0.3%+ [largest weight]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 75.7,
+      "oos_wr_pct": 80.2,
+      "is_trades": 144,
+      "oos_trades": 81,
+      "oos_return_pct": 15.16,
+      "pvalue": 0.0,
+      "score": 7.222
+    }
+  },
+  {
+    "id": "BANKNIFTY_1H_S4",
+    "instrument": "BANKNIFTY",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 30.0,
+        "description": "RSI14 \u2265 30 [not oversold]"
+      },
+      {
+        "signal": "price_vs_open",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Below session open"
+      },
+      {
+        "signal": "hdfcbank_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "HDFCBANK down 0.3%+ [largest weight]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.4,
+      "oos_wr_pct": 72.8,
+      "is_trades": 126,
+      "oos_trades": 92,
+      "oos_return_pct": 11.57,
+      "pvalue": 1e-05,
+      "score": 6.985
+    }
+  },
+  {
+    "id": "BANKNIFTY_1H_S5",
+    "instrument": "BANKNIFTY",
+    "timeframe": "1-Year @ 1h",
+    "direction": "SHORT",
+    "hold_bars": 1,
+    "conditions": [
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      },
+      {
+        "signal": "sbin_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "SBIN down 0.3%+ [PSU weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 77.5,
+      "oos_wr_pct": 75.3,
+      "is_trades": 138,
+      "oos_trades": 81,
+      "oos_return_pct": 13.22,
+      "pvalue": 0.0,
+      "score": 6.778
+    }
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "USDINR_5M_S1",
+    "instrument": "USDINR",
+    "timeframe": "60-Day @ 5m",
+    "direction": "LONG",
+    "hold_bars": 12,
+    "conditions": [
+      {
+        "signal": "dxy_ret",
+        "op": ">=",
+        "threshold": 0.002,
+        "description": "DXY up 0.2%+ [dollar strong]"
+      },
+      {
+        "signal": "atr_ratio",
+        "op": ">=",
+        "threshold": 1.2,
+        "description": "ATR above avg [volatile session]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.4,
+      "oos_wr_pct": 58.8,
+      "is_trades": 21,
+      "oos_trades": 17,
+      "oos_return_pct": 1.22,
+      "pvalue": 0.31453,
+      "score": 2.425
+    }
+  }
+]

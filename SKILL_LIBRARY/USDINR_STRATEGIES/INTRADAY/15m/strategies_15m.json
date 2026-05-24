@@ -1,0 +1,74 @@
+[
+  {
+    "id": "USDINR_15M_S1",
+    "instrument": "USDINR",
+    "timeframe": "60-Day @ 15m",
+    "direction": "SHORT",
+    "hold_bars": 8,
+    "conditions": [
+      {
+        "signal": "macd_hist",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "MACD histogram negative"
+      },
+      {
+        "signal": "price_vs_open",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Below session open"
+      },
+      {
+        "signal": "gold_ret",
+        "op": "<=",
+        "threshold": -0.005,
+        "description": "Gold down 0.5%+ [risk-on, USD weak]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.9,
+      "oos_wr_pct": 66.7,
+      "is_trades": 32,
+      "oos_trades": 12,
+      "oos_return_pct": -0.44,
+      "pvalue": 0.19385,
+      "score": 2.309
+    }
+  },
+  {
+    "id": "USDINR_15M_S2",
+    "instrument": "USDINR",
+    "timeframe": "60-Day @ 15m",
+    "direction": "SHORT",
+    "hold_bars": 8,
+    "conditions": [
+      {
+        "signal": "price_vs_open",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Below session open"
+      },
+      {
+        "signal": "inr_strong_day",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Composite macro = INR strength day"
+      },
+      {
+        "signal": "gold_ret",
+        "op": "<=",
+        "threshold": -0.005,
+        "description": "Gold down 0.5%+ [risk-on, USD weak]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 72.0,
+      "oos_wr_pct": 60.0,
+      "is_trades": 25,
+      "oos_trades": 10,
+      "oos_return_pct": 0.04,
+      "pvalue": 0.37695,
+      "score": 1.897
+    }
+  }
+]

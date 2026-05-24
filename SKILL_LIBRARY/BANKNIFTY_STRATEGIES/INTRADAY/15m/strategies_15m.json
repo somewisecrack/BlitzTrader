@@ -1,0 +1,170 @@
+[
+  {
+    "id": "BANKNIFTY_15M_S1",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 15m",
+    "direction": "SHORT",
+    "hold_bars": 4,
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Price at/below VWAP"
+      },
+      {
+        "signal": "macd_hist",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "MACD histogram negative"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 72.6,
+      "oos_wr_pct": 76.7,
+      "is_trades": 62,
+      "oos_trades": 30,
+      "oos_return_pct": 3.89,
+      "pvalue": 0.00261,
+      "score": 4.199
+    }
+  },
+  {
+    "id": "BANKNIFTY_15M_S2",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 15m",
+    "direction": "SHORT",
+    "hold_bars": 4,
+    "conditions": [
+      {
+        "signal": "e21_vs_e50",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "EMA21 < EMA50 [medium downtrend]"
+      },
+      {
+        "signal": "below_ors",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "Below opening range low [ORB SHORT]"
+      },
+      {
+        "signal": "hdfcbank_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "HDFCBANK down 0.3%+ [largest weight]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 72.0,
+      "oos_wr_pct": 65.0,
+      "is_trades": 25,
+      "oos_trades": 40,
+      "oos_return_pct": 4.29,
+      "pvalue": 0.04035,
+      "score": 4.111
+    }
+  },
+  {
+    "id": "BANKNIFTY_15M_S3",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 15m",
+    "direction": "SHORT",
+    "hold_bars": 8,
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Price at/below VWAP"
+      },
+      {
+        "signal": "hdfcbank_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "HDFCBANK down 0.3%+ [largest weight]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 73.8,
+      "oos_wr_pct": 66.7,
+      "is_trades": 42,
+      "oos_trades": 36,
+      "oos_return_pct": 4.91,
+      "pvalue": 0.03262,
+      "score": 4.0
+    }
+  },
+  {
+    "id": "BANKNIFTY_15M_S4",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 15m",
+    "direction": "SHORT",
+    "hold_bars": 4,
+    "conditions": [
+      {
+        "signal": "price_vs_open",
+        "op": "<=",
+        "threshold": 0.0,
+        "description": "Below session open"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 74.2,
+      "oos_wr_pct": 62.5,
+      "is_trades": 66,
+      "oos_trades": 40,
+      "oos_return_pct": 2.85,
+      "pvalue": 0.07693,
+      "score": 3.953
+    }
+  },
+  {
+    "id": "BANKNIFTY_15M_S5",
+    "instrument": "BANKNIFTY",
+    "timeframe": "60-Day @ 15m",
+    "direction": "SHORT",
+    "hold_bars": 4,
+    "conditions": [
+      {
+        "signal": "vwap_dev",
+        "op": "<=",
+        "threshold": -0.002,
+        "description": "Price 0.2%+ below VWAP"
+      },
+      {
+        "signal": "bb_pct",
+        "op": "<=",
+        "threshold": 0.45,
+        "description": "BB%B < 0.45 [lower half]"
+      },
+      {
+        "signal": "bfsi_weak",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "\u22641 BFSI stocks up [sector weakness]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 71.2,
+      "oos_wr_pct": 73.1,
+      "is_trades": 52,
+      "oos_trades": 26,
+      "oos_return_pct": 2.57,
+      "pvalue": 0.01448,
+      "score": 3.726
+    }
+  }
+]
