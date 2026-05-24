@@ -6,6 +6,7 @@ logs/
 journals/
 data_exports/
 live_state.json
+telegram_position_index.json
 
 # Python
 __pycache__/
