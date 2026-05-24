@@ -34,6 +34,12 @@ SUPPORTED_STRATEGIES = {
     "VSA Upthrust",
     "VSA Hidden Upthrust",
     "VSA Shakeout Intraday",
+    # ── Intraday momentum SHORT strategies (NIFTY/BANKNIFTY) ─────────────────
+    "VP-30 NIFTY ORB Breakdown",
+    "VP-31 NIFTY VWAP Momentum Short",
+    "VP-32 NIFTY Bear Continuation",
+    "VP-33 BANKNIFTY ORB Breakdown",
+    "VP-34 BANKNIFTY VWAP Short",
     # ── Live-only strategies (require prev-day pivots/CPR/OHLC context) ─────
     "VP-10 First Candle Open",
     "VP-20 CPR Reversal",
@@ -102,6 +108,12 @@ STRATEGY_DIRECTIONS: dict[str, frozenset[str]] = {
     "VSA Upthrust":                      frozenset({"SELL"}),
     "VSA Hidden Upthrust":               frozenset({"SELL"}),
     "VSA Shakeout Intraday":             frozenset({"BUY"}),
+    # ── Intraday momentum SHORT strategies ────────────────────────────────────
+    "VP-30 NIFTY ORB Breakdown":         frozenset({"SELL"}),
+    "VP-31 NIFTY VWAP Momentum Short":   frozenset({"SELL"}),
+    "VP-32 NIFTY Bear Continuation":     frozenset({"SELL"}),
+    "VP-33 BANKNIFTY ORB Breakdown":     frozenset({"SELL"}),
+    "VP-34 BANKNIFTY VWAP Short":        frozenset({"SELL"}),
 }
 
 # Legacy alias kept for any code that imported the old name.
@@ -317,6 +329,111 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
     rsi_all  = _rsi_series(closes, 14)
     adx_all  = _adx_series(candles, 14)
 
+    # ── EMA9 / EMA21 series (for VP-30 NIFTY ORB Breakdown) ─────────────────
+    e9_all  = _ema_series(closes, 9)
+    e21_all = _ema_series(closes, 21)
+
+    # ── MACD histogram series (for VP-34 BANKNIFTY VWAP Short) ───────────────
+    # MACD = EMA12 − EMA26; Signal = EMA9 of MACD; Histogram = MACD − Signal
+    _e12_all = _ema_series(closes, 12)
+    _e26_all = _ema_series(closes, 26)
+    _macd_line: list[float | None] = [
+        (m - n) if (m is not None and n is not None) else None
+        for m, n in zip(_e12_all, _e26_all)
+    ]
+    # EMA9 of the MACD line (build from non-None values with index tracking)
+    _macd_vals: list[float] = []
+    _macd_idx: list[int] = []
+    for _i, _v in enumerate(_macd_line):
+        if _v is not None:
+            _macd_vals.append(_v)
+            _macd_idx.append(_i)
+    _macd_signal_compact = _ema_series(_macd_vals, 9)
+    _macd_signal_full: list[float | None] = [None] * len(candles)
+    for _k, _ci in enumerate(_macd_idx):
+        _macd_signal_full[_ci] = _macd_signal_compact[_k]
+    macd_hist_all: list[float | None] = [
+        (m - s) if (m is not None and s is not None) else None
+        for m, s in zip(_macd_line, _macd_signal_full)
+    ]
+
+    # ── Bollinger %B series — 20-period (for VP-32 NIFTY Bear Continuation) ──
+    # %B = (close − lower_band) / (upper_band − lower_band)
+    _bb_period = 20
+    bb_pct_all: list[float | None] = [None] * len(candles)
+    for _i in range(_bb_period - 1, len(candles)):
+        _window = closes[_i - _bb_period + 1: _i + 1]
+        _mean = sum(_window) / _bb_period
+        _std = (_sum := sum((_x - _mean) ** 2 for _x in _window)) ** 0.5 / _bb_period ** 0.5
+        if _std > 0:
+            _upper_b = _mean + 2 * _std
+            _lower_b = _mean - 2 * _std
+            bb_pct_all[_i] = (closes[_i] - _lower_b) / (_upper_b - _lower_b)
+
+    # ── VWAP series — daily session reset (for VP-31 and VP-34) ─────────────
+    # VWAP resets at the start of each calendar day (IST).
+    # Uses typical price = (high + low + close) / 3.
+    vwap_all: list[float | None] = [None] * len(candles)
+    _cum_tp_vol = 0.0
+    _cum_vol = 0.0
+    _prev_vwap_date: _dt.date | None = None
+    for _i, _c in enumerate(candles):
+        _d = _ist_date(_c["time"])
+        if _d != _prev_vwap_date:
+            _cum_tp_vol = 0.0
+            _cum_vol = 0.0
+            _prev_vwap_date = _d
+        _vol = _c.get("volume", 0) or 0
+        _tp = (_c["high"] + _c["low"] + _c["close"]) / 3.0
+        _cum_tp_vol += _tp * _vol
+        _cum_vol += _vol
+        if _cum_vol > 0:
+            vwap_all[_i] = _cum_tp_vol / _cum_vol
+
+    # ── Opening Range Low — first ~15 min of each session (for VP-30/VP-33) ──
+    # OR window = ceil(15 / interval_minutes) bars, minimum 1.
+    try:
+        _interval_min = int(norm_interval)
+    except ValueError:
+        _interval_min = 5
+    import math as _math
+    _or_bars = max(1, _math.ceil(15 / max(_interval_min, 1)))
+
+    # Build per-day OR lows: map date → low of first _or_bars bars of that day
+    _day_first_bar: dict[_dt.date, int] = {}   # date → index of first bar
+    _day_or_low: dict[_dt.date, float] = {}    # date → OR low (after enough bars)
+    for _i, _c in enumerate(candles):
+        _d = _ist_date(_c["time"])
+        if _d not in _day_first_bar:
+            _day_first_bar[_d] = _i
+        _start = _day_first_bar[_d]
+        _bars_into_day = _i - _start + 1
+        if _bars_into_day >= _or_bars:
+            # Compute (or update) OR low from the first _or_bars bars of this day
+            if _d not in _day_or_low:
+                _day_or_low[_d] = min(candles[_start + _j]["low"] for _j in range(_or_bars))
+
+    # or_low_all[i] = the OR low for candle i's session (None if OR not yet complete)
+    or_low_all: list[float | None] = [None] * len(candles)
+    for _i, _c in enumerate(candles):
+        _d = _ist_date(_c["time"])
+        or_low_all[_i] = _day_or_low.get(_d)
+
+    # ── Consecutive down-bar count ending at each candle ─────────────────────
+    # A "down bar" is one where close < open (bear candle).
+    consec_dn: list[int] = [0] * len(candles)
+    for _i in range(len(candles)):
+        if candles[_i]["close"] < candles[_i]["open"]:
+            consec_dn[_i] = (consec_dn[_i - 1] + 1) if _i > 0 else 1
+        else:
+            consec_dn[_i] = 0
+
+    # ── 20-bar average volume series ─────────────────────────────────────────
+    avg_vol_20: list[float | None] = [None] * len(candles)
+    for _i in range(19, len(candles)):
+        _slice = volumes[_i - 19: _i + 1]
+        avg_vol_20[_i] = sum(_slice) / 20.0 if any(_v > 0 for _v in _slice) else None
+
     signals: list[dict] = []
     # Track (strategy, direction, candle_index) to avoid duplicate signals
     # (mirrors live _emitted_signals set but keyed on index instead of time).
@@ -530,5 +647,100 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
                 _add(i, c, "VP-21 Extreme Candle Reversal", "SELL",
                      "Previous 15m bullish candle range > 2.5x average; current bearish candle lost its close",
                      c["high"], _target_for(c, "SELL", c["high"]))
+
+        # ── VP-30 NIFTY ORB Breakdown (5m / 15m) ─────────────────────────────
+        # Conditions: EMA9 < EMA21 by ≥0.2%; 3+ consecutive down bars;
+        #             price below Opening Range Low; NIFTY only; 5m or 15m.
+        if (symbol.upper() == "NIFTY"
+                and norm_interval in ("5", "15")
+                and e9_all[i] is not None
+                and e21_all[i] is not None
+                and consec_dn[i] >= 3
+                and or_low_all[i] is not None
+                and c["close"] < or_low_all[i]):
+            _e9  = e9_all[i]
+            _e21 = e21_all[i]
+            _ema_ratio = (_e9 - _e21) / _e21
+            if _ema_ratio <= -0.002:
+                # Stop-loss = high of the most recent 3 bars (including current)
+                _sl_vp30 = max(candles[j]["high"] for j in range(max(0, i - 2), i + 1))
+                _add(i, c, "VP-30 NIFTY ORB Breakdown", "SELL",
+                     f"EMA9<EMA21 by {abs(_ema_ratio)*100:.2f}%; {consec_dn[i]} consec↓ bars; "
+                     f"price {c['close']:.2f} below ORB low {or_low_all[i]:.2f}",
+                     _sl_vp30, _target_for(c, "SELL", _sl_vp30))
+
+        # ── VP-31 NIFTY VWAP Momentum Short (1h) ─────────────────────────────
+        # Conditions: price ≥0.2% below VWAP; 2+ consecutive down bars;
+        #             price below 5-bar low (fresh breakdown); NIFTY only; 1h.
+        if (symbol.upper() == "NIFTY"
+                and norm_interval == "60"
+                and vwap_all[i] is not None
+                and consec_dn[i] >= 2
+                and i >= 5):
+            _vwap_vp31 = vwap_all[i]
+            _vwap_ratio = (c["close"] - _vwap_vp31) / _vwap_vp31
+            if _vwap_ratio <= -0.002:
+                _five_bar_low = min(candles[j]["low"] for j in range(i - 5, i))
+                if c["close"] < _five_bar_low:
+                    _sl_vp31 = max(candles[j]["high"] for j in range(max(0, i - 2), i + 1))
+                    _add(i, c, "VP-31 NIFTY VWAP Momentum Short", "SELL",
+                         f"Price {abs(_vwap_ratio)*100:.2f}% below VWAP {_vwap_vp31:.2f}; "
+                         f"{consec_dn[i]} consec↓ bars; price below 5-bar low {_five_bar_low:.2f}",
+                         _sl_vp31, _target_for(c, "SELL", _sl_vp31))
+
+        # ── VP-32 NIFTY Bear Continuation (1h / 15m) ─────────────────────────
+        # Conditions: RSI14 between 30–50 (bearish, not oversold); 3+ consecutive
+        #             down bars; BB%B < 0.45 (lower half of Bollinger Band);
+        #             NIFTY only; 1h or 15m.
+        if (symbol.upper() == "NIFTY"
+                and norm_interval in ("60", "15")
+                and rsi14 is not None
+                and 30.0 <= rsi14 <= 50.0
+                and consec_dn[i] >= 3
+                and bb_pct_all[i] is not None
+                and bb_pct_all[i] < 0.45):
+            _sl_vp32 = max(candles[j]["high"] for j in range(max(0, i - 2), i + 1))
+            _add(i, c, "VP-32 NIFTY Bear Continuation", "SELL",
+                 f"RSI14={rsi14:.1f} (30–50 bearish zone); {consec_dn[i]} consec↓ bars; "
+                 f"BB%B={bb_pct_all[i]:.3f} < 0.45 (lower Bollinger half)",
+                 _sl_vp32, _target_for(c, "SELL", _sl_vp32))
+
+        # ── VP-33 BANKNIFTY ORB Breakdown (5m) ───────────────────────────────
+        # Conditions: EMA21 < EMA50 (medium downtrend); volume ≥1.5× 20-bar
+        #             average; price below Opening Range Low;
+        #             BANKNIFTY only; 5m.
+        if (symbol.upper() == "BANKNIFTY"
+                and norm_interval == "5"
+                and e21_all[i] is not None
+                and e50_all[i] is not None
+                and e21_all[i] < e50_all[i]
+                and avg_vol_20[i] is not None
+                and avg_vol_20[i] > 0
+                and volumes[i] >= 1.5 * avg_vol_20[i]
+                and or_low_all[i] is not None
+                and c["close"] < or_low_all[i]):
+            _sl_vp33 = max(candles[j]["high"] for j in range(max(0, i - 2), i + 1))
+            _add(i, c, "VP-33 BANKNIFTY ORB Breakdown", "SELL",
+                 f"EMA21 {e21_all[i]:.2f} < EMA50 {e50_all[i]:.2f} (downtrend); "
+                 f"volume {volumes[i]:.0f} ≥ 1.5× avg {avg_vol_20[i]:.0f}; "
+                 f"price {c['close']:.2f} below ORB low {or_low_all[i]:.2f}",
+                 _sl_vp33, _target_for(c, "SELL", _sl_vp33))
+
+        # ── VP-34 BANKNIFTY VWAP Short (15m / 1h) ────────────────────────────
+        # Conditions: price at/below VWAP; MACD histogram < 0;
+        #             3+ consecutive down bars; BANKNIFTY only; 15m or 1h.
+        if (symbol.upper() == "BANKNIFTY"
+                and norm_interval in ("15", "60")
+                and vwap_all[i] is not None
+                and c["close"] <= vwap_all[i]
+                and macd_hist_all[i] is not None
+                and macd_hist_all[i] < 0
+                and consec_dn[i] >= 3):
+            _sl_vp34 = max(candles[j]["high"] for j in range(max(0, i - 2), i + 1))
+            _add(i, c, "VP-34 BANKNIFTY VWAP Short", "SELL",
+                 f"Price {c['close']:.2f} ≤ VWAP {vwap_all[i]:.2f}; "
+                 f"MACD histogram={macd_hist_all[i]:.4f} < 0; "
+                 f"{consec_dn[i]} consec↓ bars",
+                 _sl_vp34, _target_for(c, "SELL", _sl_vp34))
 
     return signals

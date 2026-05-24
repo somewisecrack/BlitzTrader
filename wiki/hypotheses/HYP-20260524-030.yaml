@@ -1,0 +1,7 @@
+scope: futures
+symbol: NIFTY
+strategy: "VP-30 NIFTY ORB Breakdown"
+direction: SELL
+status: proposed
+id: HYP-20260524-030
+created_at: "2026-05-24T10:00:00+05:30"

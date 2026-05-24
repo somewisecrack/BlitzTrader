@@ -1,0 +1,7 @@
+scope: futures
+symbol: BANKNIFTY
+strategy: "VP-34 BANKNIFTY VWAP Short"
+direction: SELL
+status: proposed
+id: HYP-20260524-034
+created_at: "2026-05-24T10:00:00+05:30"

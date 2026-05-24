@@ -1,0 +1,7 @@
+scope: futures
+symbol: NIFTY
+strategy: "VP-31 NIFTY VWAP Momentum Short"
+direction: SELL
+status: proposed
+id: HYP-20260524-031
+created_at: "2026-05-24T10:00:00+05:30"
