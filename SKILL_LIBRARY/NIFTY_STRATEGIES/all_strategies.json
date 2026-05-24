@@ -1,0 +1,255 @@
+[
+  {
+    "id": "NIFTY_S01",
+    "name": "NIFTY Oversold Bounce \u2014 LONG 3d",
+    "instrument": "NIFTY 50 (ETF or Futures)",
+    "direction": "LONG",
+    "hold_days": 3,
+    "entry_timing": "Next open after all conditions met at EOD",
+    "exit_timing": "Close of day +3",
+    "conditions": [
+      {
+        "signal": "RSI_2",
+        "operator": "<=",
+        "threshold": 10,
+        "description": "RSI(2) < 10 [extreme oversold]"
+      },
+      {
+        "signal": "bb_pct_raw",
+        "operator": "<=",
+        "threshold": 0.05,
+        "description": "BB%B < 0.05 [below lower band]"
+      },
+      {
+        "signal": "STOCH5_rev",
+        "operator": ">=",
+        "threshold": 80,
+        "description": "Stoch(5) < 20 [oversold]"
+      }
+    ],
+    "performance": {
+      "is_win_rate_pct": 75.4,
+      "oos_win_rate_pct": 71.4,
+      "is_trades": 57,
+      "oos_trades": 35,
+      "avg_oos_return_pct": 1.055,
+      "binomial_pvalue": 0.008337,
+      "score": 4.226,
+      "sim_final_equity": 130833.92,
+      "sim_win_trades": 16,
+      "sim_loss_trades": 8,
+      "sim_avg_win_rs": 2523.38,
+      "sim_avg_loss_rs": -1192.52
+    },
+    "data_sources": [
+      "^NSEI",
+      "^GSPC",
+      "^VIX",
+      "INR=X",
+      "^NSEBANK",
+      "RELIANCE.NS",
+      "HDFCBANK.NS",
+      "^N225"
+    ]
+  },
+  {
+    "id": "NIFTY_S02",
+    "name": "NIFTY Oversold Bounce \u2014 LONG 5d",
+    "instrument": "NIFTY 50 (ETF or Futures)",
+    "direction": "LONG",
+    "hold_days": 5,
+    "entry_timing": "Next open after all conditions met at EOD",
+    "exit_timing": "Close of day +5",
+    "conditions": [
+      {
+        "signal": "bb_pct_raw",
+        "operator": "<=",
+        "threshold": 0.1,
+        "description": "BB%B < 0.10 [near lower band]"
+      },
+      {
+        "signal": "INR_ret",
+        "operator": ">=",
+        "threshold": 0.002,
+        "description": "INR strengthened (FII inflows)"
+      }
+    ],
+    "performance": {
+      "is_win_rate_pct": 77.4,
+      "oos_win_rate_pct": 76.0,
+      "is_trades": 53,
+      "oos_trades": 25,
+      "avg_oos_return_pct": 2.021,
+      "binomial_pvalue": 0.007317,
+      "score": 3.8,
+      "sim_final_equity": 134634.32,
+      "sim_win_trades": 13,
+      "sim_loss_trades": 6,
+      "sim_avg_win_rs": 3625.51,
+      "sim_avg_loss_rs": -2082.89
+    },
+    "data_sources": [
+      "^NSEI",
+      "^GSPC",
+      "^VIX",
+      "INR=X",
+      "^NSEBANK",
+      "RELIANCE.NS",
+      "HDFCBANK.NS",
+      "^N225"
+    ]
+  },
+  {
+    "id": "NIFTY_S03",
+    "name": "NIFTY Mean-Reversion Short \u2014 SHORT 5d",
+    "instrument": "NIFTY 50 (ETF or Futures)",
+    "direction": "SHORT",
+    "hold_days": 5,
+    "entry_timing": "Next open after all conditions met at EOD",
+    "exit_timing": "Close of day +5",
+    "conditions": [
+      {
+        "signal": "RSI_3",
+        "operator": ">=",
+        "threshold": 85,
+        "description": "RSI(3) > 85 [very overbought]"
+      },
+      {
+        "signal": "RSI_14",
+        "operator": ">=",
+        "threshold": 70,
+        "description": "RSI(14) > 70 [overbought]"
+      },
+      {
+        "signal": "bb_pct_raw",
+        "operator": ">=",
+        "threshold": 0.9,
+        "description": "BB%B > 0.90 [near upper band]"
+      }
+    ],
+    "performance": {
+      "is_win_rate_pct": 75.4,
+      "oos_win_rate_pct": 76.0,
+      "is_trades": 57,
+      "oos_trades": 25,
+      "avg_oos_return_pct": 3.0,
+      "binomial_pvalue": 0.007317,
+      "score": 3.8,
+      "sim_final_equity": 132996.01,
+      "sim_win_trades": 11,
+      "sim_loss_trades": 5,
+      "sim_avg_win_rs": 3449.0,
+      "sim_avg_loss_rs": -988.59
+    },
+    "data_sources": [
+      "^NSEI",
+      "^GSPC",
+      "^VIX",
+      "INR=X",
+      "^NSEBANK",
+      "RELIANCE.NS",
+      "HDFCBANK.NS",
+      "^N225"
+    ]
+  },
+  {
+    "id": "NIFTY_S04",
+    "name": "NIFTY Mean-Reversion Short \u2014 SHORT 5d",
+    "instrument": "NIFTY 50 (ETF or Futures)",
+    "direction": "SHORT",
+    "hold_days": 5,
+    "entry_timing": "Next open after all conditions met at EOD",
+    "exit_timing": "Close of day +5",
+    "conditions": [
+      {
+        "signal": "bb_pct_raw",
+        "operator": ">=",
+        "threshold": 0.9,
+        "description": "BB%B > 0.90 [near upper band]"
+      },
+      {
+        "signal": "MONTH_END",
+        "operator": ">=",
+        "threshold": 1.0,
+        "description": "Month-end [sell the fact]"
+      }
+    ],
+    "performance": {
+      "is_win_rate_pct": 75.6,
+      "oos_win_rate_pct": 81.0,
+      "is_trades": 45,
+      "oos_trades": 21,
+      "avg_oos_return_pct": 2.487,
+      "binomial_pvalue": 0.003599,
+      "score": 3.71,
+      "sim_final_equity": 130804.08,
+      "sim_win_trades": 9,
+      "sim_loss_trades": 5,
+      "sim_avg_win_rs": 4230.22,
+      "sim_avg_loss_rs": -1453.57
+    },
+    "data_sources": [
+      "^NSEI",
+      "^GSPC",
+      "^VIX",
+      "INR=X",
+      "^NSEBANK",
+      "RELIANCE.NS",
+      "HDFCBANK.NS",
+      "^N225"
+    ]
+  },
+  {
+    "id": "NIFTY_S05",
+    "name": "NIFTY Oversold Bounce \u2014 LONG 3d",
+    "instrument": "NIFTY 50 (ETF or Futures)",
+    "direction": "LONG",
+    "hold_days": 3,
+    "entry_timing": "Next open after all conditions met at EOD",
+    "exit_timing": "Close of day +3",
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "operator": "<=",
+        "threshold": 35,
+        "description": "RSI(14) < 35 [near oversold]"
+      },
+      {
+        "signal": "STOCH5_rev",
+        "operator": ">=",
+        "threshold": 80,
+        "description": "Stoch(5) < 20 [oversold]"
+      },
+      {
+        "signal": "ret_3d_raw",
+        "operator": "<=",
+        "threshold": -0.03,
+        "description": "3-day return < -3%"
+      }
+    ],
+    "performance": {
+      "is_win_rate_pct": 80.4,
+      "oos_win_rate_pct": 66.7,
+      "is_trades": 46,
+      "oos_trades": 30,
+      "avg_oos_return_pct": 0.809,
+      "binomial_pvalue": 0.049369,
+      "score": 3.651,
+      "sim_final_equity": 123984.19,
+      "sim_win_trades": 15,
+      "sim_loss_trades": 6,
+      "sim_avg_win_rs": 2159.92,
+      "sim_avg_loss_rs": -1402.44
+    },
+    "data_sources": [
+      "^NSEI",
+      "^GSPC",
+      "^VIX",
+      "INR=X",
+      "^NSEBANK",
+      "RELIANCE.NS",
+      "HDFCBANK.NS",
+      "^N225"
+    ]
+  }
+]
