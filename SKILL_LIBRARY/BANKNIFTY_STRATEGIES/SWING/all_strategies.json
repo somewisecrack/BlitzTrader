@@ -1,0 +1,175 @@
+[
+  {
+    "id": "BN_SW_S01",
+    "instrument": "BANKNIFTY",
+    "direction": "LONG",
+    "hold_days": 5,
+    "conditions": [
+      {
+        "signal": "bb_pct",
+        "op": "<=",
+        "threshold": 0.15,
+        "description": "BB%B < 0.15 [lower band zone]"
+      },
+      {
+        "signal": "nifty_pos",
+        "op": ">=",
+        "threshold": 1.0,
+        "description": "NIFTY positive [parent positive]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 74.5,
+      "oos_wr_pct": 76.9,
+      "is_trades": 51,
+      "oos_trades": 26,
+      "avg_oos_ret_pct": 2.04,
+      "oos_return_pct": 64.98,
+      "pvalue": 0.00468,
+      "score": 3.922,
+      "sim_final_equity": 164984.66
+    }
+  },
+  {
+    "id": "BN_SW_S02",
+    "instrument": "BANKNIFTY",
+    "direction": "LONG",
+    "hold_days": 7,
+    "conditions": [
+      {
+        "signal": "bb_pct",
+        "op": "<=",
+        "threshold": 0.15,
+        "description": "BB%B < 0.15 [lower band zone]"
+      },
+      {
+        "signal": "vol_ratio",
+        "op": ">=",
+        "threshold": 1.5,
+        "description": "Volume \u2265 1.5\u00d7 avg [high interest]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 78.1,
+      "oos_wr_pct": 85.0,
+      "is_trades": 32,
+      "oos_trades": 20,
+      "avg_oos_ret_pct": 3.32,
+      "oos_return_pct": 88.68,
+      "pvalue": 0.00129,
+      "score": 3.801,
+      "sim_final_equity": 188681.6
+    }
+  },
+  {
+    "id": "BN_SW_S03",
+    "instrument": "BANKNIFTY",
+    "direction": "LONG",
+    "hold_days": 7,
+    "conditions": [
+      {
+        "signal": "bb_pct",
+        "op": "<=",
+        "threshold": 0.15,
+        "description": "BB%B < 0.15 [lower band zone]"
+      },
+      {
+        "signal": "kotakbank_ret",
+        "op": ">=",
+        "threshold": 0.003,
+        "description": "KOTAKBANK up 0.3%+ [quality bank]"
+      },
+      {
+        "signal": "ret1",
+        "op": "<=",
+        "threshold": -0.02,
+        "description": "1d return < -2% [sharp down day]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 76.0,
+      "oos_wr_pct": 77.3,
+      "is_trades": 25,
+      "oos_trades": 22,
+      "avg_oos_ret_pct": 2.96,
+      "oos_return_pct": 85.16,
+      "pvalue": 0.00845,
+      "score": 3.624,
+      "sim_final_equity": 185159.09
+    }
+  },
+  {
+    "id": "BN_SW_S04",
+    "instrument": "BANKNIFTY",
+    "direction": "SHORT",
+    "hold_days": 5,
+    "conditions": [
+      {
+        "signal": "ret3",
+        "op": ">=",
+        "threshold": 0.03,
+        "description": "3d return > +3% [extended rally]"
+      },
+      {
+        "signal": "hdfcbank_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "HDFCBANK down 0.3%+ [heavyweight]"
+      },
+      {
+        "signal": "c_vs_ma50",
+        "op": ">=",
+        "threshold": 4.0,
+        "description": "Price 4%+ above MA50 [extended]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 76.8,
+      "oos_wr_pct": 76.2,
+      "is_trades": 56,
+      "oos_trades": 21,
+      "avg_oos_ret_pct": 1.47,
+      "oos_return_pct": 33.2,
+      "pvalue": 0.0133,
+      "score": 3.491,
+      "sim_final_equity": 133202.57
+    }
+  },
+  {
+    "id": "BN_SW_S05",
+    "instrument": "BANKNIFTY",
+    "direction": "SHORT",
+    "hold_days": 5,
+    "conditions": [
+      {
+        "signal": "RSI_14",
+        "op": ">=",
+        "threshold": 60.0,
+        "description": "RSI(14) > 60 [near overbought]"
+      },
+      {
+        "signal": "STOCH5",
+        "op": ">=",
+        "threshold": 70.0,
+        "description": "Stoch(5) > 70 [near overbought]"
+      },
+      {
+        "signal": "hdfcbank_ret",
+        "op": "<=",
+        "threshold": -0.003,
+        "description": "HDFCBANK down 0.3%+ [heavyweight]"
+      }
+    ],
+    "performance": {
+      "is_wr_pct": 76.0,
+      "oos_wr_pct": 69.6,
+      "is_trades": 50,
+      "oos_trades": 23,
+      "avg_oos_ret_pct": 1.63,
+      "oos_return_pct": 41.64,
+      "pvalue": 0.04657,
+      "score": 3.336,
+      "sim_final_equity": 141644.57
+    }
+  }
+]

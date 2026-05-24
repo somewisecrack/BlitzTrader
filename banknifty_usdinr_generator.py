@@ -27,7 +27,119 @@ using a Brownian bridge with AR(1) momentum (φ=0.12).
 import numpy as np
 import pandas as pd
 from scipy.linalg import cholesky
+from scipy.stats import t as t_dist
 from nifty_data_generator import generate_nifty_ohlcv, MONTHLY_ANCHORS
+
+# ─────────────────────────────────────────────────────────────────────
+#  BANKNIFTY MONTHLY ANCHORS (approximate actual close levels)
+# ─────────────────────────────────────────────────────────────────────
+BN_MONTHLY_ANCHORS = {
+    "2015-01": 18000, "2015-02": 19500, "2015-03": 19700, "2015-04": 18700,
+    "2015-05": 19100, "2015-06": 18400, "2015-07": 19600, "2015-08": 17500,
+    "2015-09": 16300, "2015-10": 17200, "2015-11": 16600, "2015-12": 17100,
+    "2016-01": 16300, "2016-02": 14200, "2016-03": 16300, "2016-04": 16400,
+    "2016-05": 17700, "2016-06": 18500, "2016-07": 19200, "2016-08": 20600,
+    "2016-09": 20200, "2016-10": 20400, "2016-11": 18800, "2016-12": 18300,
+    "2017-01": 19300, "2017-02": 21400, "2017-03": 21900, "2017-04": 22500,
+    "2017-05": 23500, "2017-06": 22900, "2017-07": 24500, "2017-08": 23700,
+    "2017-09": 24400, "2017-10": 25700, "2017-11": 25200, "2017-12": 25500,
+    "2018-01": 27400, "2018-02": 24800, "2018-03": 23900, "2018-04": 25400,
+    "2018-05": 25900, "2018-06": 26400, "2018-07": 27900, "2018-08": 28600,
+    "2018-09": 26500, "2018-10": 24600, "2018-11": 26600, "2018-12": 26900,
+    "2019-01": 26700, "2019-02": 26500, "2019-03": 29500, "2019-04": 29800,
+    "2019-05": 30300, "2019-06": 29700, "2019-07": 28100, "2019-08": 26800,
+    "2019-09": 28000, "2019-10": 29200, "2019-11": 30800, "2019-12": 32200,
+    "2020-01": 31400, "2020-02": 27400, "2020-03": 18000,  # COVID crash
+    "2020-04": 22000, "2020-05": 21800, "2020-06": 23500,
+    "2020-07": 25500, "2020-08": 27300, "2020-09": 24700,
+    "2020-10": 26100, "2020-11": 28500, "2020-12": 31500,
+    "2021-01": 31700, "2021-02": 35900, "2021-03": 36200, "2021-04": 35500,
+    "2021-05": 34800, "2021-06": 35400, "2021-07": 36200, "2021-08": 37700,
+    "2021-09": 40700, "2021-10": 41500, "2021-11": 37800, "2021-12": 37500,
+    "2022-01": 38000, "2022-02": 36500, "2022-03": 37000, "2022-04": 36500,
+    "2022-05": 34800, "2022-06": 32600, "2022-07": 36200, "2022-08": 38400,
+    "2022-09": 36600, "2022-10": 41400, "2022-11": 42700, "2022-12": 43200,
+    "2023-01": 41500, "2023-02": 40500, "2023-03": 40700, "2023-04": 43400,
+    "2023-05": 44800, "2023-06": 44300, "2023-07": 45600, "2023-08": 44000,
+    "2023-09": 44600, "2023-10": 43700, "2023-11": 43800, "2023-12": 48800,
+    "2024-01": 48500, "2024-02": 46500, "2024-03": 48100, "2024-04": 48200,
+    "2024-05": 49700, "2024-06": 51500, "2024-07": 53400, "2024-08": 51300,
+    "2024-09": 54500, "2024-10": 51400, "2024-11": 52000, "2024-12": 53700,
+    "2025-01": 50700, "2025-02": 48500, "2025-03": 51500, "2025-04": 52500,
+    "2025-05": 55000,
+}
+
+# Extra volatile months for BANKNIFTY (BN is higher-beta, more volatile)
+BN_VOL_OVERRIDES = {
+    "2020-02": 0.40, "2020-03": 0.80, "2020-04": 0.55, "2020-05": 0.38,
+    "2018-10": 0.32, "2022-05": 0.30, "2022-06": 0.30, "2016-02": 0.30,
+    "2021-11": 0.28,
+}
+
+
+def generate_banknifty_ohlcv(seed: int = 42) -> pd.DataFrame:
+    """
+    Generate daily BANKNIFTY OHLCV using the same Brownian-bridge technique
+    as generate_nifty_ohlcv(), pinned to actual BankNifty monthly close levels.
+    Returns DataFrame with Open, High, Low, Close, Volume.
+    """
+    rng  = np.random.default_rng(seed + 5)
+    dates= pd.bdate_range("2015-01-01", "2025-05-23")
+    anchor_series = pd.Series(
+        {pd.Timestamp(k + "-01"): float(v) for k, v in BN_MONTHLY_ANCHORS.items()}
+    )
+    sorted_anchors = anchor_series.sort_index()
+    anchor_months  = sorted_anchors.index.to_list()
+    records = []
+
+    BASE_VOL_ANN = 0.26   # BankNifty ~26% annual vol (vs NIFTY 17%)
+
+    for i in range(len(anchor_months) - 1):
+        m_start = anchor_months[i]
+        m_end   = anchor_months[i + 1]
+        seg_dates = dates[(dates >= m_start) & (dates < m_end)]
+        if len(seg_dates) == 0:
+            continue
+
+        S0, S_T = float(sorted_anchors.iloc[i]), float(sorted_anchors.iloc[i+1])
+        T        = len(seg_dates)
+        month_key= m_start.strftime("%Y-%m")
+        sigma_ann= BN_VOL_OVERRIDES.get(month_key, BASE_VOL_ANN)
+        sigma_day= sigma_ann / np.sqrt(252)
+
+        log_target = np.log(S_T / S0)
+        bridge = np.zeros(T)
+        for step in range(1, T):
+            remaining     = T - step
+            bb_drift      = (log_target - bridge[step-1]) / remaining
+            eps           = t_dist.rvs(df=5, random_state=rng.integers(1_000_000_000)) * sigma_day
+            bridge[step]  = bridge[step-1] + bb_drift + eps
+
+        closes    = S0 * np.exp(bridge)
+        closes[-1]= S_T
+
+        for j, (dt, c) in enumerate(zip(seg_dates, closes)):
+            atr_mult  = rng.exponential(0.9) + 0.2
+            day_range = c * sigma_day * atr_mult * np.sqrt(2) * 1.5
+            day_range = max(day_range, c * 0.002)
+            if records:
+                prev_c  = records[-1]["Close"]
+                gap_pct = rng.normal(0, sigma_day * 0.4)
+                o = prev_c * (1 + gap_pct)
+            else:
+                o = c * (1 + rng.normal(0, sigma_day * 0.3))
+            mid = (o + c) / 2
+            h   = max(mid + day_range/2, o, c)
+            l   = min(mid - day_range/2, o, c)
+            base_vol_idx = (bridge[j] - bridge[j-1]) if j > 0 else 0
+            vol_scalar   = abs(base_vol_idx) / (sigma_day + 1e-9)
+            volume       = max(int(rng.lognormal(np.log(8e7), 0.4) * (0.8 + 0.8*vol_scalar)), 1_000_000)
+            records.append({"Date": dt, "Open": round(o,1), "High": round(h,1),
+                            "Low": round(l,1), "Close": round(c,1), "Volume": volume})
+
+    df = pd.DataFrame(records).set_index("Date")
+    df.index = pd.to_datetime(df.index)
+    return df.loc["2015-01-01":"2025-05-23"]
 
 # ── session constants ────────────────────────────────────────────────
 SESSION_OPEN_H,  SESSION_OPEN_M  = 9,  15
@@ -157,12 +269,13 @@ def _gen_daily_series(tickers, params, corr, seed, n_days=2695,
 
 def generate_banknifty_universe(seed=42):
     """Returns dict {ticker: daily OHLCV DataFrame} for BankNifty universe."""
-    # Use existing NIFTY generator for ^NSEI anchor
     nifty_df = generate_nifty_ohlcv(seed=seed)
-    daily = _gen_daily_series(BN_TICKERS, BN_PARAMS, BN_CORR, seed=seed+10)
-    # Override NSEI with real anchor
+    daily    = _gen_daily_series(BN_TICKERS, BN_PARAMS, BN_CORR, seed=seed+10)
+    # Override ^NSEI and ^NSEBANK with properly monthly-anchored series
     nifty_reindexed = nifty_df.reindex(daily["^NSEI"].index).ffill().dropna()
-    daily["^NSEI"] = nifty_reindexed
+    daily["^NSEI"]   = nifty_reindexed
+    bn_anchored      = generate_banknifty_ohlcv(seed=seed)
+    daily["^NSEBANK"]= bn_anchored.reindex(daily["^NSEBANK"].index).ffill().dropna()
     return daily
 
 
