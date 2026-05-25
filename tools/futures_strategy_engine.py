@@ -11,7 +11,7 @@ Output: list of signal dicts (same shape as live get_strategy_signals())
 # ---------------------------------------------------------------------------
 
 SUPPORTED_STRATEGIES = {
-    # ── Strategies backtestable on OHLCV alone ──────────────────────────────
+    # ── Backtestable OHLCV strategies — implemented in scan_candles() ────────
     "VP-01 Counter Bull Trap",
     "VP-02 Counter Bear Trap",
     "VP-05 3EMA Trend",
@@ -19,7 +19,6 @@ SUPPORTED_STRATEGIES = {
     "VP-08 V-Reversal",
     "VP-09 Power Candle Pullback",
     "VP-13 Open Drive",
-    "VP-14 Morning Star",
     "VP-15 Evening Star",
     "VP-16 GCR Green Candle Retracement",
     "VP-17 RCR Red Candle Retracement",
@@ -27,6 +26,9 @@ SUPPORTED_STRATEGIES = {
     "VP-19 W-Pattern Double Bottom",
     "VP-21 Extreme Candle Reversal",
     "VP-22 Supply Zone Reversal",
+    # VPA/VSA strategies: volume-gated; scan_candles() emits them only when
+    # yfinance volume data is non-zero.  If volume is all-zero the scanner
+    # returns 0 signals (correct — not a skip, just no data).
     "VPA Hanging Man",
     "VPA No Demand",
     "VSA Buying Climax",
@@ -46,6 +48,14 @@ SUPPORTED_STRATEGIES = {
     "Momentum Pinball",
     "80-20 Reversal",
     "ADX Gapper",
+}
+
+# Strategies intentionally disabled from both live and backtest scanners.
+# They are NOT in SUPPORTED_STRATEGIES and will be rejected by hypothesis
+# validation.  Do not backtest or promote hypotheses for disabled strategies.
+DISABLED_STRATEGIES: set[str] = {
+    "VP-14 Morning Star",   # Disabled with `if False` in both scanners;
+                            # pattern is kept in code for future re-enablement.
 }
 
 # Strategies that exist in live get_strategy_signals() but CANNOT be reliably
@@ -77,7 +87,6 @@ STRATEGY_DIRECTIONS: dict[str, frozenset[str]] = {
     "VP-09 Power Candle Pullback":       frozenset({"BUY", "SELL"}),
     "VP-10 First Candle Open":           frozenset({"BUY", "SELL"}),
     "VP-13 Open Drive":                  frozenset({"BUY", "SELL"}),
-    "VP-14 Morning Star":                frozenset({"BUY"}),
     "VP-15 Evening Star":                frozenset({"SELL"}),
     "VP-16 GCR Green Candle Retracement": frozenset({"BUY"}),
     "VP-17 RCR Red Candle Retracement":  frozenset({"SELL"}),
@@ -235,6 +244,20 @@ def _target_for(c: dict, direction: str, stop_loss: float) -> float:
     if direction == "BUY":
         return c["close"] + 2 * abs(c["close"] - stop_loss)
     return c["close"] - 2 * abs(stop_loss - c["close"])
+
+
+def _is_power_candle(c: dict, recent_ranges: list[float]) -> bool:
+    """True if *c* has body > 75% of range AND range > 1.3x average recent range."""
+    body = abs(c["close"] - c["open"])
+    rng = c["high"] - c["low"]
+    avg = sum(recent_ranges) / len(recent_ranges) if recent_ranges else rng
+    return rng > 0 and body > 0.75 * rng and rng > 1.3 * avg
+
+
+def _pct_close(c: dict) -> float:
+    """Where in the candle range the close sits: 0 = low, 1 = high."""
+    rng = c["high"] - c["low"]
+    return (c["close"] - c["low"]) / rng if rng else 0.5
 
 
 def _swing_highs(candles: list[dict]) -> list[tuple[int, dict]]:
@@ -530,5 +553,192 @@ def scan_candles(symbol: str, interval: str, candles: list[dict]) -> list[dict]:
                 _add(i, c, "VP-21 Extreme Candle Reversal", "SELL",
                      "Previous 15m bullish candle range > 2.5x average; current bearish candle lost its close",
                      c["high"], _target_for(c, "SELL", c["high"]))
+
+        # ── VP-08: V-Reversal (BUY) ──────────────────────────────────────────
+        # 5+ consecutive bearish candles then a bullish candle breaks last red high.
+        if bull and i >= 5:
+            run = 0
+            for j in range(i - 1, -1, -1):
+                if candles[j]["close"] < candles[j]["open"]:
+                    run += 1
+                else:
+                    break
+            if run >= 5:
+                last_red = candles[i - 1]
+                move = candles[i - run:i]
+                if c["high"] > last_red["high"]:
+                    sl = min(mc["low"] for mc in move)
+                    _add(i, c, "VP-08 V-Reversal", "BUY",
+                         "5+ bearish candles followed by green candle breaking the last red high; confirm capitulation volume",
+                         sl, _target_for(c, "BUY", sl), True)
+
+        # ── VP-09 / VP-16 / VP-17: power-candle setups ───────────────────────
+        if i >= 15:
+            power_window = candles[i - 15:i]
+            for pc_idx, pc in enumerate(power_window):
+                pc_global_idx = i - 15 + pc_idx
+                pc_recent_ranges = ranges[max(0, pc_global_idx - 5):pc_global_idx]
+                if not _is_power_candle(pc, pc_recent_ranges):
+                    continue
+                pc_bull = pc["close"] > pc["open"]
+                pc_bear = pc["close"] < pc["open"]
+                midpoint = (pc["open"] + pc["close"]) / 2
+
+                # VP-09 BUY: pullback rejected the low of a bullish power candle
+                if pc_bull and c["low"] <= pc["low"] <= c["close"] and lower > body:
+                    _add(i, c, "VP-09 Power Candle Pullback", "BUY",
+                         "Pullback rejected the low of a recent bullish power candle",
+                         c["low"], _target_for(c, "BUY", c["low"]))
+
+                # VP-09 SELL: rally rejected the high of a bearish power candle
+                if pc_bear and c["close"] <= pc["high"] <= c["high"] and upper > body:
+                    _add(i, c, "VP-09 Power Candle Pullback", "SELL",
+                         "Rally rejected the high of a recent bearish power candle",
+                         c["high"], _target_for(c, "SELL", c["high"]))
+
+                # VP-16 GCR: 3m bullish power candle 50% retracement above EMA20
+                if (pc_bull and norm_interval == "3" and e20
+                        and c["low"] <= midpoint <= c["close"]
+                        and bull and c["close"] > e20):
+                    _add(i, c, "VP-16 GCR Green Candle Retracement", "BUY",
+                         "3m bullish power candle 50% body retracement reclaimed above EMA20",
+                         pc["low"], _target_for(c, "BUY", pc["low"]))
+
+                # VP-17 RCR: NIFTY 3m/5m bearish power candle 50% retracement below EMA20
+                if (pc_bear and symbol.upper() == "NIFTY"
+                        and norm_interval in ("3", "5") and e20
+                        and c["close"] <= midpoint <= c["high"]
+                        and bear and c["close"] < e20):
+                    _add(i, c, "VP-17 RCR Red Candle Retracement", "SELL",
+                         "NIFTY 3m/5m bearish power candle 50% body retracement rejected below EMA20",
+                         pc["high"], _target_for(c, "SELL", pc["high"]))
+
+        # ── VP-22: NIFTY supply-zone rejection ───────────────────────────────
+        if symbol.upper() == "NIFTY" and i >= 45 and norm_interval in ("3", "15"):
+            zone_source = candles[max(0, i - 45):i - 5]
+            prior_swings = _swing_highs(zone_source)
+            if prior_swings:
+                _, zone_bar = max(prior_swings, key=lambda item: item[1]["high"])
+                zone_top = zone_bar["high"]
+                zone_bottom = zone_top * 0.998
+                if zone_bottom <= c["close"] <= zone_top and bear and upper > body:
+                    sl = zone_top * 1.002
+                    _add(i, c, "VP-22 Supply Zone Reversal", "SELL",
+                         "NIFTY returned to highest prior swing-high supply zone and printed upper-wick rejection",
+                         sl, _target_for(c, "SELL", sl))
+
+        # ── VPA / VSA: volume-gated strategies ───────────────────────────────
+        # Require real broker volume (yfinance provides volume for index/futures).
+        # avg_vol20 > 0 guard: if yfinance returns zero/missing volume the block
+        # is skipped — 0 signals is correct, NOT a skip/error.
+        avg_vol20 = sum(volumes[max(0, i - 20):i]) / min(i, 20) if i > 0 else 0.0
+        has_volume = avg_vol20 > 0
+        if has_volume:
+            high_vol = volumes[i] >= 1.5 * avg_vol20
+            ultra_high_vol = volumes[i] >= 2.0 * avg_vol20
+            avg_range20 = sum(ranges[max(0, i - 20):i]) / min(i, 20) if i > 0 else rng
+            wide_spread = rng > 1.3 * avg_range20
+            narrow_spread = rng < 0.7 * avg_range20
+
+            # Intraday VWAP (cumulative from bar 0)
+            tp_vol = sum(
+                ((vc["high"] + vc["low"] + vc["close"]) / 3) * vc.get("volume", 0)
+                for vc in candles[:i + 1]
+            )
+            cum_vol = sum(vc.get("volume", 0) for vc in candles[:i + 1])
+            intraday_vwap = tp_vol / cum_vol if cum_vol else None
+
+            # VPA Hanging Man SELL (5m only)
+            if norm_interval == "5" and intraday_vwap and i >= 1:
+                for hm in candles[max(0, i - 3):i]:
+                    hm_body, hm_rng, _, hm_lower = _candle_stats(hm)
+                    hm_high_vol = hm.get("volume", 0) >= 1.5 * avg_vol20
+                    if (hm_rng > 0 and hm_lower > 0.4 * hm_rng
+                            and hm_body < 0.4 * hm_rng and hm_high_vol):
+                        if c["close"] < hm["low"] and c["close"] > intraday_vwap:
+                            _add(i, c, "VPA Hanging Man", "SELL",
+                                 "Confirmed break below high-volume Hanging Man low; verify broker volume and VWAP context",
+                                 hm["high"], _target_for(c, "SELL", hm["high"]), True)
+                            break
+
+                # VPA No Demand SELL (5m only)
+                nd = candles[i - 1]
+                _, nd_rng, _, _ = _candle_stats(nd)
+                if (intraday_vwap and c["close"] < intraday_vwap
+                        and nd["close"] > nd["open"]
+                        and nd_rng < avg_range20
+                        and nd.get("volume", 0) <= 0.7 * avg_vol20
+                        and bear and c["close"] < nd["close"]):
+                    _add(i, c, "VPA No Demand", "SELL",
+                         "Low-volume rally/no-demand bar followed by bearish confirmation below VWAP",
+                         max(nd["high"], c["high"]),
+                         _target_for(c, "SELL", max(nd["high"], c["high"])), True)
+
+            # VSA Buying Climax SELL (5m/15m)
+            if norm_interval in ("5", "15") and wide_spread and ultra_high_vol:
+                if bull and 0.35 <= _pct_close(c) <= 0.65:
+                    _add(i, c, "VSA Buying Climax", "SELL",
+                         "Wide-spread up bar on ultra-high volume with middle close; confirm distribution before trading",
+                         c["high"], _target_for(c, "SELL", c["high"]), True)
+
+            # VSA Bag Holding / Upthrust / Hidden Upthrust / Shakeout (15m only)
+            if norm_interval == "15":
+                if bear and narrow_spread and ultra_high_vol and e20 and c["close"] < e20:
+                    _add(i, c, "VSA Bag Holding", "BUY",
+                         "Narrow-spread down bar on ultra-high volume in downtrend; confirm institutional absorption",
+                         c["low"], _target_for(c, "BUY", c["low"]), True)
+                if (i >= 1 and c["high"] > candles[i - 1]["high"]
+                        and high_vol and _pct_close(c) <= 0.3):
+                    _add(i, c, "VSA Upthrust", "SELL",
+                         "New high on high volume closed in bottom 30%; confirm upthrust supply",
+                         c["high"], _target_for(c, "SELL", c["high"]), True)
+                if (i >= 1 and c["high"] > candles[i - 1]["high"]
+                        and high_vol and c["close"] < candles[i - 1]["close"]):
+                    _add(i, c, "VSA Hidden Upthrust", "SELL",
+                         "New high on high volume collapsed below previous close; confirm hidden upthrust",
+                         c["high"], _target_for(c, "SELL", c["high"]), True)
+                if bear and wide_spread and ultra_high_vol and _pct_close(c) >= 0.7:
+                    _add(i, c, "VSA Shakeout Intraday", "BUY",
+                         "Wide-spread down bar on ultra-high volume closed near high; confirm next-bar strength",
+                         c["low"], _target_for(c, "BUY", c["low"]), True)
+
+    # ── VP-13: Open Drive (first 3 candles of current session, 5m/15m) ───────
+    # Evaluated outside the per-candle loop because it fires on the 3rd opening
+    # candle only — not on every bar.
+    if norm_interval in ("5", "15"):
+        session_indices = [
+            idx for idx in range(len(candles))
+            if _ist_date(candles[idx]["time"]) == session_date
+        ]
+        if len(session_indices) >= 3:
+            first3_idx = session_indices[:3]
+            first3 = [candles[idx] for idx in first3_idx]
+            # Confirm the opening candle is actually 09:15 IST
+            try:
+                import pytz as _pytz_vp13
+                _IST_vp13 = _pytz_vp13.timezone("Asia/Kolkata")
+                first_dt = _dt.datetime.fromtimestamp(first3[0]["time"], _IST_vp13).time()
+            except ImportError:
+                first_dt = _dt.datetime.utcfromtimestamp(
+                    first3[0]["time"] + 19800
+                ).time()
+            if first_dt.hour == 9 and first_dt.minute == 15:
+                f_power = []
+                for j, fc in enumerate(first3):
+                    fc_global_idx = first3_idx[j]
+                    prev_r = ranges[max(0, fc_global_idx - 5):fc_global_idx]
+                    f_power.append(_is_power_candle(fc, prev_r))
+                trigger_idx = first3_idx[2]
+                trigger = first3[2]
+                if all(fc["close"] > fc["open"] for fc in first3) and any(f_power):
+                    sl = min(fc["low"] for fc in first3)
+                    _add(trigger_idx, trigger, "VP-13 Open Drive", "BUY",
+                         "First three candles bullish and at least one power candle",
+                         sl, trigger["close"] + 2 * (trigger["close"] - sl))
+                if all(fc["close"] < fc["open"] for fc in first3) and any(f_power):
+                    sl = max(fc["high"] for fc in first3)
+                    _add(trigger_idx, trigger, "VP-13 Open Drive", "SELL",
+                         "First three candles bearish and at least one power candle",
+                         sl, trigger["close"] - 2 * (sl - trigger["close"]))
 
     return signals

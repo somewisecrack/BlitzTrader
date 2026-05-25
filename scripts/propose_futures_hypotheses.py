@@ -42,7 +42,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 try:
     from tools.futures_hypothesis import validate_hypothesis
-    from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+    from tools.futures_strategy_engine import SUPPORTED_STRATEGIES, LIVE_ONLY_STRATEGIES, DISABLED_STRATEGIES
 except ImportError as e:
     print(
         f"ERROR: Could not import tools: {e}\n"
@@ -254,12 +254,15 @@ def compact_review(review_text: str) -> str:
 
 
 def extract_strategies_from_review(review_text: str) -> set[str]:
-    """Return SUPPORTED_STRATEGIES names that appear verbatim in the review text.
+    """Return backtestable strategy names that appear verbatim in the review text.
 
-    Only strategies present in the review AND in SUPPORTED_STRATEGIES are
-    returned.  This set gates which strategies Gemini is permitted to propose.
+    Strategy must appear in the review AND in SUPPORTED_STRATEGIES AND must NOT
+    be in LIVE_ONLY_STRATEGIES or DISABLED_STRATEGIES.  This set gates which
+    strategies Gemini is permitted to propose — Gemini should never propose a
+    hypothesis for a strategy that cannot be backtested or promoted.
     """
-    return {s for s in SUPPORTED_STRATEGIES if s in review_text}
+    backtestable = SUPPORTED_STRATEGIES - LIVE_ONLY_STRATEGIES - DISABLED_STRATEGIES
+    return {s for s in backtestable if s in review_text}
 
 
 # ── Gemini LLM mode ───────────────────────────────────────────────────────────

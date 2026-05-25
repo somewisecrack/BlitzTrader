@@ -329,12 +329,16 @@ class TestVP14MorningStar_Disabled(unittest.TestCase):
             f"got {len(vp14_buys)} signal(s)"
         )
 
-    def test_vp14_still_in_supported_strategies(self):
-        """VP-14 must remain in SUPPORTED_STRATEGIES (not deleted from codebase)."""
-        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
+    def test_vp14_in_disabled_not_supported(self):
+        """VP-14 must be in DISABLED_STRATEGIES and NOT in SUPPORTED_STRATEGIES."""
+        from tools.futures_strategy_engine import SUPPORTED_STRATEGIES, DISABLED_STRATEGIES
         self.assertIn(
+            "VP-14 Morning Star", DISABLED_STRATEGIES,
+            "VP-14 Morning Star must be in DISABLED_STRATEGIES (disabled with `if False`)"
+        )
+        self.assertNotIn(
             "VP-14 Morning Star", SUPPORTED_STRATEGIES,
-            "VP-14 Morning Star must remain in SUPPORTED_STRATEGIES for backtest use"
+            "VP-14 Morning Star must NOT be in SUPPORTED_STRATEGIES while disabled"
         )
 
 

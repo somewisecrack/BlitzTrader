@@ -22,6 +22,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from tools.futures_strategy_engine import (
     SUPPORTED_STRATEGIES,
     LIVE_ONLY_STRATEGIES,
+    DISABLED_STRATEGIES,
     STRATEGY_DIRECTIONS,
 )
 
@@ -150,3 +151,68 @@ class TestStrategyDirectionsCoverage:
 
     def test_vp02_is_buy_only(self):
         assert STRATEGY_DIRECTIONS["VP-02 Counter Bear Trap"] == frozenset({"BUY"})
+
+    def test_strategy_directions_does_not_include_disabled(self):
+        """Disabled strategies must not appear in STRATEGY_DIRECTIONS."""
+        overlap = DISABLED_STRATEGIES & set(STRATEGY_DIRECTIONS.keys())
+        assert not overlap, (
+            f"STRATEGY_DIRECTIONS must not include disabled strategies: {overlap}"
+        )
+
+
+class TestDisabledStrategies:
+    """DISABLED_STRATEGIES must be disjoint from SUPPORTED_STRATEGIES."""
+
+    def test_disabled_not_in_supported(self):
+        overlap = DISABLED_STRATEGIES & SUPPORTED_STRATEGIES
+        assert not overlap, (
+            f"DISABLED_STRATEGIES must not overlap SUPPORTED_STRATEGIES: {overlap}"
+        )
+
+    def test_vp14_is_disabled(self):
+        assert "VP-14 Morning Star" in DISABLED_STRATEGIES
+
+    def test_vp14_not_in_supported(self):
+        assert "VP-14 Morning Star" not in SUPPORTED_STRATEGIES
+
+    def test_disabled_strategies_is_set(self):
+        assert isinstance(DISABLED_STRATEGIES, set)
+
+
+class TestBacktestableStrategies:
+    """All backtestable strategies must be in SUPPORTED_STRATEGIES and not live-only."""
+
+    def test_newly_added_ohlcv_strategies_are_backtestable(self):
+        """VP-08, VP-09, VP-13, VP-16, VP-17, VP-22 must be backtestable."""
+        backtestable = SUPPORTED_STRATEGIES - LIVE_ONLY_STRATEGIES - DISABLED_STRATEGIES
+        for name in (
+            "VP-08 V-Reversal",
+            "VP-09 Power Candle Pullback",
+            "VP-13 Open Drive",
+            "VP-16 GCR Green Candle Retracement",
+            "VP-17 RCR Red Candle Retracement",
+            "VP-22 Supply Zone Reversal",
+        ):
+            assert name in backtestable, (
+                f"{name!r} should be backtestable (in SUPPORTED_STRATEGIES, "
+                "not in LIVE_ONLY or DISABLED)"
+            )
+
+    def test_vsa_vpa_strategies_are_backtestable(self):
+        """VSA/VPA strategies must be backtestable (volume-gated, not disabled)."""
+        backtestable = SUPPORTED_STRATEGIES - LIVE_ONLY_STRATEGIES - DISABLED_STRATEGIES
+        for name in (
+            "VPA Hanging Man",
+            "VPA No Demand",
+            "VSA Buying Climax",
+            "VSA Bag Holding",
+            "VSA Upthrust",
+            "VSA Hidden Upthrust",
+            "VSA Shakeout Intraday",
+        ):
+            assert name in backtestable, f"{name!r} should be volume-gated backtestable"
+
+    def test_no_finnifty_in_active_symbols(self):
+        """FINNIFTY must not appear anywhere in strategy restrictions."""
+        from tools.futures_hypothesis import FUTURES_SYMBOLS
+        assert "FINNIFTY" not in FUTURES_SYMBOLS

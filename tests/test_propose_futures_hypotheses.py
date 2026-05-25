@@ -274,8 +274,8 @@ class TestValidateGeminiHypothesisStrategy:
     """Strategy must be both in SUPPORTED_STRATEGIES AND seen in the review."""
 
     def test_rejects_strategy_not_in_review(self):
-        # VP-14 Morning Star is supported but absent from _SAMPLE_REVIEW
-        bad = {**_VALID_GEMINI_CANDIDATE, "strategy": "VP-14 Morning Star"}
+        # VP-08 V-Reversal is backtestable but absent from _SAMPLE_REVIEW
+        bad = {**_VALID_GEMINI_CANDIDATE, "strategy": "VP-08 V-Reversal"}
         ok, reason = _validate_gemini_hypothesis(bad, _REVIEW_DATE_ISO, _STRATEGIES_IN_REVIEW)
         assert not ok
         assert "not present in today's review" in reason
@@ -338,16 +338,16 @@ class TestValidateGeminiHypothesisDirectionMismatch:
         assert not ok
         assert "only emits" in reason or "can never produce" in reason
 
-    def test_rejects_morning_star_sell(self):
-        """VP-14 Morning Star only emits BUY — SELL proposal must be rejected."""
+    def test_rejects_buy_only_strategy_sell(self):
+        """VP-02 Counter Bear Trap only emits BUY — SELL proposal must be rejected."""
         bad = {
             **_VALID_GEMINI_CANDIDATE,
-            "strategy": "VP-14 Morning Star",
+            "strategy": "VP-02 Counter Bear Trap",
             "direction": "SELL",
-            "claim": "Block VP-14 SELL on BANKNIFTY when ADX14 < 18",
+            "claim": "Block VP-02 SELL on BANKNIFTY when ADX14 < 18",
         }
         ok, reason = _validate_gemini_hypothesis(
-            bad, _REVIEW_DATE_ISO, {"VP-14 Morning Star"}
+            bad, _REVIEW_DATE_ISO, {"VP-02 Counter Bear Trap"}
         )
         assert not ok
         assert "only emits" in reason or "can never produce" in reason
@@ -1397,15 +1397,16 @@ class TestVP24InSupportedStrategies:
         from tools.futures_strategy_engine import SUPPORTED_STRATEGIES
         assert "ADX Gapper" in SUPPORTED_STRATEGIES
 
-    def test_vp24_gemini_candidate_passes_validation_when_in_review(self):
-        """A Gemini candidate for VP-24 Pivot Rejection P must pass _validate_gemini_hypothesis."""
+    def test_vp24_gemini_candidate_rejected_because_live_only(self):
+        """VP-24 Pivot Rejection P is live-only — extract_strategies_from_review must exclude it
+        and any Gemini candidate for it must fail validation (strategy not in today's review)."""
         review_text = (
             "## Loss Clusters\n"
             "| BANKNIFTY | VP-24 Pivot Rejection P | SELL | 1 | ₹-4,464 |\n"
         )
         strategies_in_review = extract_strategies_from_review(review_text)
-        assert "VP-24 Pivot Rejection P" in strategies_in_review, (
-            "extract_strategies_from_review must find VP-24 Pivot Rejection P in review text"
+        assert "VP-24 Pivot Rejection P" not in strategies_in_review, (
+            "extract_strategies_from_review must NOT return live-only VP-24 Pivot Rejection P"
         )
         candidate = {
             "scope": "futures",
@@ -1420,7 +1421,8 @@ class TestVP24InSupportedStrategies:
             "status": "proposed",
         }
         ok, reason = _validate_gemini_hypothesis(candidate, "2026-05-21", strategies_in_review)
-        assert ok, f"VP-24 Pivot Rejection P candidate should pass validation: {reason}"
+        assert not ok, "VP-24 Pivot Rejection P candidate should be rejected (live-only, not in review set)"
+        assert "not present in today's review" in reason
 
     def test_vp99_invented_still_rejected(self):
         """VP-99 Invented must not pass validation even if present in review text."""
@@ -1441,13 +1443,18 @@ class TestVP24InSupportedStrategies:
         assert not ok
         assert "SUPPORTED_STRATEGIES" in reason
 
-    def test_extract_strategies_finds_vp24_in_review(self):
-        """extract_strategies_from_review finds VP-24 Pivot Rejection P in a review containing it."""
+    def test_extract_strategies_excludes_vp24_live_only(self):
+        """extract_strategies_from_review must NOT return VP-24 variants — they are live-only
+        and cannot be backtested, so Gemini should never propose hypotheses for them."""
         review_with_vp24 = (
             "## Loss Clusters\n"
             "| BANKNIFTY | VP-24 Pivot Rejection P | SELL | 1 | ₹-4,464 |\n"
             "| BANKNIFTY | VP-24 Pivot Rejection R1 | SELL | 1 | ₹-2,100 |\n"
         )
         result = extract_strategies_from_review(review_with_vp24)
-        assert "VP-24 Pivot Rejection P" in result
-        assert "VP-24 Pivot Rejection R1" in result
+        assert "VP-24 Pivot Rejection P" not in result, (
+            "VP-24 Pivot Rejection P is live-only and must be excluded from Gemini proposal set"
+        )
+        assert "VP-24 Pivot Rejection R1" not in result, (
+            "VP-24 Pivot Rejection R1 is live-only and must be excluded from Gemini proposal set"
+        )

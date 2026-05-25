@@ -37,7 +37,7 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    from tools.futures_strategy_engine import scan_candles, SUPPORTED_STRATEGIES, LIVE_ONLY_STRATEGIES
+    from tools.futures_strategy_engine import scan_candles, SUPPORTED_STRATEGIES, LIVE_ONLY_STRATEGIES, DISABLED_STRATEGIES
 except ImportError as e:
     print(
         f"ERROR: Could not import tools.futures_strategy_engine: {e}\n"
@@ -829,6 +829,36 @@ def main() -> None:
             "promotion_decision": {
                 "promote": False,
                 "reason":  "unsupported strategy",
+            },
+        }
+        _write_result(result, wiki_dir, hyp_id)
+        sys.exit(0)
+
+    # ── Skip disabled strategies ──────────────────────────────────────────────
+    # Disabled strategies are intentionally not emitted by either scanner.
+    # They cannot be backtested or promoted.  Fail fast with status="skipped".
+    if strategy in DISABLED_STRATEGIES:
+        skip_reason = (
+            "strategy is disabled and not emitted by either live or backtest scanner"
+        )
+        print(
+            f"[backtest_futures_hypothesis] Skipping '{strategy}' (disabled): {skip_reason}"
+        )
+        result = {
+            "hypothesis_id":      hyp_id,
+            "status":             "skipped",
+            "symbol":             symbol,
+            "strategy":           strategy,
+            "requested_interval": requested_interval,
+            "requested_period":   requested_period,
+            "period":             requested_period,
+            "interval":           requested_interval,
+            "fallback_used":      False,
+            "attempts":           [],
+            "skip_reason":        skip_reason,
+            "promotion_decision": {
+                "promote": False,
+                "reason":  skip_reason,
             },
         }
         _write_result(result, wiki_dir, hyp_id)
