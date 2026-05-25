@@ -621,6 +621,79 @@ def build_loss_clusters_section(executed: list) -> str:
     return "\n".join(lines)
 
 
+def parse_candidate_audit(audit_path: Path) -> dict:
+    """
+    Parse the candidate audit JSONL file for a trading day.
+
+    Returns a summary dict:
+      {
+        "raw_total":       int,   # total raw scanner candidates
+        "guardrail_blocked": int, # blocked by hard guardrails
+        "python_rejected": int,   # rejected by Python review
+        "gatekeeper_rejected": int,
+        "gatekeeper_approved": int,
+        "orders_placed":   int,
+        "gemma_opinions":  list[dict],  # alignment + signal_id for each GEMMA_OPINION
+        "by_signal_id":    dict,  # full audit trail per signal
+      }
+    """
+    result = {
+        "raw_total": 0,
+        "guardrail_blocked": 0,
+        "python_rejected": 0,
+        "gatekeeper_rejected": 0,
+        "gatekeeper_approved": 0,
+        "orders_placed": 0,
+        "gemma_opinions": [],
+        "by_signal_id": {},
+    }
+    if not audit_path.exists():
+        return result
+
+    try:
+        with open(audit_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                stage = rec.get("stage", "")
+                sid = rec.get("signal_id", "")
+                if sid not in result["by_signal_id"]:
+                    result["by_signal_id"][sid] = []
+                result["by_signal_id"][sid].append(rec)
+
+                if stage == "RAW_CANDIDATE":
+                    result["raw_total"] += 1
+                elif stage == "HARD_GUARDRAIL_BLOCKED":
+                    result["guardrail_blocked"] += 1
+                elif stage == "PYTHON_REVIEW_REJECTED":
+                    result["python_rejected"] += 1
+                elif stage == "GATEKEEPER_REJECTED":
+                    result["gatekeeper_rejected"] += 1
+                elif stage == "GATEKEEPER_APPROVED":
+                    result["gatekeeper_approved"] += 1
+                elif stage == "ORDER_PLACED":
+                    result["orders_placed"] += 1
+                elif stage == "GEMMA_OPINION":
+                    details = rec.get("details") or {}
+                    result["gemma_opinions"].append({
+                        "signal_id": sid,
+                        "symbol": rec.get("symbol", ""),
+                        "strategy": rec.get("strategy", ""),
+                        "alignment": details.get("alignment", "?"),
+                        "confidence": details.get("confidence"),
+                        "key_observation": details.get("key_observation", ""),
+                    })
+    except Exception:
+        pass
+
+    return result
+
+
 def build_review_markdown(
     review_date: date,
     executed: list,
@@ -630,6 +703,7 @@ def build_review_markdown(
     log_messages: list,
     indicator_notes: list,
     source_note: str = "",
+    candidate_audit: dict | None = None,
 ) -> str:
     date_str = review_date.isoformat()
     lines = []
@@ -719,6 +793,43 @@ def build_review_markdown(
     else:
         lines.append("_No rejected futures signals on this date._")
     lines.append("")
+
+    # Signal Gate Audit (from candidate audit JSONL)
+    if candidate_audit:
+        lines.append("## Signal Gate Audit")
+        raw = candidate_audit.get("raw_total", 0)
+        blocked = candidate_audit.get("guardrail_blocked", 0)
+        py_rej = candidate_audit.get("python_rejected", 0)
+        gk_rej = candidate_audit.get("gatekeeper_rejected", 0)
+        gk_app = candidate_audit.get("gatekeeper_approved", 0)
+        placed = candidate_audit.get("orders_placed", 0)
+        lines.append(f"| Stage | Count |")
+        lines.append(f"|-------|-------|")
+        lines.append(f"| Raw scanner candidates | {raw} |")
+        lines.append(f"| Hard guardrail blocked | {blocked} |")
+        lines.append(f"| Python review rejected | {py_rej} |")
+        lines.append(f"| Gatekeeper rejected | {gk_rej} |")
+        lines.append(f"| Gatekeeper approved | {gk_app} |")
+        lines.append(f"| Orders placed | {placed} |")
+        lines.append("")
+        gemma_ops = candidate_audit.get("gemma_opinions", [])
+        if gemma_ops:
+            lines.append("### Gemma Observer Opinions")
+            lines.append("| Symbol | Strategy | Alignment | Confidence | Observation |")
+            lines.append("|--------|----------|-----------|------------|-------------|")
+            for op in gemma_ops[:20]:  # cap at 20 to avoid review bloat
+                sym = op.get("symbol", "")
+                strat = op.get("strategy", "")
+                align = op.get("alignment", "?")
+                conf = op.get("confidence")
+                conf_str = f"{float(conf):.0%}" if conf is not None else "—"
+                obs = (op.get("key_observation") or "")[:80]
+                lines.append(f"| {sym} | {strat} | {align} | {conf_str} | {obs} |")
+            lines.append("")
+    else:
+        lines.append("## Signal Gate Audit")
+        lines.append("_No candidate audit file found for this date._")
+        lines.append("")
 
     # Patterns observed
     lines.append("## Patterns Observed")
@@ -842,6 +953,22 @@ def main():
     else:
         print(f"[evaluate_futures_day] Indicators not found (skipping): {indicators_path}")
 
+    # ── SOURCE 5: Candidate audit JSONL ──
+    audit_path = runtime_root / "candidate_signals" / f"{date_compact}.jsonl"
+    candidate_audit_data = None
+    if audit_path.exists():
+        print(f"[evaluate_futures_day] Reading candidate audit: {audit_path}")
+        candidate_audit_data = parse_candidate_audit(audit_path)
+        print(
+            f"  Audit: {candidate_audit_data['raw_total']} raw, "
+            f"{candidate_audit_data['guardrail_blocked']} guardrail-blocked, "
+            f"{candidate_audit_data['python_rejected']} Python-rejected, "
+            f"{candidate_audit_data['gatekeeper_rejected']} gate-rejected, "
+            f"{candidate_audit_data['orders_placed']} placed"
+        )
+    else:
+        print(f"[evaluate_futures_day] Candidate audit not found (skipping): {audit_path}")
+
     # Final filter: only futures symbols (should already be filtered but be safe)
     all_executed = [t for t in all_executed if is_futures_symbol(t.get("symbol", ""))]
     all_rejected = [r for r in all_rejected if is_futures_symbol(r.get("symbol", ""))]
@@ -860,6 +987,7 @@ def main():
         log_messages=log_messages,
         indicator_notes=indicator_notes,
         source_note=source_note,
+        candidate_audit=candidate_audit_data,
     )
 
     # Write output
