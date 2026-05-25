@@ -104,6 +104,16 @@ class AgentLoop:
         self._total_output_tokens = 0
         self._last_error: dict | None = None
 
+        # Tracks whether send_telegram was called during the current iteration
+        self._send_telegram_called = False
+
+    def was_send_telegram_called(self) -> bool:
+        """
+        Return True if Gemini called send_telegram during the most recent run_iteration().
+        Reset automatically at the start of each run_iteration().
+        """
+        return self._send_telegram_called
+
     def run_iteration(
         self,
         user_message: str,
@@ -114,10 +124,12 @@ class AgentLoop:
         """
         Run one complete agent iteration.
         Each iteration starts fresh to keep context clean.
+        Returns the final text from the model (may be empty if Gemini only called tools).
         """
         # Start fresh each iteration
         self._history = []
         self._last_error = None
+        self._send_telegram_called = False
 
         tool_defs = self._registry.get_tool_definitions()
         gemini_tools = _build_gemini_tools(tool_defs)
@@ -200,6 +212,8 @@ class AgentLoop:
             function_responses = []
             for fc in function_calls:
                 tool_input = dict(fc.args) if fc.args else {}
+                if fc.name == "send_telegram":
+                    self._send_telegram_called = True
                 result = self._registry.execute(
                     tool_name=fc.name,
                     tool_input=tool_input,

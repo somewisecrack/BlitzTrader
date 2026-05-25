@@ -806,7 +806,7 @@ class BlitzTrader:
                         state_manager=self._state,
                         order_execution=self._order_exec,
                     )
-                    self._run_agent_iteration(
+                    final_text = self._run_agent_iteration(
                         context,
                         model=GEMINI_SCHEDULED_MODEL,
                         max_tokens=GEMINI_MAX_SCHEDULED_TOKENS,
@@ -821,6 +821,13 @@ class BlitzTrader:
                             "Deterministic commands (pnl / status / positions / exit N) "
                             "still work — just ask."
                         )
+                    # Deliver final_text if Gemini reasoned but didn't call send_telegram
+                    elif (
+                        final_text
+                        and self._agent
+                        and not self._agent.was_send_telegram_called()
+                    ):
+                        self._telegram.send_telegram(final_text)
                     consecutive_errors = 0
                 except Exception as e:
                     consecutive_errors += 1
