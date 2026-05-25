@@ -29,6 +29,7 @@ import pytz
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
+    CANDIDATE_AUDIT_DIR,
     GEMINI_API_KEY,
     GEMINI_DECISION_MODEL,
     GEMINI_API_TIMEOUT_SECONDS,
@@ -93,6 +94,7 @@ from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
 from tools.gemini_gatekeeper import GeminiGatekeeper
 from tools.gemma_observer import GemmaObserver
+from tools.candidate_audit import CandidateAudit
 from tools.position_serial import (
     build_status_message,
     save_position_index,
@@ -464,6 +466,10 @@ class BlitzTrader:
                 "Gemma observer DISABLED (GEMMA_OBSERVER_ENABLED=false). "
                 "Opinions recorded as UNAVAILABLE. Trading unaffected."
             )
+
+        # Candidate audit log — durable JSONL record of every signal at every stage
+        self._audit = CandidateAudit(CANDIDATE_AUDIT_DIR)
+        logger.info("Candidate audit log: %s", CANDIDATE_AUDIT_DIR)
 
         logger.info("All components initialized successfully")
 
@@ -858,11 +864,43 @@ class BlitzTrader:
                     scan_result = self._market_data.get_strategy_signals()
                     new_sigs = scan_result.get("signals", [])
                     if new_sigs:
+                        # Assign signal_id to ALL raw candidates before any filtering
+                        for sig in new_sigs:
+                            if not sig.get("_signal_id"):
+                                sig["_signal_id"] = (
+                                    f"{sig.get('symbol', '?')}_"
+                                    f"{sig.get('strategy', '?')}_"
+                                    f"{sig.get('direction', '?')}_"
+                                    f"{int(time.time())}"
+                                )
+                            # Audit every raw candidate
+                            self._audit.record(
+                                signal_id=sig["_signal_id"],
+                                stage="RAW_CANDIDATE",
+                                signal=sig,
+                            )
+                            # Submit ALL raw candidates to Gemma (observer only, async)
+                            if self._gemma:
+                                self._gemma.submit(sig, "")
+
                         tradeable_sigs, blocked_sigs = self._filter_tradeable_signals(
                             new_sigs,
                             now,
                             existing_pending=[],
                         )
+                        for sig in blocked_sigs:
+                            self._audit.record(
+                                signal_id=sig.get("_signal_id", ""),
+                                stage="HARD_GUARDRAIL_BLOCKED",
+                                signal=sig,
+                                reason=sig.get("blocked_reason", ""),
+                            )
+                        for sig in tradeable_sigs:
+                            self._audit.record(
+                                signal_id=sig.get("_signal_id", ""),
+                                stage="HARD_GUARDRAIL_PASSED",
+                                signal=sig,
+                            )
                         if blocked_sigs:
                             logger.info(
                                 "Scanner: %d signal(s) blocked by hard guardrails: %s",
@@ -1010,7 +1048,8 @@ class BlitzTrader:
 
         Three-stage gate (invariants NEVER violated):
           1. Python hard review   — deterministic indicator/risk checks (no LLM)
-          2. Gemma observer       — async, non-blocking, NEVER blocks or approves
+          2. Gemma observer       — already submitted for ALL raw candidates in the scan loop;
+                                   gk_context (richer) is re-submitted here for the Telegram path
           3. Gemini gatekeeper    — 5-second timeout, structured JSON; timeout/error = REJECT
 
         Only after all three stages pass does Python place the order.
@@ -1021,10 +1060,20 @@ class BlitzTrader:
             strategy = signal.get("strategy", "")
             symbol = signal.get("symbol", "")
             direction = signal.get("direction", "")
+            signal_id = signal.get("_signal_id") or (
+                f"{symbol}_{strategy}_{direction}_{int(time.time())}"
+            )
+            signal["_signal_id"] = signal_id
             try:
                 # ── Stage 1: Python hard review ──────────────────────────────
                 approved, context_summary, python_reason = self._review_signal_python(signal)
                 if not approved:
+                    self._audit.record(
+                        signal_id=signal_id,
+                        stage="PYTHON_REVIEW_REJECTED",
+                        signal=signal,
+                        reason=python_reason,
+                    )
                     self._journal.log_decision(
                         action="REJECT",
                         symbol=execution_symbol,
@@ -1034,9 +1083,7 @@ class BlitzTrader:
                     )
                     continue
 
-                # ── Stage 2: Gemma observer (async, fire-and-forget) ──────────
-                # Build indicator context once — reused for both Gemma and gatekeeper
-                signal_id = f"{symbol}_{strategy}_{direction}_{int(time.time())}"
+                # ── Build indicator context (richer than scan-loop submit) ──
                 indicators = self._market_data.get_indicators(
                     symbol=symbol,
                     interval=str(signal.get("interval", "")),
@@ -1044,14 +1091,29 @@ class BlitzTrader:
                 gk_context = build_gatekeeper_context(
                     signal, indicators if isinstance(indicators, dict) else {}
                 )
+
+                self._audit.record(
+                    signal_id=signal_id,
+                    stage="PYTHON_REVIEW_PASSED",
+                    signal=signal,
+                    reason=python_reason,
+                )
+
+                # ── Stage 2: Gemma observer (re-submit with richer context) ──
+                # Note: ALL raw candidates were already submitted with empty context
+                # in the scan loop. This re-submit provides gk_context for journaling.
                 if self._gemma:
-                    # Store signal_id so the callback can attach the opinion
-                    signal["_signal_id"] = signal_id
                     self._gemma.submit(signal, gk_context)
 
                 # ── Stage 3: Gemini gatekeeper (APPROVE / REJECT, 5-second SLA) ──
                 if not self._gatekeeper:
                     # No API key configured — reject all signals
+                    self._audit.record(
+                        signal_id=signal_id,
+                        stage="GATEKEEPER_REJECTED",
+                        signal=signal,
+                        reason="Gemini gatekeeper not configured (missing API key) — auto-REJECT",
+                    )
                     self._journal.log_decision(
                         action="REJECT",
                         symbol=execution_symbol,
@@ -1062,7 +1124,6 @@ class BlitzTrader:
                     continue
 
                 gate_result = self._gatekeeper.evaluate(signal, gk_context)
-                gate_decision = gate_result.get("decision", "REJECT")
                 gate_reason = gate_result.get("reason", "")
                 gate_error = gate_result.get("gatekeeper_error")
                 gate_confidence = gate_result.get("confidence", 0.0)
@@ -1075,6 +1136,13 @@ class BlitzTrader:
                     )
                     if gate_error:
                         reject_reason = f"Gemini gatekeeper auto-REJECT: {gate_error}"
+                    self._audit.record(
+                        signal_id=signal_id,
+                        stage="GATEKEEPER_REJECTED",
+                        signal=signal,
+                        reason=reject_reason,
+                        details={"gate_confidence": gate_confidence, "gate_error": gate_error},
+                    )
                     self._journal.log_decision(
                         action="REJECT",
                         symbol=execution_symbol,
@@ -1087,6 +1155,17 @@ class BlitzTrader:
                         symbol, strategy, direction, reject_reason,
                     )
                     continue
+
+                self._audit.record(
+                    signal_id=signal_id,
+                    stage="GATEKEEPER_APPROVED",
+                    signal=signal,
+                    details={
+                        "gate_confidence": gate_confidence,
+                        "gate_reason": gate_reason,
+                        "conditions_checked": gate_conditions,
+                    },
+                )
 
                 # ── Place order (Python-controlled) ──────────────────────────
                 quantity = signal.get("lot_size") or self._active_tokens.get(
@@ -1113,6 +1192,12 @@ class BlitzTrader:
                     )
                     if fill_price is not None:
                         fill_note += f" Fill ₹{fill_price:.2f}."
+                    self._audit.record(
+                        signal_id=signal_id,
+                        stage="ORDER_PLACED",
+                        signal=signal,
+                        details={"fill_price": fill_price, "status": status},
+                    )
                     self._journal.log_decision(
                         action=action,
                         symbol=execution_symbol,
@@ -1129,12 +1214,19 @@ class BlitzTrader:
                         signal_id=signal_id,
                     )
                 else:
+                    order_error = result.get("error") or result.get("message") or "Order rejected by execution layer."
+                    self._audit.record(
+                        signal_id=signal_id,
+                        stage="ORDER_REJECTED",
+                        signal=signal,
+                        reason=order_error,
+                    )
                     self._journal.log_decision(
                         action="REJECT",
                         symbol=execution_symbol,
                         strategy_applied=strategy,
                         market_context_summary=context_summary,
-                        reason=result.get("error") or result.get("message") or "Order rejected by execution layer.",
+                        reason=order_error,
                     )
             except Exception as exc:
                 logger.exception(
@@ -1155,7 +1247,7 @@ class BlitzTrader:
         Callback invoked by GemmaObserver daemon thread when Gemma responds.
 
         INVARIANT: This callback NEVER affects trade decisions.
-        It records the opinion for journaling and deferred Telegram messages.
+        It records the opinion for journaling, deferred Telegram messages, and the audit log.
         """
         signal_id = signal.get("_signal_id", "")
         if signal_id:
@@ -1170,6 +1262,19 @@ class BlitzTrader:
                 float(opinion.get("confidence", 0)) * 100,
                 opinion.get("key_observation", ""),
             )
+        # Audit the Gemma opinion — purely for the durable record
+        self._audit.record(
+            signal_id=signal_id,
+            stage="GEMMA_OPINION",
+            signal=signal,
+            reason=opinion.get("gemma_error") or "",
+            details={
+                "alignment": opinion.get("alignment"),
+                "confidence": opinion.get("confidence"),
+                "key_observation": opinion.get("key_observation"),
+                "concern": opinion.get("concern"),
+            },
+        )
 
     def _notify_entry(
         self,

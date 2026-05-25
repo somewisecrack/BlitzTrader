@@ -72,12 +72,14 @@ JOURNALS_DIR = RUNTIME_STORAGE_DIR / "journals"
 LOGS_DIR = RUNTIME_STORAGE_DIR / "logs"
 DATA_EXPORTS_DIR = RUNTIME_STORAGE_DIR / "data_exports"
 STATE_FILE = RUNTIME_STORAGE_DIR / "live_state.json"
+CANDIDATE_AUDIT_DIR = RUNTIME_STORAGE_DIR / "candidate_signals"
 
 # Ensure directories exist
 JOURNALS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 STRATEGIES_DIR.mkdir(exist_ok=True)
+CANDIDATE_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
 
 LIVE_DRIVE_MODE = _optional_env("LIVE_DRIVE_MODE", "").lower() in {
     "1", "true", "yes", "on"

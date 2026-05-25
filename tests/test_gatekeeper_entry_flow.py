@@ -86,6 +86,7 @@ def _bot_with_state(state: dict) -> BlitzTrader:
     bot._market_data.get_candles.return_value = {"candles": []}
     bot._promoted_futures_filters = []
     bot._gemma_opinions = {}
+    bot._audit = MagicMock()
     return bot
 
 
