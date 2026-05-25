@@ -1,0 +1,31 @@
+[Unit]
+Description=BlitzTrader Always-On Telegram Q&A Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blitztrader
+Group=blitztrader
+WorkingDirectory=/opt/blitztrader
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/blitztrader/.env
+
+ExecStart=/opt/blitztrader/venv/bin/python scripts/blitztrader_agent.py
+
+# Remove stale PID files on start
+ExecStartPre=/bin/rm -f /tmp/blitztrader_agent.pid
+
+# Always restart — this service must be alive 24/7
+Restart=always
+RestartSec=10
+
+# Give agent time to finish answering a question
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

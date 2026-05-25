@@ -16,6 +16,7 @@ Gemma is used as a non-blocking observer (never in decision path):
   - submits async opinion on every candidate signal for journaling
 """
 import logging
+import os
 import shutil
 import signal
 import sys
@@ -712,6 +713,15 @@ class BlitzTrader:
         last_feed_health_alert = None  # avoid spam
         feed_disconnect_start = None  # track how long feed is disconnected
 
+        # Write PID file so blitztrader-agent.service yields Telegram polling to us.
+        # Removed in _remove_trading_pid() on any exit path.
+        _TRADING_PID_FILE = Path("/tmp/blitztrader_trading.pid")
+        try:
+            _TRADING_PID_FILE.write_text(str(os.getpid()))
+            logger.info("Trading PID file written: %s (pid=%d)", _TRADING_PID_FILE, os.getpid())
+        except Exception:
+            logger.warning("Could not write trading PID file — agent coordination unavailable")
+
         while self._running:
             now = datetime.now(IST)
 
@@ -740,6 +750,7 @@ class BlitzTrader:
                 if self._feed:
                     self._feed.stop()
                 self._upload_data_export()
+                self._remove_trading_pid()
                 self._running = False
                 return
 
@@ -777,6 +788,7 @@ class BlitzTrader:
                     )
                 if self._telegram:
                     self._telegram.send_telegram("🛑 Abort received. All open positions closed. Session stopping.")
+                self._remove_trading_pid()
                 self._running = False
                 return
 
@@ -937,6 +949,7 @@ class BlitzTrader:
                     "🛑 BlitzTrader STOPPED: Daily loss limit hit. "
                     "All positions closed."
                 )
+                self._remove_trading_pid()
                 self._running = False
                 return
 
@@ -1403,6 +1416,16 @@ class BlitzTrader:
             f"Scanner conditions valid; stop ₹{stop_loss:.2f}, target ₹{target:.2f}."
         )
         return True, context_summary, reason
+
+    @staticmethod
+    def _remove_trading_pid() -> None:
+        """Remove the PID coordination file written at trading loop start."""
+        pid_file = Path("/tmp/blitztrader_trading.pid")
+        try:
+            pid_file.unlink(missing_ok=True)
+            logger.info("Trading PID file removed")
+        except Exception:
+            pass
 
     @staticmethod
     def _logical_instrument(symbol: str) -> str | None:
