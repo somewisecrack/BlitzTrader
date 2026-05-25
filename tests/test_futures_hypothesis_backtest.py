@@ -872,6 +872,12 @@ class TestDailyFallback:
                 return side_effects.pop(0)
             return self._ok_attempt()
 
+        # Stub yfinance so main() doesn't sys.exit(1) when yfinance is absent
+        import sys as _sys
+        import types as _types
+        _yf_stub = _types.ModuleType("yfinance")
+        _yf_stub.download = lambda *a, **kw: None
+
         with patch.object(mod, "run_backtest_attempt", side_effect=fake_attempt), \
              patch.object(mod, "_check_data_sufficiency",
                           return_value=("5m", "59d", "")), \
@@ -879,7 +885,8 @@ class TestDailyFallback:
                  "backtest_futures_hypothesis.py",
                  "--hypothesis", str(hyp_path),
                  "--wiki-dir", str(wiki_dir),
-             ]):
+             ]), \
+             patch.dict(_sys.modules, {"yfinance": _yf_stub}):
             try:
                 mod.main()
             except SystemExit:
