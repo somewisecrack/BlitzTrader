@@ -282,38 +282,21 @@ class TestChatPathDoesNotImportFilterLoader:
 # ===========================================================================
 
 class TestPairsFilesUnchanged:
-
-    def _read(self, relpath: str) -> str:
-        path = _REPO_ROOT / relpath
-        assert path.exists(), f"Expected file does not exist: {path}"
-        return path.read_text(encoding="utf-8")
+    """
+    Guard tests that previously ensured pairs/ files did not accidentally
+    import futures hypothesis tools.  The pairs/ module has been archived to
+    _archived_pairs/ as part of the futures-only refactor, so these guards
+    are no longer applicable.  Tests are kept as skips to preserve history.
+    """
 
     def test_pairs_scanner_unchanged(self):
-        src = self._read("pairs/scanner.py")
-        assert "futures_filter_loader" not in src, (
-            "pairs/scanner.py must not import futures_filter_loader"
-        )
-        assert "futures_hypothesis" not in src, (
-            "pairs/scanner.py must not import futures_hypothesis"
-        )
+        pytest.skip("pairs/scanner.py archived to _archived_pairs/ — guard no longer needed")
 
     def test_pairs_portfolio_unchanged(self):
-        src = self._read("pairs/portfolio.py")
-        assert "futures_filter_loader" not in src, (
-            "pairs/portfolio.py must not import futures_filter_loader"
-        )
-        assert "futures_hypothesis" not in src, (
-            "pairs/portfolio.py must not import futures_hypothesis"
-        )
+        pytest.skip("pairs/portfolio.py archived to _archived_pairs/ — guard no longer needed")
 
     def test_pairs_init_unchanged(self):
-        src = self._read("pairs/__init__.py")
-        assert "futures_filter_loader" not in src, (
-            "pairs/__init__.py must not import futures_filter_loader"
-        )
-        assert "futures_hypothesis" not in src, (
-            "pairs/__init__.py must not import futures_hypothesis"
-        )
+        pytest.skip("pairs/__init__.py archived to _archived_pairs/ — guard no longer needed")
 
 
 # ===========================================================================
@@ -607,26 +590,8 @@ class TestPromoteWritesJSON:
 class TestPairsFilesUnchangedGit:
 
     def test_pairs_init_unchanged(self):
-        """Verify pairs/__init__.py is unmodified by futures-wiki changes.
-
-        pairs/portfolio.py is intentionally modified for the pairs selection
-        logic update (dynamic allocation, dedup, concentration filter) and is
-        excluded from this guard.
-
-        pairs/scanner.py is excluded because it is intentionally modified to
-        remove the direct Yahoo Chart API path (keeping yfinance as sole source).
-
-        config.py is excluded from this guard because pairs/futures constants
-        may be legitimately changed without affecting futures trading logic.
-        """
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "--", "pairs/__init__.py"],
-            capture_output=True, text=True,
-            cwd=str(_REPO_ROOT),
-        )
-        assert result.stdout.strip() == "", (
-            f"pairs/__init__.py was modified unexpectedly: {result.stdout}"
-        )
+        """Skipped: pairs/__init__.py archived to _archived_pairs/ (futures-only refactor)."""
+        pytest.skip("pairs/ archived to _archived_pairs/ — git guard no longer applicable")
 
 
 # ===========================================================================

@@ -8,10 +8,8 @@ then prune old local files to keep VM disk lean.
 What is backed up to Drive each day:
   - data_exports/YYYYMMDD/  (feed ticks, indicators, strategy signals)
   - journals/YYYYMMDD.md    (trading decisions, EOD P&L)
-  - journals/YYYYMMDD_pairs.md  (pairs decisions, if present)
   - logs/blitztrader_YYYYMMDD.log
   - live_state.json
-  - pairs_state.json
 
 What is pruned from VM after successful backup:
   - data_exports/ dirs older than LOCAL_KEEP_DAYS (default 2)
@@ -214,10 +212,8 @@ def main() -> None:
         # (description, fn, src, rel_dest)
         ("data_exports",      "dir",  runtime_dir / "data_exports" / date_str,          f"data_exports/{date_str}"),
         ("journal",           "file", runtime_dir / "journals" / f"{date_str}.md",       f"journals/{date_str}.md"),
-        ("pairs journal",     "file", runtime_dir / "journals" / f"{date_str}_pairs.md", f"journals/{date_str}_pairs.md"),
         ("log",               "file", runtime_dir / "logs" / f"blitztrader_{date_str}.log", f"logs/blitztrader_{date_str}.log"),
         ("live_state",        "file", runtime_dir / "live_state.json",                   "live_state.json"),
-        ("pairs_state",       "file", runtime_dir / "pairs_state.json",                  "pairs_state.json"),
     ]
 
     all_ok = True

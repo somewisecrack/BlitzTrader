@@ -1,18 +1,17 @@
 """
 tools/position_serial.py — Deterministic position serial numbering for Telegram status.
 
-Generates a stable, human-readable serial index over all open positions
-(futures + pairs), persists it to runtime/telegram_position_index.json,
-and provides exit-by-serial functionality.
+Generates a stable, human-readable serial index over all open futures positions,
+persists it to runtime/telegram_position_index.json, and provides exit-by-serial
+functionality.
 
 Design constraints:
-- One serial per logical position  (futures=1 serial, pair=1 serial)
+- One serial per logical position (futures only)
 - Serials are deterministic within a status message (sorted by opened_at)
 - Index is refreshed every time a status message is generated
 - TTL = 1800 s; stale index → error, not execution
 - NEVER opens a new position
 - NEVER modifies strategy logic
-- Pairs exit is VIRTUAL ONLY — no Shoonya broker orders placed
 """
 from __future__ import annotations
 
@@ -131,110 +130,20 @@ def _match_futures_identity(index_entry: dict, live_pos: dict) -> tuple[bool, st
     return True, ""
 
 
-def _match_pair_identity(index_entry: dict, live_pos) -> tuple[bool, str]:
-    """
-    Compare a stored index entry against a live PairPosition dataclass instance.
-
-    Returns (True, "") on match, (False, reason) on mismatch.
-    """
-    ie = index_entry
-
-    # pair_name
-    if ie.get("pair_name", "") != live_pos.pair_name:
-        return False, (
-            f"pair_name mismatch: index={ie.get('pair_name')} "
-            f"live={live_pos.pair_name}"
-        )
-
-    # opened_at — only when both sides non-empty
-    ie_oa = str(ie.get("opened_at") or "").strip()
-    lp_oa = str(live_pos.opened_at or "").strip()
-    if ie_oa and lp_oa and ie_oa != lp_oa:
-        return False, f"opened_at mismatch: index={ie_oa} live={lp_oa}"
-
-    ll = live_pos.long_leg
-    sl = live_pos.short_leg
-
-    # long leg symbol / tradingsymbol / token
-    if ie.get("long_symbol", "") != ll.symbol:
-        return False, f"long_symbol mismatch: index={ie.get('long_symbol')} live={ll.symbol}"
-    if ie.get("long_tradingsymbol", "") != ll.tradingsymbol:
-        return False, (
-            f"long_tradingsymbol mismatch: index={ie.get('long_tradingsymbol')} "
-            f"live={ll.tradingsymbol}"
-        )
-    ie_lt = str(ie.get("long_token") or "").strip()
-    lp_lt = str(ll.token or "").strip()
-    if ie_lt and lp_lt and ie_lt != lp_lt:
-        return False, f"long_token mismatch: index={ie_lt} live={lp_lt}"
-
-    # short leg symbol / tradingsymbol / token
-    if ie.get("short_symbol", "") != sl.symbol:
-        return False, f"short_symbol mismatch: index={ie.get('short_symbol')} live={sl.symbol}"
-    if ie.get("short_tradingsymbol", "") != sl.tradingsymbol:
-        return False, (
-            f"short_tradingsymbol mismatch: index={ie.get('short_tradingsymbol')} "
-            f"live={sl.tradingsymbol}"
-        )
-    ie_st = str(ie.get("short_token") or "").strip()
-    lp_st = str(sl.token or "").strip()
-    if ie_st and lp_st and ie_st != lp_st:
-        return False, f"short_token mismatch: index={ie_st} live={lp_st}"
-
-    # long qty
-    try:
-        if int(ie.get("long_qty", 0)) != int(ll.qty):
-            return False, f"long_qty mismatch: index={ie.get('long_qty')} live={ll.qty}"
-    except (TypeError, ValueError):
-        return False, "long_qty is non-numeric"
-
-    # short qty
-    try:
-        if int(ie.get("short_qty", 0)) != int(sl.qty):
-            return False, f"short_qty mismatch: index={ie.get('short_qty')} live={sl.qty}"
-    except (TypeError, ValueError):
-        return False, "short_qty is non-numeric"
-
-    # long entry_price
-    try:
-        ie_lep = float(ie.get("long_entry_price", 0))
-        lp_lep = float(ll.entry_price)
-    except (TypeError, ValueError):
-        return False, "long_entry_price is non-numeric"
-    if abs(ie_lep - lp_lep) >= 1e-4:
-        return False, f"long_entry_price mismatch: index={ie_lep} live={lp_lep}"
-
-    # short entry_price
-    try:
-        ie_sep = float(ie.get("short_entry_price", 0))
-        lp_sep = float(sl.entry_price)
-    except (TypeError, ValueError):
-        return False, "short_entry_price is non-numeric"
-    if abs(ie_sep - lp_sep) >= 1e-4:
-        return False, f"short_entry_price mismatch: index={ie_sep} live={lp_sep}"
-
-    return True, ""
-
-
 # ──────────────────────────────────────────────────────────────
 #   P&L SUMMARY HELPERS
 # ──────────────────────────────────────────────────────────────
 
 def _build_updated_pnl_summary(
     state_manager,
-    pairs_portfolio,
     live_feed=None,
     shoonya_client=None,
     active_tokens=None,
 ) -> str:
-    """Build the Overall/Futures/Pairs P&L sections only (no Open Positions list).
-
-    Delegates to build_status_message() so unrealized P&L uses live_feed/shoonya_client,
-    and pairs P&L comes from the real pairs_portfolio (not a null stub).
-    """
+    """Build the Futures P&L sections only (no Open Positions list)."""
     full, _ = build_status_message(
         state_manager=state_manager,
-        pairs_portfolio=pairs_portfolio,
+        pairs_portfolio=None,
         live_feed=live_feed,
         shoonya_client=shoonya_client,
         active_tokens=active_tokens,
@@ -251,15 +160,16 @@ def _build_updated_pnl_summary(
 
 def build_status_message(
     state_manager,
-    pairs_portfolio,
+    pairs_portfolio=None,  # kept for signature compatibility; ignored
     live_feed=None,
     shoonya_client=None,
     active_tokens: dict = None,
 ) -> tuple[str, dict]:
     """
-    Build a structured status message and return (message_text, index_payload).
+    Build a structured futures-only status message and return (message_text, index_payload).
 
     The index_payload is ready to be persisted via save_position_index().
+    pairs_portfolio is accepted but ignored (futures-only runtime).
     """
     active_tokens = active_tokens or {}
     state = state_manager.get_state()
@@ -305,7 +215,6 @@ def build_status_message(
             f"unrealized={upnl_str}{strat_tag}"
         )
 
-        # FIX 1: store full identity fields for futures
         index_entries.append({
             "serial": serial,
             "type": "futures",
@@ -319,116 +228,20 @@ def build_status_message(
         })
         serial += 1
 
-    # ── Pairs P&L ─────────────────────────────────────────────
-    pairs_status = pairs_portfolio.get_status()
-    pairs_realized = float(pairs_status.get("realized_pnl", 0) or 0)
-    pairs_unrealized_total = 0.0
-    pairs_pos_lines = []
-
-    for pos in (pairs_portfolio.positions or []):
-        if pos.closed_at:
-            continue
-
-        ll = pos.long_leg
-        sl_leg = pos.short_leg
-        pair_name = pos.pair_name
-
-        # Long leg
-        long_token = ll.token
-        long_current = _get_price_for_symbol(ll.symbol, live_feed, shoonya_client, long_token)
-        if long_current is not None:
-            long_upnl = (long_current - ll.entry_price) * ll.qty
-            long_current_str = f"{long_current:.2f}"
-            long_upnl_str = f"₹{long_upnl:+,.2f}"
-        else:
-            logger.warning("Serial status: current price unavailable for pairs long leg %s", ll.symbol)
-            long_upnl = 0.0
-            long_current_str = "N/A"
-            long_upnl_str = "N/A"
-
-        # Short leg
-        short_token = sl_leg.token
-        short_current = _get_price_for_symbol(sl_leg.symbol, live_feed, shoonya_client, short_token)
-        if short_current is not None:
-            short_upnl = (sl_leg.entry_price - short_current) * sl_leg.qty
-            short_current_str = f"{short_current:.2f}"
-            short_upnl_str = f"₹{short_upnl:+,.2f}"
-        else:
-            logger.warning("Serial status: current price unavailable for pairs short leg %s", sl_leg.symbol)
-            short_upnl = 0.0
-            short_current_str = "N/A"
-            short_upnl_str = "N/A"
-
-        if long_current is not None and short_current is not None:
-            pair_upnl = long_upnl + short_upnl
-            pair_upnl_str = f"₹{pair_upnl:+,.2f}"
-            pairs_unrealized_total += pair_upnl
-        else:
-            pair_upnl_str = "N/A"
-
-        # Determine LONG/SHORT symbol names for display
-        long_sym_display = ll.symbol
-        short_sym_display = sl_leg.symbol
-
-        pairs_pos_lines.append(
-            f"{serial}. [Pairs] {pair_name} | "
-            f"LONG {long_sym_display} qty={ll.qty} entry={ll.entry_price:.2f} "
-            f"current={long_current_str} unrealized={long_upnl_str} | "
-            f"SHORT {short_sym_display} qty={sl_leg.qty} entry={sl_leg.entry_price:.2f} "
-            f"current={short_current_str} unrealized={short_upnl_str} | "
-            f"pair_unrealized={pair_upnl_str}"
-        )
-
-        # FIX 2: store full identity fields for pairs
-        index_entries.append({
-            "serial": serial,
-            "type": "pairs",
-            "pair_name": pair_name,
-            "opened_at": str(pos.opened_at or ""),
-            "timeframe": getattr(pos, "timeframe", ""),
-            "long_symbol": ll.symbol,
-            "long_tradingsymbol": ll.tradingsymbol,
-            "long_token": str(ll.token or ""),
-            "long_qty": int(ll.qty),
-            "long_entry_price": float(ll.entry_price),
-            "short_symbol": sl_leg.symbol,
-            "short_tradingsymbol": sl_leg.tradingsymbol,
-            "short_token": str(sl_leg.token or ""),
-            "short_qty": int(sl_leg.qty),
-            "short_entry_price": float(sl_leg.entry_price),
-        })
-        serial += 1
-
     # ── Assemble P&L sections ─────────────────────────────────
-    overall_realized = futures_realized + pairs_realized
-    overall_unrealized = futures_unrealized + pairs_unrealized_total
-    overall_total = overall_realized + overall_unrealized
-
     futures_total = futures_realized + futures_unrealized
-    pairs_total = pairs_realized + pairs_unrealized_total
 
     lines = [
-        "Overall",
-        f"- Realized P&L: ₹{overall_realized:+,.2f}",
-        f"- Unrealized P&L: ₹{overall_unrealized:+,.2f}",
-        f"- Total P&L: ₹{overall_total:+,.2f}",
-        "",
         "Futures",
         f"- Realized P&L: ₹{futures_realized:+,.2f}",
         f"- Unrealized P&L: ₹{futures_unrealized:+,.2f}",
         f"- Total P&L: ₹{futures_total:+,.2f}",
         "",
-        "Pairs",
-        f"- Realized P&L: ₹{pairs_realized:+,.2f}",
-        f"- Unrealized P&L: ₹{pairs_unrealized_total:+,.2f}",
-        f"- Total P&L: ₹{pairs_total:+,.2f}",
-        "",
         "Open Positions",
     ]
 
-    all_pos_lines = futures_pos_lines + pairs_pos_lines
-    if all_pos_lines:
-        lines.extend(all_pos_lines)
+    if futures_pos_lines:
+        lines.extend(futures_pos_lines)
     else:
         lines.append("- None")
 
@@ -504,22 +317,20 @@ def _is_index_fresh(index: dict) -> bool:
 def exit_position_by_serial(
     serial: int,
     state_manager,
-    pairs_portfolio,
-    order_execution,
-    shoonya_client,
-    telegram_handler,
+    pairs_portfolio=None,  # kept for signature compatibility; ignored
+    order_execution=None,
+    shoonya_client=None,
+    telegram_handler=None,
     active_tokens: dict = None,
     live_feed=None,
 ) -> dict:
     """
-    Exit the open position identified by serial number.
+    Exit the open futures position identified by serial number.
 
     Safety guarantees:
     - NEVER opens a new position
     - NEVER modifies strategy rules
     - Validates index freshness, serial existence, and live position state
-    - No partial exits; no single-leg pair exits
-    - Pairs exit is VIRTUAL ONLY — no Shoonya broker orders
     - Returns structured result; caller sends Telegram confirmation
     """
     active_tokens = active_tokens or {}
@@ -561,13 +372,7 @@ def exit_position_by_serial(
         return _exit_futures_by_serial(
             serial, entry, state_manager, order_execution,
             telegram_handler, live_feed, active_tokens,
-            pairs_portfolio=pairs_portfolio,
             shoonya_client=shoonya_client,
-        )
-    elif pos_type == "pairs":
-        return _exit_pairs_by_serial(
-            serial, entry, pairs_portfolio, shoonya_client,
-            state_manager, telegram_handler, live_feed, active_tokens,
         )
     else:
         return {"success": False, "error": f"Unknown position type '{pos_type}' for serial #{serial}."}
@@ -581,7 +386,6 @@ def _exit_futures_by_serial(
     telegram_handler,
     live_feed,
     active_tokens: dict,
-    pairs_portfolio=None,
     shoonya_client=None,
 ) -> dict:
     """Close a futures position identified by serial."""
@@ -606,7 +410,7 @@ def _exit_futures_by_serial(
         invalidate_position_index()
         return {"success": False, "error": msg}
 
-    # FIX 1: full identity revalidation
+    # Full identity revalidation
     matched, mismatch_reason = _match_futures_identity(entry, live_pos)
     if not matched:
         msg = (
@@ -636,9 +440,9 @@ def _exit_futures_by_serial(
     pnl = result.get("pnl", 0.0)
     exit_price = result.get("exit_price")
 
-    # FIX 4: build P&L summary using real pairs_portfolio and live prices
+    # Build P&L summary using live prices
     pnl_summary = _build_updated_pnl_summary(
-        state_manager, pairs_portfolio,
+        state_manager,
         live_feed=live_feed, shoonya_client=shoonya_client, active_tokens=active_tokens,
     )
     invalidate_position_index()
@@ -664,147 +468,4 @@ def _exit_futures_by_serial(
     }
 
 
-def _exit_pairs_by_serial(
-    serial: int,
-    entry: dict,
-    pairs_portfolio,
-    shoonya_client,
-    state_manager,
-    telegram_handler,
-    live_feed,
-    active_tokens: dict,
-) -> dict:
-    """
-    Close BOTH legs of a pairs position identified by serial.
-
-    VIRTUAL ONLY — no Shoonya broker orders are placed.
-    Uses _close_leg() directly, exactly like EOD pairs close behavior.
-    """
-    pair_name = entry.get("pair_name", "")
-    long_sym = entry.get("long_symbol", "")
-    short_sym = entry.get("short_symbol", "")
-
-    # Re-verify pair still open
-    live_pos = None
-    for pos in (pairs_portfolio.positions or []):
-        if pos.pair_name == pair_name and not pos.closed_at:
-            live_pos = pos
-            break
-
-    if live_pos is None:
-        msg = (
-            f"Serial #{serial} (pair {pair_name}) is no longer open. "
-            "No orders placed."
-        )
-        logger.warning("exit_by_serial(%d): pair %s already closed", serial, pair_name)
-        invalidate_position_index()
-        return {"success": False, "error": msg}
-
-    # FIX 2: full identity revalidation
-    matched, mismatch_reason = _match_pair_identity(entry, live_pos)
-    if not matched:
-        msg = (
-            f"Serial #{serial} no longer matches the current open pair position. "
-            f"Please request fresh status. Reason: {mismatch_reason}"
-        )
-        logger.warning(
-            "exit_by_serial(%d): identity mismatch for pair %s — %s",
-            serial, pair_name, mismatch_reason,
-        )
-        invalidate_position_index()
-        return {"success": False, "error": msg}
-
-    ll = live_pos.long_leg
-    sl_leg = live_pos.short_leg
-
-    # FIX 3: handle partially-closed pair before touching state
-    if bool(ll.closed_at) != bool(sl_leg.closed_at):
-        msg = (
-            f"Pair serial #{serial} ({pair_name}) has one leg already closed — "
-            "abnormal state. Manual review required."
-        )
-        logger.error(
-            "exit_by_serial(%d): pair %s is in partial-close state "
-            "(long_closed=%s short_closed=%s)",
-            serial, pair_name, bool(ll.closed_at), bool(sl_leg.closed_at),
-        )
-        return {"success": False, "error": msg}
-
-    # FIX 3: resolve both exit prices BEFORE touching any state
-    from broker.shoonya_client import ResolvedScrip
-
-    long_scrip = ResolvedScrip(ll.symbol, ll.tradingsymbol, ll.token)
-    short_scrip = ResolvedScrip(sl_leg.symbol, sl_leg.tradingsymbol, sl_leg.token)
-
-    long_exit_price = pairs_portfolio._entry_price(shoonya_client, long_scrip, "SELL")
-    short_exit_price = pairs_portfolio._entry_price(shoonya_client, short_scrip, "BUY")
-
-    if long_exit_price is None and short_exit_price is None:
-        msg = (
-            f"Could not safely close pair serial #{serial} because price was "
-            f"unavailable for both {ll.symbol} and {sl_leg.symbol}. No state changed."
-        )
-        logger.warning("exit_by_serial(%d): both exit prices unavailable for pair %s", serial, pair_name)
-        return {"success": False, "error": msg}
-
-    if long_exit_price is None:
-        msg = (
-            f"Could not safely close pair serial #{serial} because price was "
-            f"unavailable for {ll.symbol} (LONG leg). No state changed."
-        )
-        logger.warning("exit_by_serial(%d): long exit price unavailable for %s", serial, ll.symbol)
-        return {"success": False, "error": msg}
-
-    if short_exit_price is None:
-        msg = (
-            f"Could not safely close pair serial #{serial} because price was "
-            f"unavailable for {sl_leg.symbol} (SHORT leg). No state changed."
-        )
-        logger.warning("exit_by_serial(%d): short exit price unavailable for %s", serial, sl_leg.symbol)
-        return {"success": False, "error": msg}
-
-    # Both prices confirmed — now close virtually (NO broker orders)
-    logger.info(
-        "exit_by_serial(%d): virtually closing pair %s "
-        "(long=%s @ %.2f, short=%s @ %.2f)",
-        serial, pair_name,
-        ll.symbol, long_exit_price,
-        sl_leg.symbol, short_exit_price,
-    )
-
-    long_pnl = pairs_portfolio._close_leg(ll, long_exit_price)
-    short_pnl = pairs_portfolio._close_leg(sl_leg, short_exit_price)
-
-    live_pos.closed_at = _now_ist().isoformat()
-    live_pos.pnl = round(long_pnl + short_pnl, 2)
-    pairs_portfolio._persist()
-
-    total_pnl = live_pos.pnl
-
-    # FIX 4: P&L summary using real pairs_portfolio and live prices; invalidate AFTER state is settled
-    pnl_summary = _build_updated_pnl_summary(
-        state_manager, pairs_portfolio,
-        live_feed=live_feed, shoonya_client=shoonya_client, active_tokens=active_tokens,
-    )
-    invalidate_position_index()
-
-    tg_msg = (
-        f"Exited serial #{serial}: pair {pair_name}\n"
-        f"  LONG {long_sym} exit: ₹{long_exit_price:.2f} | SHORT {short_sym} exit: ₹{short_exit_price:.2f}\n"
-        f"Realized P&L: ₹{total_pnl:+,.2f}\n"
-        f"\n{pnl_summary}"
-    )
-    if telegram_handler:
-        telegram_handler.send_telegram(tg_msg)
-
-    return {
-        "success": True,
-        "serial": serial,
-        "type": "pairs",
-        "pair_name": pair_name,
-        "long_exit_price": long_exit_price,
-        "short_exit_price": short_exit_price,
-        "pnl": total_pnl,
-        "message": tg_msg,
-    }
 

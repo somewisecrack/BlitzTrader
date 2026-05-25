@@ -71,7 +71,6 @@ class ToolRegistry:
         strategy_reader,
         memory_reader,
         goal_manager,
-        pairs_portfolio=None,
         live_feed=None,
         shoonya_client=None,
         active_tokens=None,
@@ -83,7 +82,6 @@ class ToolRegistry:
         self._strategy = strategy_reader
         self._memory = memory_reader
         self._goals = goal_manager
-        self._pairs_portfolio = pairs_portfolio
         self._live_feed = live_feed
         self._shoonya_client = shoonya_client
         self._active_tokens = active_tokens or {}
@@ -246,11 +244,8 @@ class ToolRegistry:
         Generate a structured status message with serial-numbered open positions
         and persist the index for exit-by-serial.
         """
-        if not self._pairs_portfolio:
-            return {"error": "Pairs portfolio not available."}
         msg, index_payload = build_status_message(
             state_manager=self._order_exec._state,
-            pairs_portfolio=self._pairs_portfolio,
             live_feed=self._live_feed,
             shoonya_client=self._shoonya_client,
             active_tokens=self._active_tokens,
@@ -269,12 +264,9 @@ class ToolRegistry:
         Validates index freshness and live state before placing any orders.
         NEVER opens a new position.
         """
-        if not self._pairs_portfolio:
-            return {"error": "Pairs portfolio not available."}
         return _exit_by_serial_impl(
             serial=serial,
             state_manager=self._order_exec._state,
-            pairs_portfolio=self._pairs_portfolio,
             order_execution=self._order_exec,
             shoonya_client=self._shoonya_client,
             telegram_handler=self._telegram,
@@ -717,8 +709,8 @@ class ToolRegistry:
             {
                 "name": "get_status_with_serials",
                 "description": (
-                    "Generate a structured status message with serial-numbered open positions "
-                    "(futures and pairs), send it via Telegram, and persist the serial index. "
+                    "Generate a structured status message with serial-numbered open futures positions, "
+                    "send it via Telegram, and persist the serial index. "
                     "Call this when the trader asks for a status update or position summary. "
                     "Must be called before exit_position_by_serial to refresh the index."
                 ),
@@ -730,8 +722,7 @@ class ToolRegistry:
             {
                 "name": "exit_position_by_serial",
                 "description": (
-                    "Exit the open position identified by its serial number from the last status message. "
-                    "For a Pairs position, BOTH legs are closed atomically — no single-leg exits. "
+                    "Exit the open futures position identified by its serial number from the last status message. "
                     "SAFETY: validates index freshness (30 min TTL), re-verifies position is still open, "
                     "and NEVER opens a new position. "
                     "Call when user says: 'exit 2', 'close position 3', 'square off #1', 'close serial 2'."

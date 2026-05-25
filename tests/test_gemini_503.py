@@ -182,19 +182,6 @@ class TestDeterministicCommandsBypassGemini:
         oe.get_open_positions.return_value = {"positions": [], "count": 0}
         return oe
 
-    def _make_pairs_portfolio(self):
-        pp = MagicMock()
-        pp.get_status.return_value = {
-            "net_pnl": 500.0,
-            "open_pairs": 0,
-            "positions": [],
-            "realized_pnl": 500.0,
-            "unrealized_pnl": 0.0,
-            "capital": 50000.0,
-        }
-        pp.positions = []
-        return pp
-
     def test_status_query_does_not_call_gemini(self):
         """
         A 'pnl' / 'status' message is handled by _try_answer_simple_chat
@@ -205,7 +192,6 @@ class TestDeterministicCommandsBypassGemini:
         trader = _main.BlitzTrader.__new__(_main.BlitzTrader)
         trader._state = self._make_state_manager()
         trader._order_exec = self._make_order_exec()
-        trader._pairs_portfolio = self._make_pairs_portfolio()
         trader._telegram = MagicMock()
         trader._telegram.send_telegram.return_value = {"status": "sent"}
         trader._feed = MagicMock()
@@ -230,7 +216,6 @@ class TestDeterministicCommandsBypassGemini:
         trader = _main.BlitzTrader.__new__(_main.BlitzTrader)
         trader._state = self._make_state_manager()
         trader._order_exec = self._make_order_exec()
-        trader._pairs_portfolio = self._make_pairs_portfolio()
         trader._telegram = MagicMock()
         trader._telegram.send_telegram.return_value = {"status": "sent"}
         trader._feed = MagicMock()

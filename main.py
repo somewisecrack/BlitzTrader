@@ -2,7 +2,7 @@
 main.py — BlitzTrader session lifecycle orchestrator.
 
 This is the entry point. It manages the full trading day:
-  8:20 AM  → Login, initialize services, run pre-market pairs scan
+  8:20 AM  → Login, initialize services
   9:15 AM  → Start deterministic Python trading loop
   3:15 PM  → Force EOD sequence, update memory
   3:25 PM  → Cleanup and exit
@@ -37,12 +37,6 @@ from config import (
     JOURNALS_DIR,
     LOGS_DIR,
     MIN_FREE_DISK_MB,
-    PAIRS_BASE_CAPITAL,
-    PAIRS_GROSS_CAPITAL,
-    PAIRS_LEVERAGE,
-    PAIRS_STATE_FILE,
-    PAIR_SCAN_TIME,
-    PAIR_EXIT_TIME,
     RUNTIME_STORAGE_DIR,
     SCAN_INTERVAL_SECONDS,
     MASTER_STRATEGY_FILE,
@@ -71,11 +65,8 @@ from config import (
     VIRTUAL_CAPITAL,
     setup_logging,
 )
-from pairs.scanner import PairScanner
-from pairs.portfolio import PairPortfolio
 from broker.shoonya_client import ShoonyaClient, assert_client_identity
 from broker.live_feed import LiveFeedManager
-from broker.quote_cache import QuoteCache
 from tools.state_manager import StateManager
 from tools.virtual_ledger import VirtualLedger
 from tools.market_data import MarketDataTools
@@ -100,7 +91,6 @@ from context_builder import (
     SYSTEM_PROMPT,
     build_chat_context,
     build_eod_context,
-    build_pairs_scan_summary,
 )
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -130,13 +120,6 @@ class BlitzTrader:
         self._active_tokens = None
         self._llm_disabled_reason = None
         self._llm_disabled_notified = False
-        self._quote_cache = None
-        # Pairs trading
-        self._pairs_scanner = PairScanner()
-        self._pairs_portfolio = PairPortfolio(PAIRS_STATE_FILE)  # quote_cache injected after feed starts
-        self._pairs_candidates: list = []
-        self._pairs_scan_done: bool = False
-        self._pairs_opened: bool = False
         # Promoted futures filters (loaded from wiki/promoted_filters at startup)
         self._promoted_futures_filters: list = []
 
@@ -322,11 +305,6 @@ class BlitzTrader:
         # (DataRecorder was created before futures lookup — update it now)
         self._data_recorder.update_token_map(active_tokens)
 
-        # Create shared QuoteCache and inject into PairPortfolio
-        self._quote_cache = QuoteCache(shoonya_client=self._shoonya, live_feed=self._feed)
-        self._pairs_portfolio = PairPortfolio(PAIRS_STATE_FILE, quote_cache=self._quote_cache)
-        logger.info("✓ QuoteCache created and wired into PairPortfolio")
-
         # 3. State manager
         self._state = StateManager(STATE_FILE, VIRTUAL_CAPITAL)
         existing_state = self._state.load_state() if STATE_FILE.exists() else None
@@ -406,7 +384,6 @@ class BlitzTrader:
             strategy_reader=strategy,
             memory_reader=memory,
             goal_manager=self._goals,
-            pairs_portfolio=self._pairs_portfolio,
             live_feed=self._feed,
             shoonya_client=self._shoonya,
             active_tokens=self._active_tokens,
@@ -438,7 +415,6 @@ class BlitzTrader:
         logger.info(
             "STARTUP CONFIG: "
             f"Futures capital ₹{VIRTUAL_CAPITAL:,.0f} | "
-            f"Pairs base capital ₹{PAIRS_BASE_CAPITAL:,.0f} (gross ₹{PAIRS_GROSS_CAPITAL:,.0f} with {PAIRS_LEVERAGE}x leverage) | "
             f"State file: {STATE_FILE}"
         )
 
@@ -538,7 +514,7 @@ class BlitzTrader:
                 result = _exit_serial(
                     serial=serial,
                     state_manager=self._state,
-                    pairs_portfolio=self._pairs_portfolio,
+                    pairs_portfolio=None,
                     order_execution=self._order_exec,
                     shoonya_client=self._shoonya,
                     telegram_handler=self._telegram,
@@ -570,11 +546,11 @@ class BlitzTrader:
             return False
 
         # Use serial-numbered status format for status/positions requests
-        if wants_status and self._order_exec and self._pairs_portfolio:
+        if wants_status and self._order_exec:
             try:
                 msg, index_payload = build_status_message(
                     state_manager=self._state,
-                    pairs_portfolio=self._pairs_portfolio,
+                    pairs_portfolio=None,
                     live_feed=self._feed,
                     shoonya_client=self._shoonya,
                     active_tokens=self._active_tokens,
@@ -589,7 +565,6 @@ class BlitzTrader:
                         f"Futures capital: ₹{capital:,.2f}",
                         f"Available balance: ₹{available_balance:,.2f}",
                         f"Margin used: ₹{margin_used:,.2f}",
-                        f"Pairs capital: ₹{PAIRS_BASE_CAPITAL:,.0f} base (₹{PAIRS_GROSS_CAPITAL:,.0f} gross @ {PAIRS_LEVERAGE}x)",
                         "",
                     ]
                     msg = "\n".join(cap_lines) + msg
@@ -608,22 +583,17 @@ class BlitzTrader:
         available_balance = float(state.get("available_balance", 0) or 0)
         margin_used = float(state.get("margin_used", 0) or 0)
         positions = self._order_exec.get_open_positions() if self._order_exec else {"positions": []}
-        pairs_status = self._pairs_portfolio.get_status()
-        pairs_pnl = pairs_status.get("net_pnl", 0.0)
         lines = []
         if wants_capital:
             lines.extend([
                 f"Futures capital: ₹{capital:,.2f}",
                 f"Available balance: ₹{available_balance:,.2f}",
                 f"Margin used: ₹{margin_used:,.2f}",
-                f"Pairs capital: ₹{PAIRS_BASE_CAPITAL:,.0f} base (₹{PAIRS_GROSS_CAPITAL:,.0f} gross @ {PAIRS_LEVERAGE}x)",
             ])
         if wants_status or not wants_capital:
             lines.extend([
                 f"Futures P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)",
                 f"Open futures positions: {positions.get('count', 0)}",
-                f"Pairs P&L: ₹{pairs_pnl:+,.2f} | Open pairs: {pairs_status.get('open_pairs', 0)}",
-                f"Combined P&L: ₹{pnl + pairs_pnl:+,.2f}",
             ])
         for pos in positions.get("positions", []):
             lines.append(
@@ -631,14 +601,6 @@ class BlitzTrader:
                 f"qty {pos.get('quantity')} | entry ₹{pos.get('entry_price')} | "
                 f"LTP ₹{pos.get('current_price')} | uPnL ₹{pos.get('unrealized_pnl'):+,.2f}"
             )
-        if pairs_status.get("positions"):
-            lines.append("Pairs:")
-            for pp in pairs_status["positions"]:
-                closed_tag = " [closed]" if pp.get("closed") else ""
-                lines.append(
-                    f"- {pp['pair']} {pp['timeframe']}{closed_tag} | "
-                    f"rPnL ₹{pp['realized_pnl']:+,.2f} uPnL ₹{pp['unrealized_pnl']:+,.2f}"
-                )
         self._telegram.send_telegram("\n".join(lines))
         logger.info("Answered simple Telegram status/P&L chat without Gemini")
         return True
@@ -698,33 +660,8 @@ class BlitzTrader:
                 # Close futures positions
                 close_result = self._order_exec.close_all_positions() if self._order_exec else {}
                 logger.info("Deterministic futures EOD close result: %s", close_result)
-                # Close pairs positions
-                pairs_close = self._pairs_portfolio.close_all(self._shoonya) if self._shoonya else {}
-                logger.info("Pairs EOD close result: %s", pairs_close)
-                pairs_status = self._pairs_portfolio.get_status()
 
-                # Warn on failed pair closes (Fix D)
-                pairs_failed = pairs_close.get("failed", 0)
-                if pairs_failed > 0:
-                    failed_names = ", ".join(
-                        p["pair_name"] for p in pairs_close.get("failed_pairs", [])
-                    )
-                    for fp in pairs_close.get("failed_pairs", []):
-                        logger.error(
-                            "EOD pairs close FAILED: %s — %s",
-                            fp["pair_name"],
-                            fp.get("reason", "unknown"),
-                        )
-                    if self._telegram:
-                        pairs_closed_count = pairs_close.get("closed", 0)
-                        pairs_total = pairs_closed_count + pairs_failed
-                        self._telegram.send_telegram(
-                            f"⚠️ EOD pairs close: {pairs_closed_count}/{pairs_total} pairs closed.\n"
-                            f"Failed to close: {failed_names}\n"
-                            f"Reason: price unavailable. Final P&L is incomplete."
-                        )
-
-                eod_context = build_eod_context(pairs_summary=self._fmt_pairs_summary(pairs_status))
+                eod_context = build_eod_context()
                 self._run_agent_iteration(
                     eod_context,
                     model=GEMINI_DECISION_MODEL,
@@ -733,23 +670,10 @@ class BlitzTrader:
                 )
                 if self._telegram:
                     pnl, pnl_pct = self._state.get_daily_pnl()
-                    pairs_pnl = pairs_close.get("total_pnl", pairs_status.get("net_pnl", 0.0))
-                    combined_pnl = pnl + pairs_pnl
-                    pairs_closed_count = pairs_close.get("closed", 0)
-                    pairs_total_count = pairs_closed_count + pairs_close.get("failed", 0)
-                    incomplete_note = (
-                        f"\n⚠️ P&L is incomplete — {pairs_close.get('failed', 0)} pair(s) could not be closed."
-                        if pairs_close.get("failed", 0) > 0
-                        else ""
-                    )
                     self._telegram.send_telegram(
                         f"EOD complete.\n"
-                        f"Futures — Trades: {self._state.get_state().get('trade_count', 0)} | "
-                        f"Realized P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)\n"
-                        f"Pairs — Closed: {pairs_closed_count}/{pairs_total_count} | "
-                        f"Realized P&L: ₹{pairs_pnl:+,.2f}\n"
-                        f"Combined P&L: ₹{combined_pnl:+,.2f}"
-                        f"{incomplete_note}"
+                        f"Trades: {self._state.get_state().get('trade_count', 0)} | "
+                        f"P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)"
                     )
                 if self._feed:
                     self._feed.stop()
@@ -819,9 +743,6 @@ class BlitzTrader:
                         chat_messages=chat_msgs,
                         state_manager=self._state,
                         order_execution=self._order_exec,
-                        pairs_summary=self._fmt_pairs_summary(
-                            self._pairs_portfolio.get_status()
-                        ),
                     )
                     self._run_agent_iteration(
                         context,
@@ -849,11 +770,6 @@ class BlitzTrader:
             # ── Wait for market open (only blocks scheduled analysis, not chat) ──
             market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
             if now < market_open_time:
-                # Run pairs scan once at PAIR_SCAN_TIME (08:30 IST)
-                scan_h, scan_m = map(int, PAIR_SCAN_TIME.split(":"))
-                scan_trigger = now.replace(hour=scan_h, minute=scan_m, second=0, microsecond=0)
-                if not self._pairs_scan_done and now >= scan_trigger:
-                    self._run_pairs_scan()
                 wait_secs = (market_open_time - now).total_seconds()
                 if (not hasattr(self, '_last_wait_log')
                         or (now - self._last_wait_log).total_seconds() >= 60):
@@ -875,10 +791,6 @@ class BlitzTrader:
                 logger.info("Market open — Telegram notified")
                 notifications_sent[market_open_key] = datetime.now(IST).isoformat()
                 self._state.update_state(notifications_sent=notifications_sent)
-
-            # ── Open pairs positions once at market open ──
-            if not self._pairs_opened:
-                self._open_pairs_positions()
 
             # ── Background scanner + deterministic execution: every 60 seconds ──
             if (
@@ -915,9 +827,6 @@ class BlitzTrader:
                         logger.debug(f"Scanner notes: {scan_result['notes']}")
                 except Exception:
                     logger.exception("Background scanner error (non-fatal)")
-
-                # Monitor pairs positions on the same cadence as futures scanner
-                self._monitor_pairs()
 
             # ── Check daily loss limit ──
             state = self._state.get_state()
@@ -1238,132 +1147,6 @@ class BlitzTrader:
             if self._telegram:
                 self._telegram.send_telegram(msg)
             raise RuntimeError(msg)
-
-    # ──────────────────────────────────────────────────────────
-    #   PAIRS LIFECYCLE HELPERS
-    # ──────────────────────────────────────────────────────────
-
-    def _run_pairs_scan(self) -> None:
-        """Run the pre-market pairs cointegration scan and store candidates."""
-        logger.info("=== PAIRS PRE-MARKET SCAN ===")
-        try:
-            candidates = self._pairs_scanner.run_scan()
-            self._pairs_candidates = candidates
-            self._pairs_scan_done = True
-            if candidates:
-                top = candidates[:3]
-                top_str = ", ".join(
-                    f"{c.x_symbol}/{c.y_symbol} (P={c.prob_profit:.1f}%, z={c.z_score:+.2f})"
-                    for c in top
-                )
-                msg = (
-                    f"Pairs scan complete: {len(candidates)} candidate(s) found.\n"
-                    f"Top: {top_str}"
-                )
-            else:
-                msg = (
-                    "Pairs scan complete: 0 candidates found. "
-                    "Possible causes: data download failed, filters removed all pairs, "
-                    "or NIFTY 50 universe had insufficient cointegration today."
-                )
-            logger.info(msg)
-            if self._telegram:
-                self._telegram.send_telegram(msg)
-        except Exception as exc:
-            self._pairs_scan_done = True  # prevent endless retries
-            self._pairs_candidates = []
-            msg = f"Pairs scan FAILED: {exc!s:.200}. Futures trading continues normally."
-            logger.exception("Pairs scan failed")
-            if self._telegram:
-                self._telegram.send_telegram(f"⚠️ {msg}")
-
-    def _open_pairs_positions(self) -> None:
-        """Open pairs positions at market open using stored scan candidates."""
-        self._pairs_opened = True  # set first to prevent re-entry on exception
-        if not self._pairs_candidates:
-            reason = (
-                "pairs scan found 0 candidates" if self._pairs_scan_done
-                else "pairs scan did not complete before market open"
-            )
-            logger.info("Skipping pairs open: %s", reason)
-            if self._telegram:
-                self._telegram.send_telegram(
-                    f"Pairs: no positions opened ({reason})."
-                )
-            return
-        logger.info("=== PAIRS MARKET OPEN — ALLOCATING ===")
-        try:
-            opened = self._pairs_portfolio.allocate_and_open(
-                self._shoonya, self._pairs_candidates
-            )
-            msg = (
-                f"Pairs opened: {len(opened)} pair(s) from "
-                f"{len(self._pairs_candidates)} candidates."
-            )
-            logger.info(msg)
-            if self._telegram:
-                self._telegram.send_telegram(msg)
-        except Exception as exc:
-            logger.exception("Pairs open failed")
-            if self._telegram:
-                self._telegram.send_telegram(
-                    f"⚠️ Pairs open failed: {exc!s:.200}. Futures trading unaffected."
-                )
-
-    def _monitor_pairs(self) -> None:
-        """Monitor open pairs positions; send Telegram for material events."""
-        if not self._pairs_opened:
-            return
-        try:
-            events = self._pairs_portfolio.monitor_open_positions(self._shoonya)
-            for ev in events:
-                t = ev.get("type", "")
-                pair = ev.get("pair", "?")
-                if t == "STOP_ARMED":
-                    self._telegram.send_telegram(
-                        f"Pairs stop armed — {pair}/{ev.get('leg')} "
-                        f"at ₹{ev.get('stop_price')} after {ev.get('profit_pct'):.2f}% profit"
-                    )
-                elif t == "STOP_MOVED":
-                    self._telegram.send_telegram(
-                        f"Pairs stop trailed — {pair}/{ev.get('leg')} "
-                        f"→ ₹{ev.get('stop_price')} at {ev.get('profit_pct'):.2f}% profit"
-                    )
-                elif t == "LEG_EXIT":
-                    self._telegram.send_telegram(
-                        f"Pairs leg closed — {pair}/{ev.get('leg')} "
-                        f"@ ₹{ev.get('exit_price')} | P&L ₹{ev.get('pnl'):+,.2f}"
-                    )
-                elif t == "PAIR_CLOSED":
-                    self._telegram.send_telegram(
-                        f"Pair fully closed — {pair} | P&L ₹{ev.get('pnl'):+,.2f}"
-                    )
-        except Exception:
-            logger.exception("Pairs monitoring error (non-fatal)")
-
-    @staticmethod
-    def _fmt_pairs_summary(status: dict) -> str:
-        """Format a one-paragraph pairs status string for Gemini context."""
-        open_pairs = status.get("open_pairs", 0)
-        realized = status.get("realized_pnl", 0.0)
-        unrealized = status.get("unrealized_pnl", 0.0)
-        net = status.get("net_pnl", 0.0)
-        capital = status.get("capital", 0.0)
-        positions = status.get("positions", [])
-        lines = [
-            f"Pairs capital: ₹{capital:,.0f} | "
-            f"Open pairs: {open_pairs} | "
-            f"Realized P&L: ₹{realized:+,.2f} | "
-            f"Unrealized P&L: ₹{unrealized:+,.2f} | "
-            f"Net P&L: ₹{net:+,.2f}"
-        ]
-        for pp in positions:
-            closed_tag = " [closed]" if pp.get("closed") else ""
-            lines.append(
-                f"  {pp['pair']} {pp['timeframe']}{closed_tag}: "
-                f"rPnL ₹{pp['realized_pnl']:+,.2f} uPnL ₹{pp['unrealized_pnl']:+,.2f}"
-            )
-        return "\n".join(lines)
 
     # ──────────────────────────────────────────────────────────
     #   SHUTDOWN

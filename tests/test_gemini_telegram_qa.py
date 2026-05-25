@@ -58,20 +58,6 @@ if "google.genai" not in sys.modules:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_pairs_portfolio():
-    pp = MagicMock()
-    pp.get_status.return_value = {
-        "net_pnl": 0.0,
-        "open_pairs": 0,
-        "positions": [],
-        "realized_pnl": 0.0,
-        "unrealized_pnl": 0.0,
-        "capital": 50_000.0,
-    }
-    pp.positions = []
-    return pp
-
-
 def _make_state_manager(pnl: float = 0.0, trade_count: int = 0):
     sm = MagicMock()
     sm.get_state.return_value = {
@@ -100,7 +86,6 @@ def _make_trader(pnl: float = 0.0):
     trader = _main.BlitzTrader.__new__(_main.BlitzTrader)
     trader._state = _make_state_manager(pnl)
     trader._order_exec = _make_order_exec()
-    trader._pairs_portfolio = _make_pairs_portfolio()
     trader._telegram = MagicMock()
     trader._telegram.send_telegram.return_value = {"status": "sent"}
     trader._feed = MagicMock()
@@ -225,34 +210,32 @@ class TestBuildChatContext:
             "build_chat_context must instruct Gemini to respond via send_telegram()"
         )
 
-    def test_chat_context_includes_pairs_summary_when_provided(self):
+    def test_chat_context_does_not_include_pairs_section(self):
+        """Futures-only runtime: build_chat_context must not include pairs summary."""
         from context_builder import build_chat_context
         state_manager = _make_state_manager()
         order_exec = _make_order_exec()
         ctx = build_chat_context(
-            chat_messages=[{"text": "pairs status?"}],
+            chat_messages=[{"text": "status?"}],
             state_manager=state_manager,
             order_execution=order_exec,
-            pairs_summary="Pairs capital: ₹50,000 | Open pairs: 2",
         )
-        assert "Pairs capital" in ctx, (
-            "build_chat_context must include pairs summary when provided"
+        assert "Pairs capital" not in ctx, (
+            "build_chat_context must not include pairs capital in futures-only runtime"
         )
 
-    def test_chat_context_notes_pairs_is_reporting_only(self):
-        """Gemini must not be told it can place or modify pairs orders."""
+    def test_chat_context_includes_futures_pnl(self):
+        """build_chat_context must include futures P&L."""
         from context_builder import build_chat_context
-        state_manager = _make_state_manager()
+        state_manager = _make_state_manager(pnl=500.0)
         order_exec = _make_order_exec()
         ctx = build_chat_context(
-            chat_messages=[{"text": "pairs?"}],
+            chat_messages=[{"text": "status?"}],
             state_manager=state_manager,
             order_execution=order_exec,
-            pairs_summary="Pairs capital: ₹50,000 | Open pairs: 1",
         )
-        ctx_lower = ctx.lower()
-        assert "reporting only" in ctx_lower or "do not place" in ctx_lower or "for reporting" in ctx_lower, (
-            "build_chat_context must tell Gemini that pairs state is for reporting only"
+        assert "P&L" in ctx or "500" in ctx, (
+            "build_chat_context must include futures P&L information"
         )
 
 
