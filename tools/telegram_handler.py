@@ -216,16 +216,17 @@ class TelegramHandler:
 
                     msg = update.get("message", {})
                     from_user = str(msg.get("from", {}).get("id", ""))
-                    text = msg.get("text", "").strip().lower()
+                    text = msg.get("text", "").strip()
+                    text_lower = text.lower()
 
                     # Only process from authorized user
                     if from_user != str(self._user_id):
-                        logger.warning(f"Ignored message from unauthorized user ID: '{from_user}'. Text: '{text}'")
+                        logger.warning(f"Ignored message from unauthorized user ID: '{from_user}'. Text: '{text_lower}'")
                         continue
 
                     # Accept all messages to enable free-form chat
                     self._command_queue.append({
-                        "command": text.split()[0] if text and text.startswith("/") else "",
+                        "command": text_lower.split()[0] if text_lower and text_lower.startswith("/") else "",
                         "text": text,
                         "timestamp": time.time(),
                     })

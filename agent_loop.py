@@ -118,6 +118,7 @@ class AgentLoop:
         # Start fresh each iteration
         self._history = []
         self._last_error = None
+        self._send_telegram_called = False
 
         tool_defs = self._registry.get_tool_definitions()
         gemini_tools = _build_gemini_tools(tool_defs)
@@ -199,6 +200,8 @@ class AgentLoop:
             # Execute function calls and build responses
             function_responses = []
             for fc in function_calls:
+                if fc.name == "send_telegram":
+                    self._send_telegram_called = True
                 tool_input = dict(fc.args) if fc.args else {}
                 result = self._registry.execute(
                     tool_name=fc.name,
@@ -270,6 +273,10 @@ class AgentLoop:
     def get_last_error(self) -> dict | None:
         """Return the last API failure metadata for caller-side circuit breakers."""
         return self._last_error
+
+    def was_send_telegram_called(self) -> bool:
+        """True if send_telegram was invoked as a tool in the most recent iteration."""
+        return self._send_telegram_called
 
     def _call_with_retry(
         self,

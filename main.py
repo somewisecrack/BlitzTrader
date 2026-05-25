@@ -823,13 +823,22 @@ class BlitzTrader:
                             self._pairs_portfolio.get_status()
                         ),
                     )
-                    self._run_agent_iteration(
+                    chat_response = self._run_agent_iteration(
                         context,
                         model=GEMINI_SCHEDULED_MODEL,
                         max_tokens=GEMINI_MAX_SCHEDULED_TOKENS,
                         max_tool_rounds=6,
                         phase="chat",
                     )
+                    # If Gemini replied with text but never called send_telegram, send the text directly.
+                    if (
+                        chat_response
+                        and chat_response.strip()
+                        and self._agent
+                        and not self._agent.was_send_telegram_called()
+                    ):
+                        logger.info("Gemini replied via text (no send_telegram call) — forwarding to Telegram")
+                        self._telegram.send_telegram(chat_response.strip())
                     # Detect Gemini 503/UNAVAILABLE and send deterministic fallback
                     last_err = self._agent.get_last_error() if self._agent else None
                     if last_err and last_err.get("kind") == "service_unavailable":
