@@ -1,13 +1,13 @@
 # BlitzTrader
 
-An autonomous intraday trading system for NSE index **futures** and **statistical arbitrage pairs**, deployed on Google Cloud Platform. All trade decisions are deterministic Python. Gemini is used only for post-market research and Telegram chat.
+An autonomous intraday trading system for NSE index **futures**, deployed on Google Cloud Platform. All trade decisions are deterministic Python. Gemini is used only for post-market research and Telegram chat.
 
 ## What it does
 
 - Runs every trading day via a systemd timer on a GCP VM (8:20 AM IST)
 - Logs into Shoonya (Finvasia) broker API and resolves front-month futures contracts at startup
 - **Futures trading**: Scans, selects, executes, and manages intraday index futures trades (₹10L capital)
-- **Pairs trading**: Detects cointegrated NIFTY 50 pairs, monitors z-score mean-reversion, scales positions with Kalman hedge ratios (₹5L base × 2x leverage = ₹10L gross)
+- **Three-stage entry gate**: Python hard guardrails → Gemma local observer (async, never blocks) → Gemini gatekeeper (5s timeout, APPROVE/REJECT only)
 - **Self-improvement loop**: Post-market script pipeline proposes, backtests, and promotes filter hypotheses — promoted filters are loaded automatically next session
 - Sends real-time alerts and responds to commands via Telegram bot
 - Gemini used only for: free-form Telegram chat, EOD summaries, and post-market hypothesis proposals
@@ -22,19 +22,18 @@ systemd timer (8:20 AM IST, Mon–Fri)
     ├── Startup
     │     ├── Login + resolve futures tokens
     │     ├── Load cross-session memory
-    │     ├── Load promoted futures filters (wiki/promoted_filters/)
-    │     └── Pairs scanner (yfinance + Johansen cointegration)
+    │     └── Load promoted futures filters (wiki/promoted_filters/)
     │
     ├── Trading loop (every 60s)  ← Python-only, no LLM
     │     ├── Futures signals    — VP strategy scanner + filter application
-    │     ├── Pairs signals      — z-score monitoring + trailing stops
-    │     ├── OrderExecution     — simultaneous futures + pairs, RMS margin checks
+    │     ├── Three-stage gate   — Python review → Gemma observer → Gemini gatekeeper
+    │     ├── OrderExecution     — RMS margin checks, virtual fill
     │     ├── WebSocket feed     — live Shoonya price stream
     │     └── Telegram polling   — commands + alerts
     │
     └── EOD phase
           ├── Force-close all positions (3:15 PM IST)
-          ├── Reconcile P&L (futures + pairs independently)
+          ├── Reconcile P&L
           ├── Write trading journal
           └── Gemini EOD summary
 
@@ -52,13 +51,13 @@ scripts/evaluate_futures_day.py
 scripts/propose_futures_hypotheses.py
     │   Sends compact review to Gemini (one attempt, post-market only)
     │   Gemini proposes ≤3 candidate futures filter hypotheses (strict JSON)
-    │   Python validates schema, rejects pairs/equity/invented-strategy content
+    │   Python validates schema, rejects equity/invented-strategy content
     │   Python enforces: strategy must appear in review AND be in SUPPORTED_STRATEGIES
     │   On any failure → writes audit artifact to wiki/hypotheses/no_proposals/
     │   Hypotheses written to wiki/hypotheses/HYP-YYYYMMDD-NNN.json
     ▼
 scripts/backtest_futures_hypothesis.py
-    │   Downloads OHLCV from yfinance only (^NSEI / ^NSEBANK / NIFTY_FIN_SERVICE.NS)
+    │   Downloads OHLCV from yfinance only (^NSEI / ^NSEBANK)
     │   Runs real VP strategy signals via tools/futures_strategy_engine.py
     │   Simulates filter: baseline vs filtered trade stats
     │   Writes result to wiki/backtest_results/HYP-*.json
@@ -71,16 +70,35 @@ scripts/promote_futures_hypothesis.py
 next live session startup → main.py loads wiki/promoted_filters/ automatically
 ```
 
-## Gemini boundaries
+## Entry gate invariants
 
-| Context | Gemini used? |
-|---|---|
-| Live signal approval / rejection | **Never** |
-| Live trade placement or management | **Never** |
-| Writing promoted filters directly | **Never** |
-| Post-market hypothesis proposals | Yes — one bounded call per day |
-| Telegram free-form chat | Yes |
-| EOD summary / reflection | Yes |
+```
+Python hard guardrails  ─── reject ──▶  SKIP (never reaches LLM gate)
+        │ pass
+        ▼
+Gemma local observer ──── fire-and-forget (never blocks, never decides)
+        │ (async)
+        ▼
+Gemini gatekeeper (5s timeout)
+        │ APPROVE                   │ REJECT / timeout / error
+        ▼                           ▼
+  place order                   discard signal
+```
+
+- **Gemma** is observer-only: its opinion is journaled and included in Telegram notifications. It cannot approve or reject trades.
+- **Gemini** is fail-closed: any error, timeout, or malformed response → signal rejected.
+- **Python** owns ALL exits: stop-loss, trailing stop, target, EOD force-close, manual `/abort`.
+
+## Gemini / Gemma boundaries
+
+| Context | Gemini | Gemma |
+|---|---|---|
+| Live signal approval / rejection | **Never** | **Never** |
+| Live trade placement or management | **Never** | **Never** |
+| Entry gate decision | APPROVE/REJECT only (gatekeeper) | Observer only (logged) |
+| Post-market hypothesis proposals | Yes — one bounded call per day | — |
+| Telegram free-form chat | Yes | — |
+| EOD summary / reflection | Yes | — |
 
 ## Key features
 
@@ -90,23 +108,28 @@ next live session startup → main.py loads wiki/promoted_filters/ automatically
 | Engine | Python-only (no LLM in decisions) |
 | Capital | ₹10,00,000 virtual |
 | Risk | 1 lot/trade, 5% per trade (₹50k max), 5% daily stop |
-| Instruments | NIFTY, BANKNIFTY, FINNIFTY futures (front-month) |
-| Position caps | Max 3 open; no pyramiding |
-| Daily trade cap | Max 10 entries |
+| Instruments | NIFTY, BANKNIFTY futures (front-month) |
+| Position caps | Max 2 open; no pyramiding |
 | Execution guard | CE/PE hard-blocked; bare logical names hard-blocked |
 | Promoted filters | Loaded from `wiki/promoted_filters/` at startup; applied in `_review_signal_python()` |
 
-### Pairs Trading (Statistical Arbitrage)
+### Gemma Local Observer
 | Feature | Detail |
 |---|---|
-| Capital | ₹5,00,000 base (2x leverage = ₹10,00,000 gross) |
-| Universe | NIFTY 50 (yfinance; 2,450 pairs tested daily) |
-| Cointegration | Johansen test + CADF validation |
-| Signals | Z-score mean-reversion (abs(z) > 2.0) + Hurst exponent < 0.45 |
-| Position sizing | Up to 10 pairs concurrent, ₹1,00,000 gross per pair |
-| Hedging | Kalman filter beta for leg ratio balancing |
-| Exits | Z-score targets (±1.0) + 0.5% per-leg trailing stop + EOD forced close |
-| Data source | yfinance only — no direct Yahoo HTTP fallback |
+| Provider | Local Ollama HTTP API (`/api/generate`) — no cloud SDK |
+| Default | DISABLED (VM: 958MB RAM, no swap — insufficient for any local model) |
+| Enable | Set `GEMMA_OBSERVER_ENABLED=true`, install Ollama, pull `gemma3:1b` |
+| Timeout | 3s (configurable via `GEMMA_OBSERVER_TIMEOUT_SECONDS`) |
+| Output | `alignment`: STRONG/WEAK/CONFLICTED/UNAVAILABLE — journaled only |
+
+### Gemini Gatekeeper
+| Feature | Detail |
+|---|---|
+| Model | `gemini-2.5-flash-lite` (configurable) |
+| Timeout | 5s hard limit |
+| Required fields | `decision`, `confidence` [0–1], `reason`, `risk_notes`, `conditions_checked` (list), `must_not_override_python_guardrails` (must be `true`) |
+| Forbidden fields | `stop_loss`, `target`, `quantity`, `leverage`, `capital`, `lot_size` — response rejected if present |
+| Fail-closed | Any error, timeout, or validation failure → signal rejected |
 
 ### Futures Self-Improvement Loop
 | Feature | Detail |
@@ -120,7 +143,7 @@ next live session startup → main.py loads wiki/promoted_filters/ automatically
 
 ## Futures Strategies
 
-All intraday, executed on NIFTY / BANKNIFTY / FINNIFTY futures:
+All intraday, executed on NIFTY / BANKNIFTY futures:
 
 | Code | Name | Type |
 |---|---|---|
@@ -158,13 +181,12 @@ BlitzTrader/
 ├── agent_loop.py                — Gemini multi-turn chat (Telegram + EOD only)
 ├── config.py                    — all tunable constants and env vars
 ├── context_builder.py           — Gemini prompt assembly helpers
-├── pairs/
-│   ├── scanner.py               — yfinance data + Johansen scan + ranking
-│   └── portfolio.py             — position management, sizing, trailing stops
 ├── tools/
 │   ├── futures_filter_loader.py — load & apply promoted filters at runtime
 │   ├── futures_hypothesis.py    — hypothesis/backtest schema helpers
 │   ├── futures_strategy_engine.py — pure-Python VP signal scanner (no broker dep)
+│   ├── gemini_gatekeeper.py     — entry gate: APPROVE/REJECT with 5s timeout
+│   ├── gemma_observer.py        — async local observer via Ollama (disabled by default)
 │   ├── market_data.py           — live signal scanner (broker-connected)
 │   ├── order_execution.py       — Shoonya order placement + RMS checks
 │   └── ...
@@ -173,7 +195,7 @@ BlitzTrader/
 │   ├── propose_futures_hypotheses.py — Gemini hypothesis proposer
 │   ├── backtest_futures_hypothesis.py — yfinance backtest
 │   └── promote_futures_hypothesis.py  — promote passing filters
-├── tests/                       — 218 tests, all passing
+├── tests/                       — 628 tests, 4 skipped
 └── wiki/                        — research artifacts (see above)
 ```
 
@@ -215,7 +237,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now blitztrader.timer
 ```
 
-The timer fires at **8:20 AM IST, Monday–Friday** so the pre-market pairs scan can run before the 9:15 AM open.
+The timer fires at **8:20 AM IST, Monday–Friday**, giving time for startup before the 9:15 AM market open.
 
 ### Run the post-market pipeline
 
@@ -246,8 +268,18 @@ GEMINI_API_KEY
 
 Optional (tune Gemini model/cost):
 ```
-GEMINI_MODEL               # default: gemini-2.5-flash
-GEMINI_SCHEDULED_MODEL     # default: gemini-2.5-flash-lite  (used by proposal script)
+GEMINI_MODEL                        # default: gemini-2.5-flash
+GEMINI_GATEKEEPER_MODEL             # default: gemini-2.5-flash-lite
+GEMINI_GATEKEEPER_TIMEOUT_SECONDS   # default: 5
+GEMINI_SCHEDULED_MODEL              # default: gemini-2.5-flash-lite (proposal script)
+```
+
+Optional (Gemma local observer — disabled by default):
+```
+GEMMA_OBSERVER_ENABLED              # default: false
+GEMMA_OBSERVER_URL                  # default: http://localhost:11434
+GEMMA_OBSERVER_MODEL                # default: gemma3:1b
+GEMMA_OBSERVER_TIMEOUT_SECONDS      # default: 3
 ```
 
 ## Telegram commands
@@ -260,23 +292,32 @@ GEMINI_SCHEDULED_MODEL     # default: gemini-2.5-flash-lite  (used by proposal s
 | `/abort` | Emergency stop — close all positions immediately |
 | _(any message)_ | Gemini responds conversationally |
 
+## Security invariants
+
+- **No market-data fallbacks**: backtesting uses yfinance only; live prices come from Shoonya feed exclusively.
+- **No LLM overrides**: Gemini and Gemma cannot change stop-loss, target, quantity, capital, or leverage.
+- **Fail-closed gatekeeper**: if Gemini is unavailable, times out, or returns invalid schema → signal rejected.
+- **Gemma never decides**: observer output is journaled; it has no path to the order placement code.
+- **Python owns all exits**: SL, trailing stop, target, EOD force-close, and manual abort are all deterministic Python.
+
 ## Tests
 
 ```bash
 python3 -m pytest tests/ -q
-# 218 passed
+# 628 passed, 4 skipped
 ```
 
 Key test files:
 
 | File | Covers |
 |---|---|
+| `test_gemini_gatekeeper.py` | Schema validation, forbidden fields, confidence range, guardrail ack |
+| `test_gemma_observer.py` | Ollama HTTP mock, disabled mode, error paths, no-decision invariants |
+| `test_gatekeeper_entry_flow.py` | Three-stage gate integration, Gemma fire-and-forget ordering |
 | `test_futures_wiki.py` | Hypothesis/backtest schema validation, journal parsing |
 | `test_futures_filter_loader.py` | Filter loading, application, JSON-only loading |
 | `test_futures_hypothesis_backtest.py` | Script importability, main.py wiring, strategy engine |
 | `test_propose_futures_hypotheses.py` | Gemini SDK mock, no-proposals artifact, strategy gate |
-| `test_pairs_integration.py` | Symbol normalisation, deduplication, capital allocation, trailing stops |
-| `test_pairs_wiring.py` | Config constants, disk guard, zero-candidate diagnostic, combined status |
 
 ## Disclaimer
 

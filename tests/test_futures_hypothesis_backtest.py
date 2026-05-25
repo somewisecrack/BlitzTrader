@@ -278,28 +278,6 @@ class TestChatPathDoesNotImportFilterLoader:
 
 
 # ===========================================================================
-# Pairs verification (read-only checks)
-# ===========================================================================
-
-class TestPairsFilesUnchanged:
-    """
-    Guard tests that previously ensured pairs/ files did not accidentally
-    import futures hypothesis tools.  The pairs/ module has been archived to
-    _archived_pairs/ as part of the futures-only refactor, so these guards
-    are no longer applicable.  Tests are kept as skips to preserve history.
-    """
-
-    def test_pairs_scanner_unchanged(self):
-        pytest.skip("pairs/scanner.py archived to _archived_pairs/ — guard no longer needed")
-
-    def test_pairs_portfolio_unchanged(self):
-        pytest.skip("pairs/portfolio.py archived to _archived_pairs/ — guard no longer needed")
-
-    def test_pairs_init_unchanged(self):
-        pytest.skip("pairs/__init__.py archived to _archived_pairs/ — guard no longer needed")
-
-
-# ===========================================================================
 # Strategy engine tests (Agent C: tools/futures_strategy_engine.py)
 # ===========================================================================
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Start BlitzTrader at 8:20 AM IST (before 08:30 pairs scan)
+Description=Start BlitzTrader at 8:20 AM IST (before 09:15 market open)
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 08:20:00 Asia/Kolkata
