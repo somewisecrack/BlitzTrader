@@ -434,3 +434,77 @@ def _get_market_phase(now: datetime) -> str:
         return "Final hour — no new entries after 3:05 PM"
     else:
         return "Market closed — EOD sequence"
+
+
+# ──────────────────────────────────────────────────────────────────
+#   GATEKEEPER CONTEXT
+# ──────────────────────────────────────────────────────────────────
+
+def build_gatekeeper_context(signal: dict, indicators: dict) -> str:
+    """
+    Build a compact, fact-dense context string for the Gemini entry gatekeeper.
+
+    Only includes Python-verified indicator data.  Never constructs or infers
+    market data from external sources — data comes directly from the scanner.
+
+    Args:
+        signal:     The candidate signal dict (symbol, strategy, direction, etc.)
+        indicators: Output from market_data.get_indicators() — already validated by Python
+
+    Returns:
+        A plain-text summary of indicators for the gatekeeper prompt.
+    """
+    symbol    = signal.get("symbol", "?")
+    interval  = signal.get("interval", "?")
+    direction = signal.get("direction", "?")
+
+    price         = indicators.get("current_price")
+    ema20         = indicators.get("ema20")
+    adx14         = indicators.get("adx14")
+    rsi14         = indicators.get("rsi14")
+    avg_vol20     = float(indicators.get("avg_volume_20") or 0)
+    ema_bull      = bool(indicators.get("ema_stacked_bull"))
+    ema_bear      = bool(indicators.get("ema_stacked_bear"))
+    vwap          = indicators.get("vwap")
+    atr14         = indicators.get("atr14")
+    bb_upper      = indicators.get("bb_upper")
+    bb_lower      = indicators.get("bb_lower")
+
+    lines = [
+        f"Instrument: {symbol} | Timeframe: {interval}m | Signal direction: {direction}",
+    ]
+    if price is not None:
+        lines.append(f"Current price: ₹{price:.2f}")
+    if ema20 is not None:
+        lines.append(f"EMA20: {ema20:.2f}  (price {'above' if price and price > ema20 else 'below'} EMA20)")
+    if adx14 is not None:
+        trend_str = "strong trend" if adx14 >= 25 else ("moderate" if adx14 >= 18 else "weak/ranging")
+        lines.append(f"ADX14: {adx14:.1f} ({trend_str})")
+    if rsi14 is not None:
+        rsi_str = "overbought" if rsi14 > 70 else ("oversold" if rsi14 < 30 else "neutral")
+        lines.append(f"RSI14: {rsi14:.1f} ({rsi_str})")
+    if avg_vol20 > 0:
+        lines.append(f"Avg volume 20: {avg_vol20:.0f}")
+    lines.append(
+        f"EMA stack: {'bullish' if ema_bull else 'not bullish'} | "
+        f"{'bearish' if ema_bear else 'not bearish'}"
+    )
+    if vwap is not None:
+        lines.append(f"VWAP: {vwap:.2f}  (price {'above' if price and price > vwap else 'below'} VWAP)")
+    if atr14 is not None:
+        lines.append(f"ATR14: {atr14:.2f}")
+    if bb_upper is not None and bb_lower is not None:
+        lines.append(f"Bollinger Bands: {bb_lower:.2f} – {bb_upper:.2f}")
+
+    stop_loss = signal.get("stop_loss")
+    target = signal.get("target")
+    entry_ref = signal.get("entry_reference")
+    if entry_ref and stop_loss and target:
+        risk = abs(entry_ref - stop_loss)
+        reward = abs(target - entry_ref)
+        rr = reward / risk if risk > 0 else 0
+        lines.append(
+            f"R:R = {rr:.1f}:1  (risk ₹{risk:.2f}, reward ₹{reward:.2f})"
+        )
+
+    return "\n".join(lines)

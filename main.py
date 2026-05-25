@@ -7,9 +7,13 @@ This is the entry point. It manages the full trading day:
   3:15 PM  → Force EOD sequence, update memory
   3:25 PM  → Cleanup and exit
 
-Gemini is used only for:
+Gemini is used for:
+  - live entry gatekeeper (5-second timeout, structured JSON, approve/reject only)
   - free-form Telegram chat on demand
   - end-of-day summarization/reflection
+
+Gemma is used as a non-blocking observer (never in decision path):
+  - submits async opinion on every candidate signal for journaling
 """
 import logging
 import shutil
@@ -31,6 +35,10 @@ from config import (
     GEMINI_MAX_DECISION_TOKENS,
     GEMINI_MAX_SCHEDULED_TOKENS,
     GEMINI_SCHEDULED_MODEL,
+    GEMINI_GATEKEEPER_MODEL,
+    GEMINI_GATEKEEPER_TIMEOUT_SECONDS,
+    GEMMA_OBSERVER_MODEL,
+    GEMMA_OBSERVER_TIMEOUT_SECONDS,
     DATA_EXPORTS_DIR,
     GOOGLE_DRIVE_UPLOAD_DIR,
     LIVE_DRIVE_MODE,
@@ -81,6 +89,8 @@ from tools.registry import ToolRegistry
 from tools.market_calendar import get_market_holiday_name, is_nse_trading_day
 from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
+from tools.gemini_gatekeeper import GeminiGatekeeper
+from tools.gemma_observer import GemmaObserver
 from tools.position_serial import (
     build_status_message,
     save_position_index,
@@ -91,6 +101,7 @@ from context_builder import (
     SYSTEM_PROMPT,
     build_chat_context,
     build_eod_context,
+    build_gatekeeper_context,
 )
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -122,6 +133,12 @@ class BlitzTrader:
         self._llm_disabled_notified = False
         # Promoted futures filters (loaded from wiki/promoted_filters at startup)
         self._promoted_futures_filters: list = []
+        # Gemini entry gatekeeper (approve/reject every Python-passed signal)
+        self._gatekeeper: GeminiGatekeeper | None = None
+        # Gemma observer (async, non-blocking, never in decision path)
+        self._gemma: GemmaObserver | None = None
+        # Per-signal Gemma opinions keyed by signal_id (for Telegram notifications)
+        self._gemma_opinions: dict[str, dict] = {}
 
     def run(self):
         """Run the full trading session."""
@@ -408,6 +425,36 @@ class BlitzTrader:
         )
         # Load promoted futures filters from wiki/ (non-fatal if missing)
         self._promoted_futures_filters = self._load_promoted_futures_filters()
+
+        # Wire Gemini entry gatekeeper (APPROVE/REJECT after Python guardrails pass)
+        if GEMINI_API_KEY:
+            self._gatekeeper = GeminiGatekeeper(
+                api_key=GEMINI_API_KEY,
+                model=GEMINI_GATEKEEPER_MODEL,
+                timeout_seconds=GEMINI_GATEKEEPER_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "Gemini gatekeeper wired: model=%s timeout=%ds",
+                GEMINI_GATEKEEPER_MODEL, GEMINI_GATEKEEPER_TIMEOUT_SECONDS,
+            )
+        else:
+            logger.warning(
+                "GEMINI_API_KEY not set — gatekeeper disabled, "
+                "ALL Python-approved signals will be auto-REJECTED"
+            )
+
+        # Wire Gemma observer (async, non-blocking, never in decision path)
+        if GEMINI_API_KEY:
+            self._gemma = GemmaObserver(
+                api_key=GEMINI_API_KEY,
+                model=GEMMA_OBSERVER_MODEL,
+                timeout_seconds=GEMMA_OBSERVER_TIMEOUT_SECONDS,
+                callback=self._on_gemma_opinion,
+            )
+            logger.info(
+                "Gemma observer wired: model=%s timeout=%ds",
+                GEMMA_OBSERVER_MODEL, GEMMA_OBSERVER_TIMEOUT_SECONDS,
+            )
 
         logger.info("All components initialized successfully")
 
@@ -950,57 +997,133 @@ class BlitzTrader:
 
     def _process_tradeable_signals_python(self, signals: list[dict]) -> None:
         """
-        Deterministically review and execute scanner signals in Python.
+        Entry flow for scanner-detected signals that passed hard guardrails.
 
-        Gemini is not consulted here. The scanner plus these hard checks are the
-        live decision engine.
+        Three-stage gate (invariants NEVER violated):
+          1. Python hard review   — deterministic indicator/risk checks (no LLM)
+          2. Gemma observer       — async, non-blocking, NEVER blocks or approves
+          3. Gemini gatekeeper    — 5-second timeout, structured JSON; timeout/error = REJECT
+
+        Only after all three stages pass does Python place the order.
+        Exits (SL/trailing/target/EOD/manual) are always deterministic Python-only.
         """
         for signal in signals:
             execution_symbol = signal.get("execution_symbol") or signal.get("symbol", "")
+            strategy = signal.get("strategy", "")
+            symbol = signal.get("symbol", "")
+            direction = signal.get("direction", "")
             try:
-                approved, context_summary, reason = self._review_signal_python(signal)
+                # ── Stage 1: Python hard review ──────────────────────────────
+                approved, context_summary, python_reason = self._review_signal_python(signal)
                 if not approved:
                     self._journal.log_decision(
                         action="REJECT",
                         symbol=execution_symbol,
-                        strategy_applied=signal.get("strategy", ""),
+                        strategy_applied=strategy,
                         market_context_summary=context_summary,
-                        reason=reason,
+                        reason=python_reason,
                     )
                     continue
 
+                # ── Stage 2: Gemma observer (async, fire-and-forget) ──────────
+                # Build indicator context once — reused for both Gemma and gatekeeper
+                signal_id = f"{symbol}_{strategy}_{direction}_{int(time.time())}"
+                indicators = self._market_data.get_indicators(
+                    symbol=symbol,
+                    interval=str(signal.get("interval", "")),
+                )
+                gk_context = build_gatekeeper_context(
+                    signal, indicators if isinstance(indicators, dict) else {}
+                )
+                if self._gemma:
+                    # Store signal_id so the callback can attach the opinion
+                    signal["_signal_id"] = signal_id
+                    self._gemma.submit(signal, gk_context)
+
+                # ── Stage 3: Gemini gatekeeper (APPROVE / REJECT, 5-second SLA) ──
+                if not self._gatekeeper:
+                    # No API key configured — reject all signals
+                    self._journal.log_decision(
+                        action="REJECT",
+                        symbol=execution_symbol,
+                        strategy_applied=strategy,
+                        market_context_summary=context_summary,
+                        reason="Gemini gatekeeper not configured (missing API key) — auto-REJECT",
+                    )
+                    continue
+
+                gate_result = self._gatekeeper.evaluate(signal, gk_context)
+                gate_decision = gate_result.get("decision", "REJECT")
+                gate_reason = gate_result.get("reason", "")
+                gate_error = gate_result.get("gatekeeper_error")
+                gate_confidence = gate_result.get("confidence", 0.0)
+                gate_conditions = gate_result.get("conditions_checked", [])
+                gate_risk_notes = gate_result.get("risk_notes", "")
+
+                if not gate_result.get("approved"):
+                    reject_reason = (
+                        f"Gemini gatekeeper REJECT ({gate_confidence:.0%}): {gate_reason}"
+                    )
+                    if gate_error:
+                        reject_reason = f"Gemini gatekeeper auto-REJECT: {gate_error}"
+                    self._journal.log_decision(
+                        action="REJECT",
+                        symbol=execution_symbol,
+                        strategy_applied=strategy,
+                        market_context_summary=context_summary,
+                        reason=reject_reason,
+                    )
+                    logger.info(
+                        "Gatekeeper rejected %s %s %s — %s",
+                        symbol, strategy, direction, reject_reason,
+                    )
+                    continue
+
+                # ── Place order (Python-controlled) ──────────────────────────
                 quantity = signal.get("lot_size") or self._active_tokens.get(
-                    self._logical_instrument(signal.get("symbol", "")),
+                    self._logical_instrument(symbol),
                     {},
                 ).get("lot_size")
                 result = self._order_exec.place_virtual_order(
                     symbol=execution_symbol,
-                    direction=signal.get("direction", "").upper(),
+                    direction=direction.upper(),
                     quantity=quantity,
                     order_type="MARKET",
                     stop_loss=signal.get("stop_loss"),
                     target=signal.get("target"),
-                    strategy=signal.get("strategy", ""),
+                    strategy=strategy,
                 )
                 status = str(result.get("status", "")).upper()
                 if status in {"FILLED", "PENDING"}:
-                    action = "ENTER_LONG" if signal.get("direction", "").upper() == "BUY" else "ENTER_SHORT"
+                    action = "ENTER_LONG" if direction.upper() == "BUY" else "ENTER_SHORT"
                     fill_price = result.get("fill_price")
-                    fill_note = f"Python-approved scanner signal. {reason}"
+                    fill_note = (
+                        f"Python+Gemini approved {strategy} {direction} on {symbol}. "
+                        f"Gatekeeper: {gate_reason} (confidence {gate_confidence:.0%}). "
+                        f"Python: {python_reason}."
+                    )
                     if fill_price is not None:
                         fill_note += f" Fill ₹{fill_price:.2f}."
                     self._journal.log_decision(
                         action=action,
                         symbol=execution_symbol,
-                        strategy_applied=signal.get("strategy", ""),
+                        strategy_applied=strategy,
                         market_context_summary=context_summary,
                         reason=fill_note,
+                    )
+                    # Send enriched Telegram notification
+                    self._notify_entry(
+                        signal=signal,
+                        fill_price=fill_price,
+                        gate_result=gate_result,
+                        python_reason=python_reason,
+                        signal_id=signal_id,
                     )
                 else:
                     self._journal.log_decision(
                         action="REJECT",
                         symbol=execution_symbol,
-                        strategy_applied=signal.get("strategy", ""),
+                        strategy_applied=strategy,
                         market_context_summary=context_summary,
                         reason=result.get("error") or result.get("message") or "Order rejected by execution layer.",
                     )
@@ -1014,9 +1137,86 @@ class BlitzTrader:
                 self._journal.log_decision(
                     action="REJECT",
                     symbol=execution_symbol,
-                    strategy_applied=signal.get("strategy", ""),
+                    strategy_applied=strategy,
                     reason=f"Python execution error: {exc}",
                 )
+
+    def _on_gemma_opinion(self, signal: dict, opinion: dict) -> None:
+        """
+        Callback invoked by GemmaObserver daemon thread when Gemma responds.
+
+        INVARIANT: This callback NEVER affects trade decisions.
+        It records the opinion for journaling and deferred Telegram messages.
+        """
+        signal_id = signal.get("_signal_id", "")
+        if signal_id:
+            self._gemma_opinions[signal_id] = opinion
+        symbol = signal.get("symbol", "?")
+        strategy = signal.get("strategy", "?")
+        if not opinion.get("gemma_error"):
+            logger.info(
+                "Gemma observer recorded: %s %s → %s (%.0f%%) — %s",
+                symbol, strategy,
+                opinion.get("alignment", "?"),
+                float(opinion.get("confidence", 0)) * 100,
+                opinion.get("key_observation", ""),
+            )
+
+    def _notify_entry(
+        self,
+        signal: dict,
+        fill_price,
+        gate_result: dict,
+        python_reason: str,
+        signal_id: str,
+    ) -> None:
+        """
+        Send an enriched Telegram entry notification that includes Gemini and Gemma context.
+        """
+        symbol = signal.get("symbol", "?")
+        strategy = signal.get("strategy", "?")
+        direction = signal.get("direction", "?")
+        stop_loss = signal.get("stop_loss")
+        target = signal.get("target")
+
+        gate_confidence = gate_result.get("confidence", 0.0)
+        gate_reason = gate_result.get("reason", "")
+        gate_conditions = gate_result.get("conditions_checked", [])
+        gate_risk_notes = gate_result.get("risk_notes", "")
+
+        # Try to include the Gemma opinion if it arrived in time (best-effort)
+        gemma = self._gemma_opinions.get(signal_id, {})
+        gemma_line = ""
+        if gemma and not gemma.get("gemma_error"):
+            gemma_line = (
+                f"\n🔬 **Gemma**: {gemma.get('alignment','?')} "
+                f"({gemma.get('confidence', 0):.0%}) — "
+                f"{gemma.get('key_observation', '')}"
+            )
+
+        price_str = f"₹{fill_price:.2f}" if fill_price is not None else "MARKET"
+        sl_str = f"₹{stop_loss:.2f}" if stop_loss is not None else "—"
+        tgt_str = f"₹{target:.2f}" if target is not None else "—"
+
+        conditions_str = ""
+        if gate_conditions:
+            conditions_str = "\n✔ " + "\n✔ ".join(gate_conditions[:4])
+
+        msg = (
+            f"🚀 **ENTRY** {direction} {symbol} @ {price_str}\n"
+            f"Strategy: {strategy}\n"
+            f"SL: {sl_str}  |  Target: {tgt_str}\n"
+            f"\n🛡 **Gemini** ({gate_confidence:.0%}): {gate_reason}"
+            f"{conditions_str}"
+        )
+        if gate_risk_notes:
+            msg += f"\n⚠ Risk note: {gate_risk_notes}"
+        msg += gemma_line
+
+        try:
+            self._telegram.send_telegram(msg)
+        except Exception:
+            logger.exception("Failed to send entry Telegram notification")
 
     def _review_signal_python(self, signal: dict) -> tuple[bool, str, str]:
         """

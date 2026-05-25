@@ -1,7 +1,11 @@
 """
 tests/test_event_driven_gatekeeper.py
 -------------------------------------
-Proves Python is the live decision engine for signal execution.
+Proves Python hard guardrails run BEFORE the Gemini gatekeeper.
+
+Python _filter_tradeable_signals() and _review_signal_python() are the
+deterministic first gate.  If Python rejects, Gemini is never called.
+See test_gatekeeper_entry_flow.py for the full three-stage gate tests.
 """
 import os
 import sys

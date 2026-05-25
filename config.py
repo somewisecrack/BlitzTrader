@@ -115,6 +115,14 @@ GEMINI_MAX_DECISION_TOKENS = _optional_int_env("GEMINI_MAX_DECISION_TOKENS", 204
 GEMINI_MAX_SCHEDULED_TOKENS = _optional_int_env("GEMINI_MAX_SCHEDULED_TOKENS", 768)
 GEMINI_API_TIMEOUT_SECONDS = _optional_int_env("GEMINI_API_TIMEOUT_SECONDS", 45)
 
+# Entry gatekeeper — strict timeout, lightweight model
+GEMINI_GATEKEEPER_MODEL = _optional_env("GEMINI_GATEKEEPER_MODEL", "gemini-2.5-flash-lite")
+GEMINI_GATEKEEPER_TIMEOUT_SECONDS = _optional_int_env("GEMINI_GATEKEEPER_TIMEOUT_SECONDS", 5)
+
+# Gemma observer — async, non-blocking; uses same API key, lighter model
+GEMMA_OBSERVER_MODEL = _optional_env("GEMMA_OBSERVER_MODEL", "gemma-3-4b-it")
+GEMMA_OBSERVER_TIMEOUT_SECONDS = _optional_int_env("GEMMA_OBSERVER_TIMEOUT_SECONDS", 15)
+
 # ──────────────────────────────────────────────────────────────
 #   DATA EXPORT / GOOGLE DRIVE
 # ──────────────────────────────────────────────────────────────
