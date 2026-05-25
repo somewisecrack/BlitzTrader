@@ -37,6 +37,8 @@ from config import (
     GEMINI_SCHEDULED_MODEL,
     GEMINI_GATEKEEPER_MODEL,
     GEMINI_GATEKEEPER_TIMEOUT_SECONDS,
+    GEMMA_OBSERVER_ENABLED,
+    GEMMA_OBSERVER_URL,
     GEMMA_OBSERVER_MODEL,
     GEMMA_OBSERVER_TIMEOUT_SECONDS,
     DATA_EXPORTS_DIR,
@@ -444,16 +446,23 @@ class BlitzTrader:
             )
 
         # Wire Gemma observer (async, non-blocking, never in decision path)
-        if GEMINI_API_KEY:
-            self._gemma = GemmaObserver(
-                api_key=GEMINI_API_KEY,
-                model=GEMMA_OBSERVER_MODEL,
-                timeout_seconds=GEMMA_OBSERVER_TIMEOUT_SECONDS,
-                callback=self._on_gemma_opinion,
-            )
+        # Uses local Ollama — NOT the Google API. Disabled by default on resource-constrained VMs.
+        self._gemma = GemmaObserver(
+            enabled=GEMMA_OBSERVER_ENABLED,
+            url=GEMMA_OBSERVER_URL,
+            model=GEMMA_OBSERVER_MODEL,
+            timeout_seconds=GEMMA_OBSERVER_TIMEOUT_SECONDS,
+            callback=self._on_gemma_opinion,
+        )
+        if GEMMA_OBSERVER_ENABLED:
             logger.info(
-                "Gemma observer wired: model=%s timeout=%ds",
-                GEMMA_OBSERVER_MODEL, GEMMA_OBSERVER_TIMEOUT_SECONDS,
+                "Gemma observer ENABLED: url=%s model=%s timeout=%ds",
+                GEMMA_OBSERVER_URL, GEMMA_OBSERVER_MODEL, GEMMA_OBSERVER_TIMEOUT_SECONDS,
+            )
+        else:
+            logger.info(
+                "Gemma observer DISABLED (GEMMA_OBSERVER_ENABLED=false). "
+                "Opinions recorded as UNAVAILABLE. Trading unaffected."
             )
 
         logger.info("All components initialized successfully")

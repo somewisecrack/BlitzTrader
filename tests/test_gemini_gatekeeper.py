@@ -48,6 +48,7 @@ def _signal(**kwargs) -> dict:
 _GOOD_APPROVE = json.dumps({
     "decision": "APPROVE",
     "confidence": 0.82,
+    "must_not_override_python_guardrails": True,
     "reason": "EMA stack bullish, ADX strong",
     "risk_notes": "Market opening volatility possible",
     "conditions_checked": ["EMA stacked bull", "ADX > 25", "RSI not overbought"],
@@ -59,6 +60,7 @@ _GOOD_REJECT = json.dumps({
     "reason": "RSI divergence — momentum weakening",
     "risk_notes": "Potential exhaustion candle",
     "conditions_checked": ["RSI < 50", "EMA not fully aligned"],
+    "must_not_override_python_guardrails": True,
 })
 
 
@@ -162,6 +164,7 @@ class TestGatekeeperBadJSON(unittest.TestCase):
             "reason": "looks good",
             "risk_notes": "none",
             "conditions_checked": [],
+            "must_not_override_python_guardrails": True,
         })
         gk = _gatekeeper()
         with patch.object(gk, "_call_with_timeout", return_value=bad):
@@ -175,6 +178,7 @@ class TestGatekeeperBadJSON(unittest.TestCase):
             "reason": "ok",
             "risk_notes": "none",
             "conditions_checked": [],
+            "must_not_override_python_guardrails": True,
         })
         gk = _gatekeeper()
         with patch.object(gk, "_call_with_timeout", return_value=bad):
@@ -188,6 +192,7 @@ class TestGatekeeperBadJSON(unittest.TestCase):
             "reason": "ok",
             "risk_notes": "none",
             "conditions_checked": [],
+            "must_not_override_python_guardrails": True,
         })
         gk = _gatekeeper()
         with patch.object(gk, "_call_with_timeout", return_value=bad):
@@ -269,22 +274,21 @@ class TestGatekeeperInvariantsNeverApproveOnError(unittest.TestCase):
             result = gk.evaluate(_signal(), "context")
         self.assertFalse(result["approved"])
 
-    def test_lowercase_approve_rejects(self):
-        """decision must be exactly "APPROVE" uppercase."""
+    def test_lowercase_approve_normalised(self):
+        """decision is upper()-cased before validation; 'approve' → 'APPROVE' → valid."""
         bad = json.dumps({
             "decision": "approve",
             "confidence": 0.9,
             "reason": "ok",
             "risk_notes": "none",
             "conditions_checked": [],
+            "must_not_override_python_guardrails": True,
         })
         gk = _gatekeeper()
         with patch.object(gk, "_call_with_timeout", return_value=bad):
             result = gk.evaluate(_signal(), "context")
-        # "approve" is not in _VALID_DECISIONS ("APPROVE" is after upper())
-        # Actually "approve".upper() == "APPROVE" — this should pass
-        # Let's verify the actual behavior
-        self.assertTrue(result["approved"])  # "approve".upper() == "APPROVE" → valid
+        # "approve".upper() == "APPROVE" → valid
+        self.assertTrue(result["approved"])
 
     def test_mixed_case_approve_normalised(self):
         """decision is upper()-cased before validation."""
@@ -294,6 +298,7 @@ class TestGatekeeperInvariantsNeverApproveOnError(unittest.TestCase):
             "reason": "ok",
             "risk_notes": "none",
             "conditions_checked": ["one"],
+            "must_not_override_python_guardrails": True,
         })
         gk = _gatekeeper()
         with patch.object(gk, "_call_with_timeout", return_value=mixed):
@@ -305,11 +310,163 @@ class TestGatekeeperRequiredFields(unittest.TestCase):
     """Verify _REQUIRED_FIELDS matches spec."""
 
     def test_required_fields_are_complete(self):
-        expected = {"decision", "confidence", "reason", "risk_notes", "conditions_checked"}
+        expected = {
+            "decision", "confidence", "reason", "risk_notes",
+            "conditions_checked", "must_not_override_python_guardrails",
+        }
         self.assertEqual(_REQUIRED_FIELDS, expected)
 
     def test_valid_decisions_are_approve_reject(self):
         self.assertEqual(_VALID_DECISIONS, {"APPROVE", "REJECT"})
+
+
+class TestGatekeeperHardening(unittest.TestCase):
+    """New validation rules: ack field, confidence range, forbidden fields."""
+
+    def _approve_base(self, **overrides) -> dict:
+        base = {
+            "decision": "APPROVE",
+            "confidence": 0.8,
+            "reason": "strong setup",
+            "risk_notes": "watch news",
+            "conditions_checked": ["EMA aligned"],
+            "must_not_override_python_guardrails": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_missing_ack_field_rejects(self):
+        bad = self._approve_base()
+        del bad["must_not_override_python_guardrails"]
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+        self.assertIn("must_not_override_python_guardrails", result["gatekeeper_error"])
+
+    def test_ack_false_rejects(self):
+        bad = self._approve_base(must_not_override_python_guardrails=False)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+
+    def test_ack_string_true_rejects(self):
+        """Ack must be boolean true, not string 'true'."""
+        bad = self._approve_base(must_not_override_python_guardrails="true")
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+
+    def test_confidence_too_high_rejects(self):
+        bad = self._approve_base(confidence=1.5)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+        self.assertIn("1.5", result["gatekeeper_error"])
+
+    def test_confidence_negative_rejects(self):
+        bad = self._approve_base(confidence=-0.1)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+
+    def test_confidence_string_rejects(self):
+        bad = self._approve_base(confidence="high")
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+        self.assertIn("str", result["gatekeeper_error"])
+
+    def test_confidence_exactly_zero_passes(self):
+        """confidence=0.0 is valid (REJECT with zero confidence is allowed)."""
+        bad = self._approve_base(confidence=0.0, decision="REJECT")
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+        self.assertIsNone(result["gatekeeper_error"])
+
+    def test_confidence_exactly_one_passes(self):
+        bad = self._approve_base(confidence=1.0)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertTrue(result["approved"])
+
+    def test_forbidden_stop_loss_field_rejects(self):
+        """If Gemini tries to suggest a stop_loss override, auto-reject."""
+        bad = self._approve_base(stop_loss=23800.0)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+        self.assertIn("stop_loss", result["gatekeeper_error"])
+
+    def test_forbidden_quantity_field_rejects(self):
+        bad = self._approve_base(quantity=2)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+        self.assertIn("quantity", result["gatekeeper_error"])
+
+    def test_forbidden_target_field_rejects(self):
+        bad = self._approve_base(target=24500.0)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+
+    def test_forbidden_leverage_field_rejects(self):
+        bad = self._approve_base(leverage=2)
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+
+    def test_conditions_checked_not_list_rejects(self):
+        bad = self._approve_base(conditions_checked="EMA aligned, ADX strong")
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(bad)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertFalse(result["approved"])
+
+    def test_risk_notes_as_list_is_valid(self):
+        """risk_notes can be a list of strings."""
+        ok = self._approve_base(risk_notes=["sudden reversal", "news risk"])
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(ok)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertTrue(result["approved"])
+
+    def test_system_prompt_contains_guardrail_instructions(self):
+        """Verify system prompt explicitly forbids position-size/SL/target override."""
+        from tools.gemini_gatekeeper import _GATEKEEPER_SYSTEM_PROMPT
+        self.assertIn("must_not_override_python_guardrails", _GATEKEEPER_SYSTEM_PROMPT)
+        self.assertIn("Position size", _GATEKEEPER_SYSTEM_PROMPT)
+        self.assertIn("Stop-loss", _GATEKEEPER_SYSTEM_PROMPT)
+
+    def test_gatekeeper_entry_flow_test_uses_new_ack_field(self):
+        """Smoke test: a complete valid APPROVE round-trip with new schema."""
+        full = {
+            "decision": "APPROVE",
+            "confidence": 0.87,
+            "reason": "Clean EMA stack with strong ADX",
+            "risk_notes": "Pre-news caution",
+            "conditions_checked": ["EMA bull stack", "ADX > 25", "RSI not overbought"],
+            "must_not_override_python_guardrails": True,
+        }
+        gk = _gatekeeper()
+        with patch.object(gk, "_call_with_timeout", return_value=json.dumps(full)):
+            result = gk.evaluate(_signal(), "ctx")
+        self.assertTrue(result["approved"])
+        self.assertAlmostEqual(result["confidence"], 0.87)
+        self.assertIsNone(result["gatekeeper_error"])
 
 
 if __name__ == "__main__":

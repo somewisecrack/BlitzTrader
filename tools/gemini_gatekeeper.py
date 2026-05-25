@@ -12,12 +12,17 @@ Invariants (NEVER violate):
 
 Response schema (all fields required):
   {
-    "decision":           "APPROVE" | "REJECT",
-    "confidence":         float 0.0–1.0,
-    "reason":             str   (≤ 120 chars),
-    "risk_notes":         str   (≤ 120 chars),
-    "conditions_checked": [str, ...]
+    "decision":                          "APPROVE" | "REJECT",
+    "confidence":                        float 0.0–1.0,
+    "reason":                            str   (≤ 120 chars),
+    "risk_notes":                        str | list[str],
+    "conditions_checked":                [str, ...],
+    "must_not_override_python_guardrails": true   ← REQUIRED boolean literal true
   }
+
+Forbidden fields (auto-reject if present):
+  quantity, lot_size, stop_loss, target, capital, leverage,
+  instrument, order_type, position_size, size
 """
 from __future__ import annotations
 
@@ -30,8 +35,17 @@ from typing import Optional
 
 logger = logging.getLogger("BlitzTrader.GeminiGatekeeper")
 
-_REQUIRED_FIELDS = {"decision", "confidence", "reason", "risk_notes", "conditions_checked"}
+_REQUIRED_FIELDS = {
+    "decision", "confidence", "reason", "risk_notes",
+    "conditions_checked", "must_not_override_python_guardrails",
+}
 _VALID_DECISIONS = {"APPROVE", "REJECT"}
+
+# Fields that would indicate Gemini is trying to override Python execution logic
+_FORBIDDEN_FIELDS = {
+    "quantity", "lot_size", "stop_loss", "target", "capital", "leverage",
+    "instrument", "order_type", "position_size", "size",
+}
 
 _GATEKEEPER_SYSTEM_PROMPT = """\
 You are the Gemini Entry Gatekeeper for BlitzTrader, an Indian futures trading system.
@@ -41,21 +55,29 @@ given the current market indicators and context.
 
 You must respond with ONLY valid JSON — no prose, no markdown, no code fences.
 
-Required JSON schema:
+Required JSON schema (ALL fields are required):
 {
   "decision": "APPROVE" or "REJECT",
   "confidence": <float 0.0-1.0>,
   "reason": "<concise reason, max 120 chars>",
-  "risk_notes": "<key risk, max 120 chars>",
-  "conditions_checked": ["<condition 1>", "<condition 2>", ...]
+  "risk_notes": "<key risk or list of risks>",
+  "conditions_checked": ["<condition 1>", "<condition 2>", ...],
+  "must_not_override_python_guardrails": true
 }
+
+HARD CONSTRAINTS — you CANNOT modify any of these (Python owns them absolutely):
+- Position size / lot_size / quantity
+- Stop-loss or target price
+- Capital allocation or leverage
+- Instrument selection or order type
+You approve or reject ONLY the entry quality. Python owns everything else.
+You MUST include "must_not_override_python_guardrails": true in your JSON response.
 
 Rules:
 - APPROVE only if market context genuinely supports the signal direction right now
 - REJECT if there is meaningful conflicting evidence, ambiguous structure, or you are not confident
 - Do NOT invent market data not provided to you
-- Do NOT override the stop-loss or target provided by Python
-- Do NOT comment on position sizing — Python controls that
+- Do NOT include fields like stop_loss, target, quantity, lot_size, or capital in your response
 - When in doubt, REJECT. A missed trade is better than a bad entry.
 - Respond with JSON only. Any other format causes automatic rejection.
 """
@@ -261,6 +283,32 @@ class GeminiGatekeeper:
         missing = _REQUIRED_FIELDS - data.keys()
         if missing:
             return {"parse_error": f"Missing required fields: {missing}"}
+
+        # must_not_override_python_guardrails must be exactly True
+        ack = data.get("must_not_override_python_guardrails")
+        if ack is not True:
+            return {"parse_error": f"must_not_override_python_guardrails must be true, got {ack!r}"}
+
+        # confidence must be numeric and in [0.0, 1.0]
+        conf = data.get("confidence")
+        if not isinstance(conf, (int, float)):
+            return {"parse_error": f"confidence must be a number, got {type(conf).__name__}: {conf!r}"}
+        if not (0.0 <= float(conf) <= 1.0):
+            return {"parse_error": f"confidence {conf} outside valid range [0.0, 1.0]"}
+
+        # conditions_checked must be a list
+        if not isinstance(data.get("conditions_checked"), list):
+            return {"parse_error": f"conditions_checked must be a list, got {type(data.get('conditions_checked')).__name__}"}
+
+        # risk_notes must be str or list
+        rn = data.get("risk_notes")
+        if not isinstance(rn, (str, list)):
+            return {"parse_error": f"risk_notes must be str or list, got {type(rn).__name__}"}
+
+        # Forbidden fields — Gemini attempting to set execution parameters
+        forbidden_found = _FORBIDDEN_FIELDS & data.keys()
+        if forbidden_found:
+            return {"parse_error": f"Response contains forbidden order-instruction fields: {sorted(forbidden_found)}"}
 
         return data
 

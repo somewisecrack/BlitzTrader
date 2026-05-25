@@ -124,6 +124,7 @@ def _gate_approve(confidence=0.85):
         "reason": "EMA stacked bullish, ADX strong trend",
         "risk_notes": "Watch for sudden reversals",
         "conditions_checked": ["EMA bull stack", "ADX > 25"],
+        "must_not_override_python_guardrails": True,
         "gatekeeper_error": None,
         "elapsed_seconds": 1.2,
     }

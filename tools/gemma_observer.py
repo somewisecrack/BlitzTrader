@@ -1,92 +1,126 @@
 """
-tools/gemma_observer.py — Gemma local-model observer for BlitzTrader.
+tools/gemma_observer.py — Local Gemma observer for BlitzTrader.
 
-GemmaObserver evaluates every candidate signal asynchronously in a background
-thread.  It is NEVER in the decision path:
+GemmaObserver evaluates candidate signals asynchronously via a local Ollama
+endpoint.  It is NEVER in the decision path:
   - It does not block order placement.
   - Its output cannot approve or reject a trade.
   - Its opinion is recorded for journaling and included in Telegram notifications.
 
-Model: gemma-3-4b-it via google-genai SDK (same SDK as Gemini, lighter model).
+Provider: local Ollama (HTTP API only — no cloud AI SDK dependency)
+Default: DISABLED (VM has insufficient RAM/disk for local model)
 
 Invariants (NEVER violate):
   - GemmaObserver result is NOT consulted by GeminiGatekeeper or Python order logic
-  - If Gemma API fails/times out, trading continues normally — error is logged only
+  - If Gemma is disabled, unavailable, or errors, trading continues normally
   - Gemma has no tool access
+  - Uses only stdlib urllib — no third-party AI SDK imports
+
+Request JSON (sent to Ollama /api/generate):
+  {"model": MODEL, "prompt": "...", "stream": false, "format": "json"}
+
+Required response schema from the model:
+  {
+    "opinion": "GOOD" | "BAD" | "UNCLEAR",
+    "confidence": <float 0.0-1.0>,
+    "reason": "<short reason, max 100 chars>",
+    "concerns": ["<concern1>", ...],
+    "hallucination_guardrail_ack": true
+  }
+
+Internal opinion dict (used by callbacks, Telegram, journal — stable API):
+  {
+    "alignment": "STRONG"/"MODERATE"/"WEAK"/"CONFLICTED"/"UNAVAILABLE",
+    "confidence": float,
+    "key_observation": str,
+    "concern": str,
+    "gemma_error": str | None
+  }
 """
 from __future__ import annotations
 
 import json
 import logging
-import queue
 import threading
 import time
+import urllib.request
+import urllib.error
+import socket
 from typing import Optional, Callable
 
 logger = logging.getLogger("BlitzTrader.GemmaObserver")
 
+_VALID_OPINIONS = {"GOOD", "BAD", "UNCLEAR"}
+_VALID_ALIGNMENTS = {"STRONG", "MODERATE", "WEAK", "CONFLICTED", "UNAVAILABLE"}
+
+# Map model opinion to internal alignment label
+_OPINION_TO_ALIGNMENT = {
+    "GOOD": "STRONG",
+    "BAD": "WEAK",
+    "UNCLEAR": "CONFLICTED",
+}
+
 _OBSERVER_SYSTEM_PROMPT = """\
-You are Gemma, an observer AI for BlitzTrader. You evaluate trading signals for educational
-and journaling purposes ONLY. Your output is NEVER used to approve or reject trades.
+You are Gemma, an observer AI evaluating trading signals for journaling ONLY.
+Your output is NEVER used to approve or reject trades. Be concise and honest.
 
 Respond with ONLY valid JSON — no prose, no markdown, no code fences.
 
-Required JSON schema:
+Required schema:
 {
-  "alignment": "STRONG" | "MODERATE" | "WEAK" | "CONFLICTED",
+  "opinion": "GOOD" | "BAD" | "UNCLEAR",
   "confidence": <float 0.0-1.0>,
-  "key_observation": "<one insight, max 100 chars>",
-  "concern": "<one concern or 'none', max 100 chars>"
+  "reason": "<one key insight, max 100 chars>",
+  "concerns": ["<concern1>", ...],
+  "hallucination_guardrail_ack": true
 }
 
-alignment:
-  STRONG     — clear evidence supporting the signal direction
-  MODERATE   — partial support, some uncertainty
-  WEAK       — little support; signal may be premature
-  CONFLICTED — significant conflicting evidence present
+opinion:
+  GOOD    — evidence supports the signal direction
+  BAD     — meaningful conflicting evidence
+  UNCLEAR — insufficient or ambiguous evidence
 
-Be concise and honest. You are not approving or rejecting — just observing.
+hallucination_guardrail_ack MUST be exactly true (boolean).
+Do NOT invent data not provided. Do NOT produce "approved" or "decision" fields.
 """
-
-_VALID_ALIGNMENTS = {"STRONG", "MODERATE", "WEAK", "CONFLICTED"}
 
 
 class GemmaObserver:
     """
-    Non-blocking observer that evaluates candidate signals using gemma-3-4b-it.
+    Non-blocking observer that evaluates candidate signals using a local Gemma
+    model via Ollama HTTP API.
+
+    When GEMMA_OBSERVER_ENABLED=false (default), submit() immediately calls
+    the callback with an UNAVAILABLE opinion — no HTTP calls are made.
 
     Usage:
-        observer = GemmaObserver(api_key="...", callback=_record_opinion)
+        observer = GemmaObserver(enabled=False, ...)
         observer.submit(signal, context)   # returns immediately
-        # ... callback is called with the opinion dict when Gemma responds
+        # callback is called with the opinion dict
     """
 
     def __init__(
         self,
-        api_key: str,
-        model: str = "gemma-3-4b-it",
-        timeout_seconds: int = 15,
+        enabled: bool = False,
+        url: str = "http://localhost:11434",
+        model: str = "gemma3:1b",
+        timeout_seconds: int = 3,
         callback: Optional[Callable[[dict, dict], None]] = None,
     ):
         """
         Args:
-            api_key:         Gemini/Google API key (same key, lighter model)
-            model:           Model to use (default: gemma-3-4b-it)
-            timeout_seconds: Per-call timeout (non-blocking — caller never waits)
+            enabled:         Whether to actually call Ollama. Default False.
+            url:             Base URL for Ollama API.
+            model:           Model name for Ollama (e.g. "gemma3:1b").
+            timeout_seconds: Per-call HTTP timeout.
             callback:        Optional fn(signal, opinion) called when result arrives.
                              Called from a background daemon thread.
         """
-        self._api_key = api_key
+        self._enabled = enabled
+        self._url = url.rstrip("/")
         self._model = model
         self._timeout = timeout_seconds
         self._callback = callback
-        self._client = None  # lazy init
-
-    def _get_client(self):
-        if self._client is None:
-            from google import genai  # noqa: PLC0415
-            self._client = genai.Client(api_key=self._api_key)
-        return self._client
 
     # ────────────────────────────────────────────────────────────────
     #   Public API
@@ -96,10 +130,18 @@ class GemmaObserver:
         """
         Submit a signal for async observer evaluation.  Returns immediately.
 
-        The callback (if provided) is invoked from a daemon thread when Gemma
-        responds.  The opinion dict always contains a 'gemma_error' key (None
-        on success) so callers never need to guard against missing fields.
+        When disabled, the callback is invoked synchronously with an UNAVAILABLE
+        opinion so callers can always count on the callback being fired.
         """
+        if not self._enabled:
+            opinion = self._unavailable_opinion("Observer disabled (GEMMA_OBSERVER_ENABLED=false)")
+            if self._callback:
+                try:
+                    self._callback(signal, opinion)
+                except Exception:
+                    logger.exception("GemmaObserver disabled-callback raised")
+            return
+
         thread = threading.Thread(
             target=self._evaluate_async,
             args=(signal, context),
@@ -142,43 +184,41 @@ class GemmaObserver:
                 logger.exception("GemmaObserver callback raised")
 
     def _run(self, signal: dict, context: str) -> dict:
-        """Synchronous Gemma call (run inside daemon thread)."""
-        from google.genai import types  # noqa: PLC0415
-
+        """Synchronous Ollama HTTP call (run inside daemon thread)."""
         prompt = self._build_prompt(signal, context)
-        result_q: queue.Queue = queue.Queue(maxsize=1)
+        payload = json.dumps({
+            "model": self._model,
+            "prompt": f"{_OBSERVER_SYSTEM_PROMPT}\n\n{prompt}",
+            "stream": False,
+            "format": "json",
+        }).encode("utf-8")
 
-        def worker():
-            try:
-                client = self._get_client()
-                resp = client.models.generate_content(
-                    model=self._model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=_OBSERVER_SYSTEM_PROMPT,
-                        max_output_tokens=200,
-                        temperature=0.2,
-                        response_mime_type="application/json",
-                    ),
-                )
-                result_q.put(("ok", resp.text or ""))
-            except Exception as exc:
-                result_q.put(("err", exc))
-
-        t = threading.Thread(
-            target=worker, name="BlitzTrader-GemmaCall", daemon=True
+        endpoint = f"{self._url}/api/generate"
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        t.start()
 
         try:
-            status, payload = result_q.get(timeout=self._timeout)
-        except queue.Empty:
-            return self._error_opinion(f"Gemma timed out after {self._timeout}s")
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                raw = resp.read().decode("utf-8")
+        except (urllib.error.URLError, ConnectionRefusedError, OSError) as exc:
+            return self._error_opinion(f"Ollama connection error: {exc}")
+        except socket.timeout as exc:
+            return self._error_opinion(f"Ollama timed out after {self._timeout}s")
+        except Exception as exc:
+            return self._error_opinion(f"Ollama HTTP error: {type(exc).__name__}: {exc}")
 
-        if status == "err":
-            return self._error_opinion(f"Gemma API error: {type(payload).__name__}: {payload}")
+        # Ollama wraps response in {"response": "...", ...}
+        try:
+            outer = json.loads(raw)
+            model_text = outer.get("response", "")
+        except json.JSONDecodeError as exc:
+            return self._error_opinion(f"Ollama outer JSON parse error: {exc}")
 
-        return self._parse_opinion(payload)
+        return self._parse_opinion(model_text)
 
     def _build_prompt(self, signal: dict, context: str) -> str:
         symbol = signal.get("symbol", "?")
@@ -212,6 +252,10 @@ class GemmaObserver:
         return "\n".join(lines)
 
     def _parse_opinion(self, raw: str) -> dict:
+        """Parse model JSON response into internal opinion dict."""
+        if not raw:
+            return self._error_opinion("Empty response from model")
+
         raw = raw.strip()
         if raw.startswith("```"):
             raw = "\n".join(
@@ -221,21 +265,50 @@ class GemmaObserver:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            return self._error_opinion(f"JSON parse error: {exc}")
+            return self._error_opinion(f"JSON parse error: {exc} — raw={raw[:100]!r}")
 
         if not isinstance(data, dict):
             return self._error_opinion(f"Expected JSON object, got {type(data).__name__}")
 
-        alignment = str(data.get("alignment", "")).upper()
-        if alignment not in _VALID_ALIGNMENTS:
-            return self._error_opinion(f"Invalid alignment: {alignment!r}")
+        # Validate opinion
+        opinion_raw = str(data.get("opinion", "")).upper()
+        if opinion_raw not in _VALID_OPINIONS:
+            return self._error_opinion(f"Invalid opinion: {opinion_raw!r} (expected GOOD/BAD/UNCLEAR)")
 
+        # Validate confidence
+        conf = data.get("confidence")
+        if not isinstance(conf, (int, float)) or not (0.0 <= float(conf) <= 1.0):
+            return self._error_opinion(f"Invalid confidence: {conf!r} (must be float 0.0-1.0)")
+
+        # Validate hallucination ack
+        ack = data.get("hallucination_guardrail_ack")
+        if ack is not True:
+            return self._error_opinion(
+                f"hallucination_guardrail_ack must be true, got {ack!r}"
+            )
+
+        # Validate concerns is a list
+        concerns = data.get("concerns", [])
+        if not isinstance(concerns, list):
+            return self._error_opinion(f"concerns must be a list, got {type(concerns).__name__}")
+
+        alignment = _OPINION_TO_ALIGNMENT[opinion_raw]
         return {
             "alignment": alignment,
-            "confidence": float(data.get("confidence", 0.0)),
-            "key_observation": str(data.get("key_observation", ""))[:200],
-            "concern": str(data.get("concern", ""))[:200],
+            "confidence": float(conf),
+            "key_observation": str(data.get("reason", ""))[:200],
+            "concern": ", ".join(str(c) for c in concerns[:3]),
             "gemma_error": None,
+        }
+
+    @staticmethod
+    def _unavailable_opinion(reason: str) -> dict:
+        return {
+            "alignment": "UNAVAILABLE",
+            "confidence": 0.0,
+            "key_observation": "Observer disabled",
+            "concern": reason[:200],
+            "gemma_error": reason,
         }
 
     @staticmethod
