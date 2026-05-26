@@ -20,7 +20,7 @@ Each line is a JSON object:
         "stop_loss":       56150.0,
         "target":          55750.0,
         "reason":          "",           // optional: block/reject reason
-        "details":         {}            // optional: gatekeeper result, gemma opinion, etc.
+        "details":         {}            // optional: gatekeeper result, etc.
     }
 
 Stages (in pipeline order):
@@ -28,8 +28,7 @@ Stages (in pipeline order):
     HARD_GUARDRAIL_BLOCKED  — rejected by hard guardrails (paused/max-positions/timing/stale)
     HARD_GUARDRAIL_PASSED   — passed hard guardrails, entering Python review
     PYTHON_REVIEW_REJECTED  — rejected by deterministic Python indicator/risk checks
-    PYTHON_REVIEW_PASSED    — Python approved; Gemma submitted, gatekeeper called
-    GEMMA_OPINION           — Gemma callback received (observer only, never a decision)
+    PYTHON_REVIEW_PASSED    — Python approved; Gemini gatekeeper called
     GATEKEEPER_REJECTED     — Gemini gatekeeper REJECT or validation/timeout error
     GATEKEEPER_APPROVED     — Gemini gatekeeper APPROVE
     ORDER_PLACED            — virtual order FILLED or PENDING
@@ -57,7 +56,6 @@ _VALID_STAGES = {
     "HARD_GUARDRAIL_PASSED",
     "PYTHON_REVIEW_REJECTED",
     "PYTHON_REVIEW_PASSED",
-    "GEMMA_OPINION",
     "GATEKEEPER_REJECTED",
     "GATEKEEPER_APPROVED",
     "ORDER_PLACED",
@@ -103,7 +101,7 @@ class CandidateAudit:
             stage:     One of _VALID_STAGES. Unknown stages are accepted but logged.
             signal:    The raw signal dict (symbol/strategy/direction/etc. extracted).
             reason:    Human-readable explanation for BLOCKED/REJECTED stages.
-            details:   Optional extra payload (e.g. gatekeeper result, Gemma opinion).
+            details:   Optional extra payload (e.g. gatekeeper result, decision context).
         """
         try:
             now = datetime.now(timezone.utc)

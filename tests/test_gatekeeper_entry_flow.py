@@ -1,21 +1,18 @@
 """
 tests/test_gatekeeper_entry_flow.py
 -------------------------------------
-Integration-style tests for the three-stage entry gate:
+Integration-style tests for the two-stage entry gate:
   1. Python hard review  (deterministic)
-  2. Gemma observer      (async, fire-and-forget, never blocks)
-  3. Gemini gatekeeper   (5s timeout, APPROVE/REJECT)
+  2. Gemini gatekeeper   (5s timeout, APPROVE/REJECT)
 
-These tests exercise _process_tradeable_signals_python() with mocked
-gatekeeper + observer instances to verify the invariants without making
-real API calls.
+These tests exercise _process_tradeable_signals_python() with a mocked
+gatekeeper instance to verify invariants without making real API calls.
 
 Invariants tested:
   - Python-rejected signal never reaches gatekeeper
   - Gatekeeper REJECT prevents order placement
   - Gatekeeper APPROVE + Python approved → order placed
   - Gatekeeper timeout/error → order NOT placed
-  - Gemma is always submitted before gatekeeper call
   - Gatekeeper failure is logged but does not raise
   - No API key → all signals auto-rejected (gatekeeper=None)
   - Exit logic (SL/EOD) never calls gatekeeper
@@ -47,7 +44,6 @@ if "google.genai" not in sys.modules:
 
 from main import BlitzTrader
 from tools.gemini_gatekeeper import GeminiGatekeeper
-from tools.gemma_observer import GemmaObserver
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -85,7 +81,6 @@ def _bot_with_state(state: dict) -> BlitzTrader:
     }
     bot._market_data.get_candles.return_value = {"candles": []}
     bot._promoted_futures_filters = []
-    bot._gemma_opinions = {}
     bot._audit = MagicMock()
     return bot
 
@@ -151,7 +146,6 @@ class TestGatekeeperApproveFlow(unittest.TestCase):
         self.bot = _bot_with_state(_state())
         self.bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
         self.bot._gatekeeper.evaluate.return_value = _gate_approve()
-        self.bot._gemma = MagicMock(spec=GemmaObserver)
         self.bot._order_exec.place_virtual_order.return_value = {
             "status": "FILLED",
             "fill_price": 24000.0,
@@ -176,14 +170,14 @@ class TestGatekeeperApproveFlow(unittest.TestCase):
         self.assertIn("EMA stacked bullish", msg)
         self.assertIn("85%", msg)  # confidence formatted
 
-    def test_gemma_submitted_before_gatekeeper_called(self):
-        call_order = []
-        self.bot._gemma.submit.side_effect = lambda s, c: call_order.append("gemma")
-        self.bot._gatekeeper.evaluate.side_effect = lambda s, c: (call_order.append("gate"), _gate_approve())[1]
+    def test_telegram_message_has_no_gemma_reference(self):
+        """Entry alert must not mention Gemma/local observer."""
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
-        # gemma must be submitted first (fire-and-forget before gatekeeper)
-        self.assertEqual(call_order[0], "gemma")
-        self.assertEqual(call_order[1], "gate")
+        msg = self.bot._telegram.send_telegram.call_args[0][0]
+        self.assertNotIn("Gemma", msg)
+        self.assertNotIn("gemma", msg)
+        self.assertNotIn("observer", msg)
+        self.assertNotIn("Ollama", msg)
 
     def test_journal_entry_includes_gemini_and_python_reason(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -199,7 +193,6 @@ class TestGatekeeperRejectFlow(unittest.TestCase):
         self.bot = _bot_with_state(_state())
         self.bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
         self.bot._gatekeeper.evaluate.return_value = _gate_reject("Conflicting EMA signals")
-        self.bot._gemma = MagicMock(spec=GemmaObserver)
 
     def test_order_not_placed_on_gatekeeper_reject(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -225,7 +218,6 @@ class TestGatekeeperTimeoutFlow(unittest.TestCase):
         self.bot._gatekeeper.evaluate.return_value = _gate_reject(
             error="Gatekeeper timed out after 5s"
         )
-        self.bot._gemma = MagicMock(spec=GemmaObserver)
 
     def test_order_not_placed_on_timeout(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -243,7 +235,6 @@ class TestPythonRejectSkipsGatekeeper(unittest.TestCase):
     def setUp(self):
         self.bot = _bot_with_state(_state())
         self.bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
-        self.bot._gemma = MagicMock(spec=GemmaObserver)
         # Make Python review reject: signal has ema_stacked_bull=True but direction=SELL
         self.bot._market_data.get_indicators.return_value = {
             "current_price": 24000.0,
@@ -260,11 +251,6 @@ class TestPythonRejectSkipsGatekeeper(unittest.TestCase):
         self.bot._process_tradeable_signals_python([sig])
         self.bot._gatekeeper.evaluate.assert_not_called()
 
-    def test_gemma_not_submitted_on_python_reject(self):
-        sig = _tradeable_signal(direction="SELL")
-        self.bot._process_tradeable_signals_python([sig])
-        self.bot._gemma.submit.assert_not_called()
-
     def test_order_not_placed_on_python_reject(self):
         sig = _tradeable_signal(direction="SELL")
         self.bot._process_tradeable_signals_python([sig])
@@ -277,7 +263,6 @@ class TestNoGatekeeperConfigured(unittest.TestCase):
     def setUp(self):
         self.bot = _bot_with_state(_state())
         self.bot._gatekeeper = None  # no API key
-        self.bot._gemma = MagicMock(spec=GemmaObserver)
 
     def test_no_gatekeeper_rejects_all_signals(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -287,48 +272,6 @@ class TestNoGatekeeperConfigured(unittest.TestCase):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
         reason = self.bot._journal.log_decision.call_args.kwargs.get("reason", "")
         self.assertIn("not configured", reason.lower())
-
-
-class TestGemmaObserverFireAndForget(unittest.TestCase):
-    """Gemma is submitted for every Python-passing signal regardless of gatekeeper result."""
-
-    def test_gemma_submitted_even_when_gate_rejects(self):
-        bot = _bot_with_state(_state())
-        bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
-        bot._gatekeeper.evaluate.return_value = _gate_reject()
-        bot._gemma = MagicMock(spec=GemmaObserver)
-        bot._process_tradeable_signals_python([_tradeable_signal()])
-        bot._gemma.submit.assert_called_once()
-
-    def test_gemma_not_submitted_when_python_rejects(self):
-        bot = _bot_with_state(_state())
-        bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
-        bot._gatekeeper.evaluate.return_value = _gate_approve()
-        bot._gemma = MagicMock(spec=GemmaObserver)
-        # Force Python to reject via indicator
-        bot._market_data.get_indicators.return_value = {
-            "current_price": 24000.0,
-            "ema20": 24050.0,
-            "adx14": 28.0,
-            "rsi14": 45.0,
-            "avg_volume_20": 50000.0,
-            "ema_stacked_bull": True,
-            "ema_stacked_bear": False,
-        }
-        sig = _tradeable_signal(direction="SELL")
-        bot._process_tradeable_signals_python([sig])
-        bot._gemma.submit.assert_not_called()
-
-    def test_gemma_none_does_not_crash(self):
-        """If Gemma observer is not configured, processing must succeed."""
-        bot = _bot_with_state(_state())
-        bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
-        bot._gatekeeper.evaluate.return_value = _gate_approve()
-        bot._gemma = None  # not configured
-        bot._order_exec.place_virtual_order.return_value = {"status": "FILLED", "fill_price": 24000.0}
-        # Should not raise
-        bot._process_tradeable_signals_python([_tradeable_signal()])
-        bot._order_exec.place_virtual_order.assert_called_once()
 
 
 class TestGatekeeperContextBuilding(unittest.TestCase):

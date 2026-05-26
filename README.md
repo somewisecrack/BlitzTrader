@@ -1,16 +1,16 @@
 # BlitzTrader
 
-An autonomous intraday trading system for NSE index **futures**, deployed on Google Cloud Platform. All trade decisions are deterministic Python. Gemini is used only for post-market research and Telegram chat.
+An autonomous intraday trading system for NSE index **futures**, deployed on Google Cloud Platform. All trade decisions are deterministic Python. Gemini is the live entry gatekeeper and post-market research assistant.
 
 ## What it does
 
 - Runs every trading day via a systemd timer on a GCP VM (8:20 AM IST)
 - Logs into Shoonya (Finvasia) broker API and resolves front-month futures contracts at startup
 - **Futures trading**: Scans, selects, executes, and manages intraday index futures trades (₹10L capital)
-- **Three-stage entry gate**: Python hard guardrails → Gemma local observer (async, never blocks) → Gemini gatekeeper (5s timeout, APPROVE/REJECT only)
+- **Two-stage entry gate**: Python hard guardrails → Gemini gatekeeper (5s timeout, APPROVE/REJECT only)
 - **Self-improvement loop**: Post-market script pipeline proposes, backtests, and promotes filter hypotheses — promoted filters are loaded automatically next session
 - Sends real-time alerts and responds to commands via Telegram bot
-- Gemini used only for: free-form Telegram chat, EOD summaries, and post-market hypothesis proposals
+- Gemini used only for: live entry gating, free-form Telegram chat, EOD summaries, and post-market hypothesis proposals
 
 ## Architecture
 
@@ -24,9 +24,9 @@ systemd timer (8:20 AM IST, Mon–Fri)
     │     ├── Load cross-session memory
     │     └── Load promoted futures filters (wiki/promoted_filters/)
     │
-    ├── Trading loop (every 60s)  ← Python-only, no LLM
+    ├── Trading loop (every 60s)  ← Python-only, no LLM in decisions
     │     ├── Futures signals    — VP strategy scanner + filter application
-    │     ├── Three-stage gate   — Python review → Gemma observer → Gemini gatekeeper
+    │     ├── Two-stage gate     — Python review → Gemini gatekeeper
     │     ├── OrderExecution     — RMS margin checks, virtual fill
     │     ├── WebSocket feed     — live Shoonya price stream
     │     └── Telegram polling   — commands + alerts
@@ -73,11 +73,8 @@ next live session startup → main.py loads wiki/promoted_filters/ automatically
 ## Entry gate invariants
 
 ```
-Python hard guardrails  ─── reject ──▶  SKIP (never reaches LLM gate)
+Python hard guardrails  ─── reject ──▶  SKIP (never reaches Gemini)
         │ pass
-        ▼
-Gemma local observer ──── fire-and-forget (never blocks, never decides)
-        │ (async)
         ▼
 Gemini gatekeeper (5s timeout)
         │ APPROVE                   │ REJECT / timeout / error
@@ -85,20 +82,8 @@ Gemini gatekeeper (5s timeout)
   place order                   discard signal
 ```
 
-- **Gemma** is observer-only: its opinion is journaled and included in Telegram notifications. It cannot approve or reject trades.
 - **Gemini** is fail-closed: any error, timeout, or malformed response → signal rejected.
 - **Python** owns ALL exits: stop-loss, trailing stop, target, EOD force-close, manual `/abort`.
-
-## Gemini / Gemma boundaries
-
-| Context | Gemini | Gemma |
-|---|---|---|
-| Live signal approval / rejection | **Never** | **Never** |
-| Live trade placement or management | **Never** | **Never** |
-| Entry gate decision | APPROVE/REJECT only (gatekeeper) | Observer only (logged) |
-| Post-market hypothesis proposals | Yes — one bounded call per day | — |
-| Telegram free-form chat | Yes | — |
-| EOD summary / reflection | Yes | — |
 
 ## Key features
 
@@ -112,15 +97,6 @@ Gemini gatekeeper (5s timeout)
 | Position caps | Max 2 open; no pyramiding |
 | Execution guard | CE/PE hard-blocked; bare logical names hard-blocked |
 | Promoted filters | Loaded from `wiki/promoted_filters/` at startup; applied in `_review_signal_python()` |
-
-### Gemma Local Observer
-| Feature | Detail |
-|---|---|
-| Provider | Local Ollama HTTP API (`/api/generate`) — no cloud SDK |
-| Default | DISABLED (VM: 958MB RAM, no swap — insufficient for any local model) |
-| Enable | Set `GEMMA_OBSERVER_ENABLED=true`, install Ollama, pull `gemma3:1b` |
-| Timeout | 3s (configurable via `GEMMA_OBSERVER_TIMEOUT_SECONDS`) |
-| Output | `alignment`: STRONG/WEAK/CONFLICTED/UNAVAILABLE — journaled only |
 
 ### Gemini Gatekeeper
 | Feature | Detail |
@@ -186,7 +162,6 @@ BlitzTrader/
 │   ├── futures_hypothesis.py    — hypothesis/backtest schema helpers
 │   ├── futures_strategy_engine.py — pure-Python VP signal scanner (no broker dep)
 │   ├── gemini_gatekeeper.py     — entry gate: APPROVE/REJECT with 5s timeout
-│   ├── gemma_observer.py        — async local observer via Ollama (disabled by default)
 │   ├── market_data.py           — live signal scanner (broker-connected)
 │   ├── order_execution.py       — Shoonya order placement + RMS checks
 │   └── ...
@@ -195,7 +170,7 @@ BlitzTrader/
 │   ├── propose_futures_hypotheses.py — Gemini hypothesis proposer
 │   ├── backtest_futures_hypothesis.py — yfinance backtest
 │   └── promote_futures_hypothesis.py  — promote passing filters
-├── tests/                       — 628 tests, 4 skipped
+├── tests/                       — full test suite
 └── wiki/                        — research artifacts (see above)
 ```
 
@@ -274,14 +249,6 @@ GEMINI_GATEKEEPER_TIMEOUT_SECONDS   # default: 5
 GEMINI_SCHEDULED_MODEL              # default: gemini-2.5-flash-lite (proposal script)
 ```
 
-Optional (Gemma local observer — disabled by default):
-```
-GEMMA_OBSERVER_ENABLED              # default: false
-GEMMA_OBSERVER_URL                  # default: http://localhost:11434
-GEMMA_OBSERVER_MODEL                # default: gemma3:1b
-GEMMA_OBSERVER_TIMEOUT_SECONDS      # default: 3
-```
-
 ## Telegram commands
 
 | Command | Action |
@@ -295,16 +262,14 @@ GEMMA_OBSERVER_TIMEOUT_SECONDS      # default: 3
 ## Security invariants
 
 - **No market-data fallbacks**: backtesting uses yfinance only; live prices come from Shoonya feed exclusively.
-- **No LLM overrides**: Gemini and Gemma cannot change stop-loss, target, quantity, capital, or leverage.
+- **No LLM overrides**: Gemini cannot change stop-loss, target, quantity, capital, or leverage.
 - **Fail-closed gatekeeper**: if Gemini is unavailable, times out, or returns invalid schema → signal rejected.
-- **Gemma never decides**: observer output is journaled; it has no path to the order placement code.
 - **Python owns all exits**: SL, trailing stop, target, EOD force-close, and manual abort are all deterministic Python.
 
 ## Tests
 
 ```bash
 python3 -m pytest tests/ -q
-# 628 passed, 4 skipped
 ```
 
 Key test files:
@@ -312,8 +277,7 @@ Key test files:
 | File | Covers |
 |---|---|
 | `test_gemini_gatekeeper.py` | Schema validation, forbidden fields, confidence range, guardrail ack |
-| `test_gemma_observer.py` | Ollama HTTP mock, disabled mode, error paths, no-decision invariants |
-| `test_gatekeeper_entry_flow.py` | Three-stage gate integration, Gemma fire-and-forget ordering |
+| `test_gatekeeper_entry_flow.py` | Two-stage gate integration, Python→Gemini flow |
 | `test_futures_wiki.py` | Hypothesis/backtest schema validation, journal parsing |
 | `test_futures_filter_loader.py` | Filter loading, application, JSON-only loading |
 | `test_futures_hypothesis_backtest.py` | Script importability, main.py wiring, strategy engine |

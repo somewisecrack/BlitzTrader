@@ -121,15 +121,6 @@ GEMINI_API_TIMEOUT_SECONDS = _optional_int_env("GEMINI_API_TIMEOUT_SECONDS", 45)
 GEMINI_GATEKEEPER_MODEL = _optional_env("GEMINI_GATEKEEPER_MODEL", "gemini-2.5-flash-lite")
 GEMINI_GATEKEEPER_TIMEOUT_SECONDS = _optional_int_env("GEMINI_GATEKEEPER_TIMEOUT_SECONDS", 5)
 
-# Gemma local observer — async, non-blocking, uses local Ollama (NOT Google API)
-# Disabled by default: VM has 958MB RAM / no swap — insufficient for any local model.
-# To enable: set GEMMA_OBSERVER_ENABLED=true, install Ollama, pull a small model.
-GEMMA_OBSERVER_ENABLED = _optional_env("GEMMA_OBSERVER_ENABLED", "false").lower() == "true"
-GEMMA_OBSERVER_PROVIDER = _optional_env("GEMMA_OBSERVER_PROVIDER", "ollama")
-GEMMA_OBSERVER_URL = _optional_env("GEMMA_OBSERVER_URL", "http://localhost:11434")
-GEMMA_OBSERVER_MODEL = _optional_env("GEMMA_OBSERVER_MODEL", "gemma3:1b")
-GEMMA_OBSERVER_TIMEOUT_SECONDS = _optional_int_env("GEMMA_OBSERVER_TIMEOUT_SECONDS", 3)
-
 # ──────────────────────────────────────────────────────────────
 #   DATA EXPORT / GOOGLE DRIVE
 # ──────────────────────────────────────────────────────────────

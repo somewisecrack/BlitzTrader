@@ -633,7 +633,6 @@ def parse_candidate_audit(audit_path: Path) -> dict:
         "gatekeeper_rejected": int,
         "gatekeeper_approved": int,
         "orders_placed":   int,
-        "gemma_opinions":  list[dict],  # alignment + signal_id for each GEMMA_OPINION
         "by_signal_id":    dict,  # full audit trail per signal
       }
     """
@@ -644,7 +643,6 @@ def parse_candidate_audit(audit_path: Path) -> dict:
         "gatekeeper_rejected": 0,
         "gatekeeper_approved": 0,
         "orders_placed": 0,
-        "gemma_opinions": [],
         "by_signal_id": {},
     }
     if not audit_path.exists():
@@ -678,16 +676,8 @@ def parse_candidate_audit(audit_path: Path) -> dict:
                     result["gatekeeper_approved"] += 1
                 elif stage == "ORDER_PLACED":
                     result["orders_placed"] += 1
-                elif stage == "GEMMA_OPINION":
-                    details = rec.get("details") or {}
-                    result["gemma_opinions"].append({
-                        "signal_id": sid,
-                        "symbol": rec.get("symbol", ""),
-                        "strategy": rec.get("strategy", ""),
-                        "alignment": details.get("alignment", "?"),
-                        "confidence": details.get("confidence"),
-                        "key_observation": details.get("key_observation", ""),
-                    })
+                # Note: GEMMA_OPINION stages in historical audit files are
+                # silently skipped — they do not affect any counters.
     except Exception:
         pass
 
@@ -812,20 +802,6 @@ def build_review_markdown(
         lines.append(f"| Gatekeeper approved | {gk_app} |")
         lines.append(f"| Orders placed | {placed} |")
         lines.append("")
-        gemma_ops = candidate_audit.get("gemma_opinions", [])
-        if gemma_ops:
-            lines.append("### Gemma Observer Opinions")
-            lines.append("| Symbol | Strategy | Alignment | Confidence | Observation |")
-            lines.append("|--------|----------|-----------|------------|-------------|")
-            for op in gemma_ops[:20]:  # cap at 20 to avoid review bloat
-                sym = op.get("symbol", "")
-                strat = op.get("strategy", "")
-                align = op.get("alignment", "?")
-                conf = op.get("confidence")
-                conf_str = f"{float(conf):.0%}" if conf is not None else "—"
-                obs = (op.get("key_observation") or "")[:80]
-                lines.append(f"| {sym} | {strat} | {align} | {conf_str} | {obs} |")
-            lines.append("")
     else:
         lines.append("## Signal Gate Audit")
         lines.append("_No candidate audit file found for this date._")

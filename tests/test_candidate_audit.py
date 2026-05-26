@@ -227,7 +227,6 @@ class TestValidStages(unittest.TestCase):
             "HARD_GUARDRAIL_PASSED",
             "PYTHON_REVIEW_REJECTED",
             "PYTHON_REVIEW_PASSED",
-            "GEMMA_OPINION",
             "GATEKEEPER_REJECTED",
             "GATEKEEPER_APPROVED",
             "ORDER_PLACED",

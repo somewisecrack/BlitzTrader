@@ -7,7 +7,6 @@ is placed.  It has a strict 5-second timeout and must return structured JSON.
 Invariants (NEVER violate):
 - Any timeout, error, rate-limit, invalid JSON, or missing required field → REJECT
 - Gemini may APPROVE or REJECT; it may never modify position size or SL/target
-- Gemma observer runs asynchronously; GeminiGatekeeper never waits for Gemma
 - This class has no tool access; it sends one prompt, parses one response
 
 Response schema (all fields required):

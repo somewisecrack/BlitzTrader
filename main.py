@@ -11,9 +11,6 @@ Gemini is used for:
   - live entry gatekeeper (5-second timeout, structured JSON, approve/reject only)
   - free-form Telegram chat on demand
   - end-of-day summarization/reflection
-
-Gemma is used as a non-blocking observer (never in decision path):
-  - submits async opinion on every candidate signal for journaling
 """
 import logging
 import os
@@ -40,10 +37,6 @@ from config import (
     GEMINI_SCHEDULED_MODEL,
     GEMINI_GATEKEEPER_MODEL,
     GEMINI_GATEKEEPER_TIMEOUT_SECONDS,
-    GEMMA_OBSERVER_ENABLED,
-    GEMMA_OBSERVER_URL,
-    GEMMA_OBSERVER_MODEL,
-    GEMMA_OBSERVER_TIMEOUT_SECONDS,
     DATA_EXPORTS_DIR,
     GOOGLE_DRIVE_UPLOAD_DIR,
     LIVE_DRIVE_MODE,
@@ -95,7 +88,6 @@ from tools.market_calendar import get_market_holiday_name, is_nse_trading_day
 from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
 from tools.gemini_gatekeeper import GeminiGatekeeper
-from tools.gemma_observer import GemmaObserver
 from tools.candidate_audit import CandidateAudit
 from tools.position_serial import (
     build_status_message,
@@ -141,10 +133,6 @@ class BlitzTrader:
         self._promoted_futures_filters: list = []
         # Gemini entry gatekeeper (approve/reject every Python-passed signal)
         self._gatekeeper: GeminiGatekeeper | None = None
-        # Gemma observer (async, non-blocking, never in decision path)
-        self._gemma: GemmaObserver | None = None
-        # Per-signal Gemma opinions keyed by signal_id (for Telegram notifications)
-        self._gemma_opinions: dict[str, dict] = {}
 
     def run(self):
         """Run the full trading session."""
@@ -447,26 +435,6 @@ class BlitzTrader:
             logger.warning(
                 "GEMINI_API_KEY not set — gatekeeper disabled, "
                 "ALL Python-approved signals will be auto-REJECTED"
-            )
-
-        # Wire Gemma observer (async, non-blocking, never in decision path)
-        # Uses local Ollama — NOT the Google API. Disabled by default on resource-constrained VMs.
-        self._gemma = GemmaObserver(
-            enabled=GEMMA_OBSERVER_ENABLED,
-            url=GEMMA_OBSERVER_URL,
-            model=GEMMA_OBSERVER_MODEL,
-            timeout_seconds=GEMMA_OBSERVER_TIMEOUT_SECONDS,
-            callback=self._on_gemma_opinion,
-        )
-        if GEMMA_OBSERVER_ENABLED:
-            logger.info(
-                "Gemma observer ENABLED: url=%s model=%s timeout=%ds",
-                GEMMA_OBSERVER_URL, GEMMA_OBSERVER_MODEL, GEMMA_OBSERVER_TIMEOUT_SECONDS,
-            )
-        else:
-            logger.info(
-                "Gemma observer DISABLED (GEMMA_OBSERVER_ENABLED=false). "
-                "Opinions recorded as UNAVAILABLE. Trading unaffected."
             )
 
         # Candidate audit log — durable JSONL record of every signal at every stage
@@ -901,9 +869,6 @@ class BlitzTrader:
                                     stage="RAW_CANDIDATE",
                                     signal=sig,
                                 )
-                                # Submit ALL raw candidates to Gemma (observer only, async)
-                                if self._gemma:
-                                    self._gemma.submit(sig, "")
 
                             tradeable_sigs, blocked_sigs = self._filter_tradeable_signals(
                                 new_sigs,
@@ -1071,13 +1036,11 @@ class BlitzTrader:
         """
         Entry flow for scanner-detected signals that passed hard guardrails.
 
-        Three-stage gate (invariants NEVER violated):
+        Two-stage gate (invariants NEVER violated):
           1. Python hard review   — deterministic indicator/risk checks (no LLM)
-          2. Gemma observer       — already submitted for ALL raw candidates in the scan loop;
-                                   gk_context (richer) is re-submitted here for the Telegram path
-          3. Gemini gatekeeper    — 5-second timeout, structured JSON; timeout/error = REJECT
+          2. Gemini gatekeeper    — 5-second timeout, structured JSON; timeout/error = REJECT
 
-        Only after all three stages pass does Python place the order.
+        Only after both stages pass does Python place the order.
         Exits (SL/trailing/target/EOD/manual) are always deterministic Python-only.
         """
         for signal in signals:
@@ -1125,13 +1088,7 @@ class BlitzTrader:
                     reason=python_reason,
                 )
 
-                # ── Stage 2: Gemma observer (re-submit with richer context) ──
-                # Note: ALL raw candidates were already submitted with empty context
-                # in the scan loop. This re-submit provides gk_context for journaling.
-                if self._gemma:
-                    self._gemma.submit(signal, gk_context)
-
-                # ── Stage 3: Gemini gatekeeper (APPROVE / REJECT, 5-second SLA) ──
+                # ── Stage 2: Gemini gatekeeper (APPROVE / REJECT, 5-second SLA) ──
                 if not self._gatekeeper:
                     # No API key configured — reject all signals
                     self._audit.record(
@@ -1268,40 +1225,6 @@ class BlitzTrader:
                     reason=f"Python execution error: {exc}",
                 )
 
-    def _on_gemma_opinion(self, signal: dict, opinion: dict) -> None:
-        """
-        Callback invoked by GemmaObserver daemon thread when Gemma responds.
-
-        INVARIANT: This callback NEVER affects trade decisions.
-        It records the opinion for journaling, deferred Telegram messages, and the audit log.
-        """
-        signal_id = signal.get("_signal_id", "")
-        if signal_id:
-            self._gemma_opinions[signal_id] = opinion
-        symbol = signal.get("symbol", "?")
-        strategy = signal.get("strategy", "?")
-        if not opinion.get("gemma_error"):
-            logger.info(
-                "Gemma observer recorded: %s %s → %s (%.0f%%) — %s",
-                symbol, strategy,
-                opinion.get("alignment", "?"),
-                float(opinion.get("confidence", 0)) * 100,
-                opinion.get("key_observation", ""),
-            )
-        # Audit the Gemma opinion — purely for the durable record
-        self._audit.record(
-            signal_id=signal_id,
-            stage="GEMMA_OPINION",
-            signal=signal,
-            reason=opinion.get("gemma_error") or "",
-            details={
-                "alignment": opinion.get("alignment"),
-                "confidence": opinion.get("confidence"),
-                "key_observation": opinion.get("key_observation"),
-                "concern": opinion.get("concern"),
-            },
-        )
-
     def _notify_entry(
         self,
         signal: dict,
@@ -1311,7 +1234,7 @@ class BlitzTrader:
         signal_id: str,
     ) -> None:
         """
-        Send an enriched Telegram entry notification that includes Gemini and Gemma context.
+        Send an enriched Telegram entry notification that includes Gemini approval context.
         """
         symbol = signal.get("symbol", "?")
         strategy = signal.get("strategy", "?")
@@ -1323,27 +1246,6 @@ class BlitzTrader:
         gate_reason = gate_result.get("reason", "")
         gate_conditions = gate_result.get("conditions_checked", [])
         gate_risk_notes = gate_result.get("risk_notes", "")
-
-        # Always render a Gemma status line (opinion, pending, or unavailable)
-        opinion = self._gemma_opinions.get(signal_id)
-        if opinion is None:
-            if self._gemma and not getattr(self._gemma, "_enabled", True):
-                gemma_line = (
-                    "\nGemma: UNAVAILABLE — observer disabled (GEMMA_OBSERVER_ENABLED=false)"
-                )
-            else:
-                gemma_line = (
-                    "\nGemma: PENDING — async opinion not yet received (see audit log)"
-                )
-        elif opinion.get("gemma_error"):
-            gemma_line = (
-                f"\nGemma: UNAVAILABLE — {opinion['gemma_error'][:120]}"
-            )
-        else:
-            alignment = opinion.get("alignment", "?")
-            confidence_pct = f"{opinion.get('confidence', 0):.0%}"
-            obs = (opinion.get("key_observation") or "")[:80]
-            gemma_line = f"\nGemma: {alignment} ({confidence_pct}) — {obs}"
 
         price_str = f"₹{fill_price:.2f}" if fill_price is not None else "MARKET"
         sl_str = f"₹{stop_loss:.2f}" if stop_loss is not None else "—"
@@ -1362,7 +1264,6 @@ class BlitzTrader:
         )
         if gate_risk_notes:
             msg += f"\n⚠ Risk note: {gate_risk_notes}"
-        msg += gemma_line
 
         try:
             self._telegram.send_telegram(msg)
