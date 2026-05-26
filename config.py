@@ -138,14 +138,53 @@ RCLONE_FOLDER = _optional_env("RCLONE_FOLDER", "BlitzTrader")
 
 VIRTUAL_CAPITAL = 1_000_000  # ₹10,00,000
 TRADE_SYMBOLS = ("NIFTY", "BANKNIFTY")
-MAX_POSITIONS = 2
+
+# ──────────────────────────────────────────────────────────────
+#   OPTION SPREAD TRADING PARAMETERS
+# ──────────────────────────────────────────────────────────────
+
+# Maximum simultaneous open option spreads
+MAX_OPEN_OPTION_SPREADS = _optional_int_env("MAX_OPEN_OPTION_SPREADS", 2)
+# Alias used in legacy guardrail checks
+MAX_POSITIONS = MAX_OPEN_OPTION_SPREADS
+
+# Risk per spread
+OPTION_SPREAD_MAX_RISK_PCT = float(_optional_env("OPTION_SPREAD_MAX_RISK_PCT", "1.0")) / 100.0
+OPTION_SPREAD_MAX_RISK_RUPEES = _optional_int_env("OPTION_SPREAD_MAX_RISK_RUPEES", 10000)
+
+# Exit thresholds (fraction of max possible loss/profit)
+SPREAD_MAX_LOSS_EXIT_FRACTION = 0.60   # exit if loss >= 60% of max loss
+SPREAD_CREDIT_TP_FRACTION     = 0.60   # credit spread: take profit at 60% of max profit
+SPREAD_DEBIT_TP_FRACTION      = 0.70   # debit spread:  take profit at 70% of max profit
+
+# Expiry selection
+ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS = (
+    _optional_env("ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS", "false").lower() == "true"
+)
+
+# Strike-width config (points) — used when no promoted filter overrides
+NIFTY_SPREAD_WIDTH     = _optional_int_env("NIFTY_SPREAD_WIDTH", 100)
+BANKNIFTY_SPREAD_WIDTH = _optional_int_env("BANKNIFTY_SPREAD_WIDTH", 300)
+
+# Minimum bid for sell leg (avoid zero-bid shorts)
+MIN_SELL_LEG_BID = float(_optional_env("MIN_SELL_LEG_BID", "5.0"))
+
+# Maximum bid-ask spread fraction allowed for each option leg
+MAX_BID_ASK_SPREAD_FRACTION = float(_optional_env("MAX_BID_ASK_SPREAD_FRACTION", "0.30"))
+
+# Minimum notional leg value to avoid near-zero/stale options
+MIN_OPTION_LTP = float(_optional_env("MIN_OPTION_LTP", "2.0"))
+
+# Gamma-risk guard: reject credit spreads within this many days of same-expiry
+# unless ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS=true
+MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD = _optional_int_env("MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD", 1)
 
 # ──────────────────────────────────────────────────────────────
 #   DISK GUARD
 # ──────────────────────────────────────────────────────────────
 
 MIN_FREE_DISK_MB = 2048   # abort if less than 2 GB free
-MAX_RISK_PCT = 0.05  # 5% of capital per trade
+MAX_RISK_PCT = OPTION_SPREAD_MAX_RISK_PCT
 MAX_DAILY_LOSS_PCT = 0.05  # 5% daily loss limit
 MAX_DAILY_LOSS_AMOUNT = VIRTUAL_CAPITAL * MAX_DAILY_LOSS_PCT  # ₹50,000
 
