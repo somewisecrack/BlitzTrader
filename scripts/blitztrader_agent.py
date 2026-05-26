@@ -151,6 +151,7 @@ class BlitzTraderAgent:
         self._running = True
         self._telegram = None
         self._agent = None
+        self._telegram_started = False
 
     def _setup_signal_handlers(self):
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -159,6 +160,9 @@ class BlitzTraderAgent:
     def _handle_shutdown(self, signum, frame):
         logger.info("Shutdown signal received — stopping Q&A agent")
         self._running = False
+        if self._telegram_started and self._telegram:
+            self._telegram.stop()
+            self._telegram_started = False
         _remove_agent_pid()
 
     def _initialize(self):
@@ -177,7 +181,8 @@ class BlitzTraderAgent:
             bot_token=TELEGRAM_BOT_TOKEN,
             authorized_user_id=TELEGRAM_AUTHORIZED_USER_ID,
         )
-        self._telegram.start()
+        # Do NOT start the handler here — lazy start in the main loop
+        # to avoid dual-polling when the trading service is also active.
 
         self._agent = AgentLoop(
             api_key=GEMINI_API_KEY,
@@ -189,12 +194,8 @@ class BlitzTraderAgent:
         )
 
         logger.info(
-            "BlitzTrader Q&A agent started (pid=%d). Trading PID file: %s",
+            "BlitzTrader Q&A agent initialized (pid=%d). Trading PID file: %s",
             os.getpid(), TRADING_PID_FILE,
-        )
-        self._telegram.send_telegram(
-            "📖 BlitzTrader Q&A agent is online. "
-            "Ask me anything about past sessions, strategies, or results."
         )
 
     def _answer_message(self, message_text: str) -> None:
@@ -238,36 +239,50 @@ class BlitzTraderAgent:
             sys.exit(1)
 
         while self._running:
-            # Yield to trading service when it's active
-            if _is_trading_service_active():
-                logger.debug("Trading service active — yielding Telegram polling")
+            trading_active = _is_trading_service_active()
+
+            # ── Manage Telegram handler ownership ───────────────────────────
+            if trading_active and self._telegram_started:
+                self._telegram.stop()
+                self._telegram_started = False
+                logger.info("Yielding Telegram to trading service")
+            elif not trading_active and not self._telegram_started:
+                self._telegram.start()
+                self._telegram_started = True
+                logger.info("Starting Telegram polling (trading service inactive)")
+                self._telegram.send_telegram(
+                    "📖 BlitzTrader Q&A agent is online. "
+                    "Ask me anything about past sessions, strategies, or results."
+                )
+
+            # ── Process messages when we own the handler ─────────────────────
+            if self._telegram_started:
+                try:
+                    commands = self._telegram.get_pending_commands()
+                    for cmd in commands:
+                        text = cmd.get("text", "").strip()
+                        if not text:
+                            continue
+                        command = cmd.get("command", "")
+
+                        # Ignore trading commands — those are for the live trader
+                        if command in {"/abort", "/pause", "/resume"}:
+                            self._telegram.send_telegram(
+                                f"⚠️ Command {command!r} is only active during live trading hours. "
+                                "The trading service is not currently running."
+                            )
+                            continue
+
+                        logger.info("Q&A message: %r", text[:80])
+                        self._answer_message(text)
+
+                except Exception:
+                    logger.exception("Error in Q&A polling loop (non-fatal)")
+
+                time.sleep(POLL_INTERVAL_SECONDS)
+            else:
+                # Trading service is active — yield and check again later
                 time.sleep(YIELD_CHECK_INTERVAL_SECONDS)
-                continue
-
-            # Drain any pending messages
-            try:
-                commands = self._telegram.get_pending_commands()
-                for cmd in commands:
-                    text = cmd.get("text", "").strip()
-                    if not text:
-                        continue
-                    command = cmd.get("command", "")
-
-                    # Ignore trading commands — those are for the live trader
-                    if command in {"/abort", "/pause", "/resume"}:
-                        self._telegram.send_telegram(
-                            f"⚠️ Command {command!r} is only active during live trading hours. "
-                            "The trading service is not currently running."
-                        )
-                        continue
-
-                    logger.info("Q&A message: %r", text[:80])
-                    self._answer_message(text)
-
-            except Exception:
-                logger.exception("Error in Q&A polling loop (non-fatal)")
-
-            time.sleep(POLL_INTERVAL_SECONDS)
 
         logger.info("BlitzTrader Q&A agent stopped")
 
