@@ -722,239 +722,242 @@ class BlitzTrader:
         except Exception:
             logger.warning("Could not write trading PID file — agent coordination unavailable")
 
-        while self._running:
-            now = datetime.now(IST)
+        try:
+            while self._running:
+                now = datetime.now(IST)
 
-            # ── Check EOD ──
-            eod_time = now.replace(hour=15, minute=15, second=0, microsecond=0)
-            if now >= eod_time:
-                logger.info("=== EOD SEQUENCE ===")
-                # Close futures positions
-                close_result = self._order_exec.close_all_positions() if self._order_exec else {}
-                logger.info("Deterministic futures EOD close result: %s", close_result)
+                # ── Check EOD ──
+                eod_time = now.replace(hour=15, minute=15, second=0, microsecond=0)
+                if now >= eod_time:
+                    logger.info("=== EOD SEQUENCE ===")
+                    # Close futures positions
+                    close_result = self._order_exec.close_all_positions() if self._order_exec else {}
+                    logger.info("Deterministic futures EOD close result: %s", close_result)
 
-                eod_context = build_eod_context()
-                self._run_agent_iteration(
-                    eod_context,
-                    model=GEMINI_DECISION_MODEL,
-                    max_tokens=GEMINI_MAX_DECISION_TOKENS,
-                    phase="eod",
-                )
-                if self._telegram:
-                    pnl, pnl_pct = self._state.get_daily_pnl()
-                    self._telegram.send_telegram(
-                        f"EOD complete.\n"
-                        f"Trades: {self._state.get_state().get('trade_count', 0)} | "
-                        f"P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)"
+                    eod_context = build_eod_context()
+                    self._run_agent_iteration(
+                        eod_context,
+                        model=GEMINI_DECISION_MODEL,
+                        max_tokens=GEMINI_MAX_DECISION_TOKENS,
+                        phase="eod",
                     )
-                if self._feed:
-                    self._feed.stop()
-                self._upload_data_export()
-                self._remove_trading_pid()
-                self._running = False
-                return
-
-            # ── Monitor feed health (log only, never send to Telegram) ──
-            if not self._feed.is_connected:
-                if feed_disconnect_start is None:
-                    feed_disconnect_start = now
-                disconnect_duration = (now - feed_disconnect_start).total_seconds()
-                if disconnect_duration > 30:
-                    if last_feed_health_alert is None or (now - last_feed_health_alert).total_seconds() > 300:
-                        logger.warning(f"WebSocket feed disconnected for {disconnect_duration:.0f}s")
-                        last_feed_health_alert = now
-            else:
-                if feed_disconnect_start is not None:
-                    logger.info("✓ WebSocket feed reconnected")
-                feed_disconnect_start = None
-                last_feed_health_alert = None
-
-            # ── Drain Telegram queue (ALWAYS — even pre-market) ──
-            commands = self._telegram.get_pending_commands()
-            abort_cmds = [c for c in commands if c["command"] == "/abort"]
-            chat_msgs  = [c for c in commands if not c["command"]]  # free-form text
-            other_cmds = [c for c in commands if c["command"] and c["command"] != "/abort"]
-
-            # ── Handle abort (highest priority, any time) ──
-            if abort_cmds:
-                logger.warning("ABORT received!")
-                if self._order_exec:
-                    close_result = self._order_exec.close_all_positions()
-                    logger.info("Abort deterministic close result: %s", close_result)
-                if self._journal:
-                    self._journal.log_decision(
-                        action="ABORT",
-                        reason="User abort command received. Deterministic close_all_positions executed.",
-                    )
-                if self._telegram:
-                    self._telegram.send_telegram("🛑 Abort received. All open positions closed. Session stopping.")
-                self._remove_trading_pid()
-                self._running = False
-                return
-
-            # Re-queue /pause, /resume, /status etc. for the next agent interaction.
-            for cmd in other_cmds:
-                self._telegram._command_queue.append(cmd)
-
-            # ── Chat iteration: respond immediately at ANY time of day ──
-            if chat_msgs:
-                logger.info(f"Chat message received — responding immediately")
-                try:
-                    if self._try_answer_simple_chat(chat_msgs):
-                        consecutive_errors = 0
-                        continue
-                    if self._llm_disabled_reason:
+                    if self._telegram:
+                        pnl, pnl_pct = self._state.get_daily_pnl()
                         self._telegram.send_telegram(
-                            "Gemini is currently unavailable "
-                            f"({self._llm_disabled_reason}). Market scanner, "
-                            "feed recording, deterministic trade execution, and SL/target/EOD safety "
-                            "continue, but I cannot reason or answer conversationally "
-                            "until the Gemini billing/quota issue is fixed."
+                            f"EOD complete.\n"
+                            f"Trades: {self._state.get_state().get('trade_count', 0)} | "
+                            f"P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)"
                         )
+                    if self._feed:
+                        self._feed.stop()
+                    self._upload_data_export()
+                    self._remove_trading_pid()
+                    self._running = False
+                    return
+
+                # ── Monitor feed health (log only, never send to Telegram) ──
+                if not self._feed.is_connected:
+                    if feed_disconnect_start is None:
+                        feed_disconnect_start = now
+                    disconnect_duration = (now - feed_disconnect_start).total_seconds()
+                    if disconnect_duration > 30:
+                        if last_feed_health_alert is None or (now - last_feed_health_alert).total_seconds() > 300:
+                            logger.warning(f"WebSocket feed disconnected for {disconnect_duration:.0f}s")
+                            last_feed_health_alert = now
+                else:
+                    if feed_disconnect_start is not None:
+                        logger.info("✓ WebSocket feed reconnected")
+                    feed_disconnect_start = None
+                    last_feed_health_alert = None
+
+                # ── Drain Telegram queue (ALWAYS — even pre-market) ──
+                commands = self._telegram.get_pending_commands()
+                abort_cmds = [c for c in commands if c["command"] == "/abort"]
+                chat_msgs  = [c for c in commands if not c["command"]]  # free-form text
+                other_cmds = [c for c in commands if c["command"] and c["command"] != "/abort"]
+
+                # ── Handle abort (highest priority, any time) ──
+                if abort_cmds:
+                    logger.warning("ABORT received!")
+                    if self._order_exec:
+                        close_result = self._order_exec.close_all_positions()
+                        logger.info("Abort deterministic close result: %s", close_result)
+                    if self._journal:
+                        self._journal.log_decision(
+                            action="ABORT",
+                            reason="User abort command received. Deterministic close_all_positions executed.",
+                        )
+                    if self._telegram:
+                        self._telegram.send_telegram("🛑 Abort received. All open positions closed. Session stopping.")
+                    self._remove_trading_pid()
+                    self._running = False
+                    return
+
+                # Re-queue /pause, /resume, /status etc. for the next agent interaction.
+                for cmd in other_cmds:
+                    self._telegram._command_queue.append(cmd)
+
+                # ── Chat iteration: respond immediately at ANY time of day ──
+                if chat_msgs:
+                    logger.info(f"Chat message received — responding immediately")
+                    try:
+                        if self._try_answer_simple_chat(chat_msgs):
+                            consecutive_errors = 0
+                            continue
+                        if self._llm_disabled_reason:
+                            self._telegram.send_telegram(
+                                "Gemini is currently unavailable "
+                                f"({self._llm_disabled_reason}). Market scanner, "
+                                "feed recording, deterministic trade execution, and SL/target/EOD safety "
+                                "continue, but I cannot reason or answer conversationally "
+                                "until the Gemini billing/quota issue is fixed."
+                            )
+                            consecutive_errors = 0
+                            continue
+                        context = build_chat_context(
+                            chat_messages=chat_msgs,
+                            state_manager=self._state,
+                            order_execution=self._order_exec,
+                        )
+                        final_text = self._run_agent_iteration(
+                            context,
+                            model=GEMINI_SCHEDULED_MODEL,
+                            max_tokens=GEMINI_MAX_SCHEDULED_TOKENS,
+                            max_tool_rounds=6,
+                            phase="chat",
+                        )
+                        # Detect Gemini 503/UNAVAILABLE and send deterministic fallback
+                        last_err = self._agent.get_last_error() if self._agent else None
+                        if last_err and last_err.get("kind") == "service_unavailable":
+                            self._telegram.send_telegram(
+                                "⚠️ Gemini is temporarily unavailable. "
+                                "Deterministic commands (pnl / status / positions / exit N) "
+                                "still work — just ask."
+                            )
+                        # Deliver final_text if Gemini reasoned but didn't call send_telegram
+                        elif (
+                            final_text
+                            and self._agent
+                            and not self._agent.was_send_telegram_called()
+                        ):
+                            self._telegram.send_telegram(final_text)
                         consecutive_errors = 0
-                        continue
-                    context = build_chat_context(
-                        chat_messages=chat_msgs,
-                        state_manager=self._state,
-                        order_execution=self._order_exec,
-                    )
-                    final_text = self._run_agent_iteration(
-                        context,
-                        model=GEMINI_SCHEDULED_MODEL,
-                        max_tokens=GEMINI_MAX_SCHEDULED_TOKENS,
-                        max_tool_rounds=6,
-                        phase="chat",
-                    )
-                    # Detect Gemini 503/UNAVAILABLE and send deterministic fallback
-                    last_err = self._agent.get_last_error() if self._agent else None
-                    if last_err and last_err.get("kind") == "service_unavailable":
+                    except Exception as e:
+                        consecutive_errors += 1
+                        logger.exception("Error in chat iteration")
                         self._telegram.send_telegram(
-                            "⚠️ Gemini is temporarily unavailable. "
-                            "Deterministic commands (pnl / status / positions / exit N) "
-                            "still work — just ask."
+                            f"⚠️ Error responding to your message: {str(e)[:200]}"
                         )
-                    # Deliver final_text if Gemini reasoned but didn't call send_telegram
-                    elif (
-                        final_text
-                        and self._agent
-                        and not self._agent.was_send_telegram_called()
-                    ):
-                        self._telegram.send_telegram(final_text)
-                    consecutive_errors = 0
-                except Exception as e:
-                    consecutive_errors += 1
-                    logger.exception("Error in chat iteration")
+
+                # ── Wait for market open (only blocks scheduled analysis, not chat) ──
+                market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
+                if now < market_open_time:
+                    wait_secs = (market_open_time - now).total_seconds()
+                    if (not hasattr(self, '_last_wait_log')
+                            or (now - self._last_wait_log).total_seconds() >= 60):
+                        logger.info(f"Waiting {wait_secs:.0f}s for market open...")
+                        self._last_wait_log = now
+                    time.sleep(min(wait_secs, TELEGRAM_POLL_INTERVAL_SECONDS))
+                    continue
+
+                # ── Notify once when market opens ──
+                state = self._state.get_state()
+                notifications_sent = state.get("notifications_sent", {}) or {}
+                today_key = now.strftime("%Y-%m-%d")
+                market_open_key = f"market_open_ready:{today_key}"
+                if not notifications_sent.get(market_open_key):
                     self._telegram.send_telegram(
-                        f"⚠️ Error responding to your message: {str(e)[:200]}"
+                        "Market is now open. BlitzTrader is active and scanning for setups. "
+                        "All systems ready."
                     )
+                    logger.info("Market open — Telegram notified")
+                    notifications_sent[market_open_key] = datetime.now(IST).isoformat()
+                    self._state.update_state(notifications_sent=notifications_sent)
 
-            # ── Wait for market open (only blocks scheduled analysis, not chat) ──
-            market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
-            if now < market_open_time:
-                wait_secs = (market_open_time - now).total_seconds()
-                if (not hasattr(self, '_last_wait_log')
-                        or (now - self._last_wait_log).total_seconds() >= 60):
-                    logger.info(f"Waiting {wait_secs:.0f}s for market open...")
-                    self._last_wait_log = now
-                time.sleep(min(wait_secs, TELEGRAM_POLL_INTERVAL_SECONDS))
-                continue
-
-            # ── Notify once when market opens ──
-            state = self._state.get_state()
-            notifications_sent = state.get("notifications_sent", {}) or {}
-            today_key = now.strftime("%Y-%m-%d")
-            market_open_key = f"market_open_ready:{today_key}"
-            if not notifications_sent.get(market_open_key):
-                self._telegram.send_telegram(
-                    "Market is now open. BlitzTrader is active and scanning for setups. "
-                    "All systems ready."
-                )
-                logger.info("Market open — Telegram notified")
-                notifications_sent[market_open_key] = datetime.now(IST).isoformat()
-                self._state.update_state(notifications_sent=notifications_sent)
-
-            # ── Background scanner + deterministic execution: every 60 seconds ──
-            if (
-                last_scan_at is None
-                or (now - last_scan_at).total_seconds() >= SCAN_INTERVAL_SECONDS
-            ):
-                last_scan_at = now
-                try:
-                    scan_result = self._market_data.get_strategy_signals()
-                    new_sigs = scan_result.get("signals", [])
-                    if new_sigs:
-                        # Assign signal_id to ALL raw candidates before any filtering
-                        for sig in new_sigs:
-                            if not sig.get("_signal_id"):
-                                sig["_signal_id"] = (
-                                    f"{sig.get('symbol', '?')}_"
-                                    f"{sig.get('strategy', '?')}_"
-                                    f"{sig.get('direction', '?')}_"
-                                    f"{int(time.time())}"
+                # ── Background scanner + deterministic execution: every 60 seconds ──
+                if (
+                    last_scan_at is None
+                    or (now - last_scan_at).total_seconds() >= SCAN_INTERVAL_SECONDS
+                ):
+                    last_scan_at = now
+                    try:
+                        scan_result = self._market_data.get_strategy_signals()
+                        new_sigs = scan_result.get("signals", [])
+                        if new_sigs:
+                            # Assign signal_id to ALL raw candidates before any filtering
+                            for sig in new_sigs:
+                                if not sig.get("_signal_id"):
+                                    sig["_signal_id"] = (
+                                        f"{sig.get('symbol', '?')}_"
+                                        f"{sig.get('strategy', '?')}_"
+                                        f"{sig.get('direction', '?')}_"
+                                        f"{int(time.time())}"
+                                    )
+                                # Audit every raw candidate
+                                self._audit.record(
+                                    signal_id=sig["_signal_id"],
+                                    stage="RAW_CANDIDATE",
+                                    signal=sig,
                                 )
-                            # Audit every raw candidate
-                            self._audit.record(
-                                signal_id=sig["_signal_id"],
-                                stage="RAW_CANDIDATE",
-                                signal=sig,
-                            )
-                            # Submit ALL raw candidates to Gemma (observer only, async)
-                            if self._gemma:
-                                self._gemma.submit(sig, "")
+                                # Submit ALL raw candidates to Gemma (observer only, async)
+                                if self._gemma:
+                                    self._gemma.submit(sig, "")
 
-                        tradeable_sigs, blocked_sigs = self._filter_tradeable_signals(
-                            new_sigs,
-                            now,
-                            existing_pending=[],
-                        )
-                        for sig in blocked_sigs:
-                            self._audit.record(
-                                signal_id=sig.get("_signal_id", ""),
-                                stage="HARD_GUARDRAIL_BLOCKED",
-                                signal=sig,
-                                reason=sig.get("blocked_reason", ""),
+                            tradeable_sigs, blocked_sigs = self._filter_tradeable_signals(
+                                new_sigs,
+                                now,
+                                existing_pending=[],
                             )
-                        for sig in tradeable_sigs:
-                            self._audit.record(
-                                signal_id=sig.get("_signal_id", ""),
-                                stage="HARD_GUARDRAIL_PASSED",
-                                signal=sig,
-                            )
-                        if blocked_sigs:
+                            for sig in blocked_sigs:
+                                self._audit.record(
+                                    signal_id=sig.get("_signal_id", ""),
+                                    stage="HARD_GUARDRAIL_BLOCKED",
+                                    signal=sig,
+                                    reason=sig.get("blocked_reason", ""),
+                                )
+                            for sig in tradeable_sigs:
+                                self._audit.record(
+                                    signal_id=sig.get("_signal_id", ""),
+                                    stage="HARD_GUARDRAIL_PASSED",
+                                    signal=sig,
+                                )
+                            if blocked_sigs:
+                                logger.info(
+                                    "Scanner: %d signal(s) blocked by hard guardrails: %s",
+                                    len(blocked_sigs),
+                                    [
+                                        f"{s.get('symbol')} {s.get('strategy')}: {s.get('blocked_reason')}"
+                                        for s in blocked_sigs
+                                    ],
+                                )
                             logger.info(
-                                "Scanner: %d signal(s) blocked by hard guardrails: %s",
-                                len(blocked_sigs),
-                                [
-                                    f"{s.get('symbol')} {s.get('strategy')}: {s.get('blocked_reason')}"
-                                    for s in blocked_sigs
-                                ],
+                                f"Scanner: {len(new_sigs)} new signal(s), "
+                                f"{len(tradeable_sigs)} passed hard guardrails → "
+                                f"{[s['strategy'] + ' ' + s['direction'] for s in tradeable_sigs]}"
                             )
-                        logger.info(
-                            f"Scanner: {len(new_sigs)} new signal(s), "
-                            f"{len(tradeable_sigs)} passed hard guardrails → "
-                            f"{[s['strategy'] + ' ' + s['direction'] for s in tradeable_sigs]}"
-                        )
-                        if tradeable_sigs:
-                            self._process_tradeable_signals_python(tradeable_sigs)
-                    if scan_result.get("notes"):
-                        logger.debug(f"Scanner notes: {scan_result['notes']}")
-                except Exception:
-                    logger.exception("Background scanner error (non-fatal)")
+                            if tradeable_sigs:
+                                self._process_tradeable_signals_python(tradeable_sigs)
+                        if scan_result.get("notes"):
+                            logger.debug(f"Scanner notes: {scan_result['notes']}")
+                    except Exception:
+                        logger.exception("Background scanner error (non-fatal)")
 
-            # ── Check daily loss limit ──
-            state = self._state.get_state()
-            if state.get("is_stopped"):
-                logger.warning("Trading stopped — daily loss limit hit")
-                self._telegram.send_telegram(
-                    "🛑 BlitzTrader STOPPED: Daily loss limit hit. "
-                    "All positions closed."
-                )
-                self._remove_trading_pid()
-                self._running = False
-                return
+                # ── Check daily loss limit ──
+                state = self._state.get_state()
+                if state.get("is_stopped"):
+                    logger.warning("Trading stopped — daily loss limit hit")
+                    self._telegram.send_telegram(
+                        "🛑 BlitzTrader STOPPED: Daily loss limit hit. "
+                        "All positions closed."
+                    )
+                    self._remove_trading_pid()
+                    self._running = False
+                    return
 
-            # ── Short sleep — stay responsive to Telegram ──
-            time.sleep(TELEGRAM_POLL_INTERVAL_SECONDS)
+                # ── Short sleep — stay responsive to Telegram ──
+                time.sleep(TELEGRAM_POLL_INTERVAL_SECONDS)
+        finally:
+            self._remove_trading_pid()
 
     def _filter_tradeable_signals(
         self,
@@ -1318,15 +1321,26 @@ class BlitzTrader:
         gate_conditions = gate_result.get("conditions_checked", [])
         gate_risk_notes = gate_result.get("risk_notes", "")
 
-        # Try to include the Gemma opinion if it arrived in time (best-effort)
-        gemma = self._gemma_opinions.get(signal_id, {})
-        gemma_line = ""
-        if gemma and not gemma.get("gemma_error"):
+        # Always render a Gemma status line (opinion, pending, or unavailable)
+        opinion = self._gemma_opinions.get(signal_id)
+        if opinion is None:
+            if self._gemma and not getattr(self._gemma, "_enabled", True):
+                gemma_line = (
+                    "\nGemma: UNAVAILABLE — observer disabled (GEMMA_OBSERVER_ENABLED=false)"
+                )
+            else:
+                gemma_line = (
+                    "\nGemma: PENDING — async opinion not yet received (see audit log)"
+                )
+        elif opinion.get("gemma_error"):
             gemma_line = (
-                f"\n🔬 **Gemma**: {gemma.get('alignment','?')} "
-                f"({gemma.get('confidence', 0):.0%}) — "
-                f"{gemma.get('key_observation', '')}"
+                f"\nGemma: UNAVAILABLE — {opinion['gemma_error'][:120]}"
             )
+        else:
+            alignment = opinion.get("alignment", "?")
+            confidence_pct = f"{opinion.get('confidence', 0):.0%}"
+            obs = (opinion.get("key_observation") or "")[:80]
+            gemma_line = f"\nGemma: {alignment} ({confidence_pct}) — {obs}"
 
         price_str = f"₹{fill_price:.2f}" if fill_price is not None else "MARKET"
         sl_str = f"₹{stop_loss:.2f}" if stop_loss is not None else "—"
