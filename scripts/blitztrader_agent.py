@@ -122,20 +122,19 @@ def _build_minimal_registry(telegram_handler, agent_loop):
     journal = JournalWriter(journals_dir=JOURNALS_DIR)
     strategy = StrategyReader(master_file=MASTER_STRATEGY_FILE, strategies_dir=STRATEGIES_DIR)
     memory = MemoryReader(journals_dir=JOURNALS_DIR, memory_file=MEMORY_FILE)
-    goals = GoalManager(state_manager=state)
+    goals = GoalManager()
 
     registry = ToolRegistry(
-        state_manager=state,
-        order_execution=None,     # read-only — no order tools
-        telegram_handler=telegram_handler,
         market_data=None,
+        order_execution=None,     # read-only — no order tools
+        telegram=telegram_handler,
         journal=journal,
-        strategy=strategy,
-        memory=memory,
-        goals=goals,
+        strategy_reader=strategy,
+        memory_reader=memory,
+        goal_manager=goals,
+        live_feed=None,
         shoonya_client=None,
         active_tokens={},
-        live_feed=None,
     )
     return registry
 
