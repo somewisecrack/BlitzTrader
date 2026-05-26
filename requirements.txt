@@ -19,7 +19,7 @@ pytz>=2024.1
 # Logging / misc
 requests>=2.31.0
 
-# Pairs trading — statistical analysis
+# Backtesting / statistics (futures wiki pipeline)
 numpy>=1.26.0
 pandas>=2.2.0
 scipy>=1.13.0

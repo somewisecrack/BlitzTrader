@@ -2,8 +2,8 @@
 futures_hypothesis.py — Hypothesis and backtest result data models for the BlitzTrader wiki system.
 
 Scope: futures only (NIFTY, BANKNIFTY).
-LLM/Gemini is postmarket research only — never a live gatekeeper.
-All live trading decisions remain 100% Python-driven.
+Gemini gates live entries via GeminiGatekeeper; hypotheses and promotions remain post-market and Python-driven.
+All exit decisions (stop-loss, trailing stop, target, EOD, emergency) remain 100% Python-driven.
 """
 
 import json

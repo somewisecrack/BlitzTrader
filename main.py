@@ -21,6 +21,7 @@ import shutil
 import signal
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -883,15 +884,16 @@ class BlitzTrader:
                     scan_result = self._market_data.get_strategy_signals()
                     new_sigs = scan_result.get("signals", [])
                     if new_sigs:
-                        # Assign signal_id to ALL raw candidates before any filtering
+                        # Assign signal_id to ALL raw candidates before any filtering.
+                        # Format: YYYYMMDD_HHMMSSfff_SYMBOL_D_xxxxxxxx
+                        # uuid4 suffix guarantees uniqueness even for same-second signals.
                         for sig in new_sigs:
                             if not sig.get("_signal_id"):
-                                sig["_signal_id"] = (
-                                    f"{sig.get('symbol', '?')}_"
-                                    f"{sig.get('strategy', '?')}_"
-                                    f"{sig.get('direction', '?')}_"
-                                    f"{int(time.time())}"
-                                )
+                                _ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S%f")[:20]
+                                _sym = sig.get("symbol", "UNK")
+                                _dir = (sig.get("direction") or "X")[:1].upper()
+                                _uid = uuid.uuid4().hex[:8]
+                                sig["_signal_id"] = f"{_ts}_{_sym}_{_dir}_{_uid}"
                             # Audit every raw candidate
                             self._audit.record(
                                 signal_id=sig["_signal_id"],
@@ -1081,7 +1083,8 @@ class BlitzTrader:
             symbol = signal.get("symbol", "")
             direction = signal.get("direction", "")
             signal_id = signal.get("_signal_id") or (
-                f"{symbol}_{strategy}_{direction}_{int(time.time())}"
+                f"{datetime.now(IST).strftime('%Y%m%d_%H%M%S%f')[:20]}_"
+                f"{symbol}_{(direction or 'X')[:1].upper()}_{uuid.uuid4().hex[:8]}"
             )
             signal["_signal_id"] = signal_id
             try:
