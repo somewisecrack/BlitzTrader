@@ -117,10 +117,10 @@ def _build_minimal_registry(telegram_handler, agent_loop):
     from tools.memory_reader import MemoryReader
     from tools.goal_manager import GoalManager
 
-    state = StateManager(state_file=str(Path(JOURNALS_DIR).parent / "live_state.json"))
-    journal = JournalWriter(journals_dir=str(JOURNALS_DIR))
-    strategy = StrategyReader(strategy_file=str(MASTER_STRATEGY_FILE))
-    memory = MemoryReader(memory_file=str(MEMORY_FILE))
+    state = StateManager(state_file=Path(JOURNALS_DIR).parent / "live_state.json")
+    journal = JournalWriter(journals_dir=Path(JOURNALS_DIR))
+    strategy = StrategyReader(strategy_file=Path(MASTER_STRATEGY_FILE))
+    memory = MemoryReader(memory_file=Path(MEMORY_FILE))
     goals = GoalManager(state_manager=state)
 
     registry = ToolRegistry(
@@ -204,7 +204,7 @@ class BlitzTraderAgent:
             from context_builder import build_chat_context
             from tools.state_manager import StateManager
             state = StateManager(
-                state_file=str(Path(JOURNALS_DIR).parent / "live_state.json")
+                state_file=Path(JOURNALS_DIR).parent / "live_state.json"
             )
             context = build_chat_context(
                 chat_messages=[{"command": "", "text": message_text, "from_user": "user"}],
