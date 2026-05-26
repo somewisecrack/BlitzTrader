@@ -37,6 +37,7 @@ from config import (
     LOGS_DIR,
     MEMORY_FILE,
     MASTER_STRATEGY_FILE,
+    STRATEGIES_DIR,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_AUTHORIZED_USER_ID,
     setup_logging,
@@ -117,10 +118,10 @@ def _build_minimal_registry(telegram_handler, agent_loop):
     from tools.memory_reader import MemoryReader
     from tools.goal_manager import GoalManager
 
-    state = StateManager(state_file=Path(JOURNALS_DIR).parent / "live_state.json")
-    journal = JournalWriter(journals_dir=Path(JOURNALS_DIR))
-    strategy = StrategyReader(strategy_file=Path(MASTER_STRATEGY_FILE))
-    memory = MemoryReader(memory_file=Path(MEMORY_FILE))
+    state = StateManager(state_file=JOURNALS_DIR.parent / "live_state.json")
+    journal = JournalWriter(journals_dir=JOURNALS_DIR)
+    strategy = StrategyReader(master_file=MASTER_STRATEGY_FILE, strategies_dir=STRATEGIES_DIR)
+    memory = MemoryReader(journals_dir=JOURNALS_DIR, memory_file=MEMORY_FILE)
     goals = GoalManager(state_manager=state)
 
     registry = ToolRegistry(
@@ -204,7 +205,7 @@ class BlitzTraderAgent:
             from context_builder import build_chat_context
             from tools.state_manager import StateManager
             state = StateManager(
-                state_file=Path(JOURNALS_DIR).parent / "live_state.json"
+                state_file=JOURNALS_DIR.parent / "live_state.json"
             )
             context = build_chat_context(
                 chat_messages=[{"command": "", "text": message_text, "from_user": "user"}],
