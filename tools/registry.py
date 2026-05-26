@@ -89,25 +89,37 @@ class ToolRegistry:
 
         # Build the tool map — NOTE: get_option_chain is NOT in this map so the
         # live agent cannot call it.  It lives in _legacy_tool_map only.
-        self._tool_map = {
-            # Market Data
-            "get_spot_price": self._market_data.get_spot_price,
-            "get_quote": self._market_data.get_quote,
-            "get_candles": self._market_data.get_candles,
-            "get_indicators": self._market_data.get_indicators,
-            "get_strategy_signals": self._market_data.get_strategy_signals,
-            "get_vix": self._market_data.get_vix,
-            "get_market_depth": self._market_data.get_market_depth,
-            # Position & Account
-            "get_open_positions": self._order_exec.get_open_positions,
-            "get_virtual_balance": self._order_exec.get_virtual_balance,
-            "get_todays_trades": self._order_exec.get_todays_trades,
-            "get_daily_pnl": self._order_exec.get_daily_pnl,
-            # Order Execution
-            "place_virtual_order": self._place_virtual_order_tracked,
-            "cancel_order": self._order_exec.cancel_order,
-            "close_position": self._order_exec.close_position,
-            "close_all_positions": self._order_exec.close_all_positions,
+        # Components that are None (e.g. Q&A agent which has no market_data or
+        # order_execution) are simply omitted from the map.
+        self._tool_map = {}
+
+        # Market Data (omitted when market_data is None — e.g. Q&A agent)
+        if self._market_data is not None:
+            self._tool_map.update({
+                "get_spot_price": self._market_data.get_spot_price,
+                "get_quote": self._market_data.get_quote,
+                "get_candles": self._market_data.get_candles,
+                "get_indicators": self._market_data.get_indicators,
+                "get_strategy_signals": self._market_data.get_strategy_signals,
+                "get_vix": self._market_data.get_vix,
+                "get_market_depth": self._market_data.get_market_depth,
+            })
+
+        # Position & Account / Order Execution (omitted for read-only agents)
+        if self._order_exec is not None:
+            self._tool_map.update({
+                "get_open_positions": self._order_exec.get_open_positions,
+                "get_virtual_balance": self._order_exec.get_virtual_balance,
+                "get_todays_trades": self._order_exec.get_todays_trades,
+                "get_daily_pnl": self._order_exec.get_daily_pnl,
+                "place_virtual_order": self._place_virtual_order_tracked,
+                "cancel_order": self._order_exec.cancel_order,
+                "close_position": self._order_exec.close_position,
+                "close_all_positions": self._order_exec.close_all_positions,
+            })
+
+        # Always-available tools
+        self._tool_map.update({
             # Strategy
             "get_strategy_docs": self._strategy.get_strategy_docs,
             # Memory & Goals
@@ -122,13 +134,13 @@ class ToolRegistry:
             # Serial-numbered position status + exit-by-serial
             "exit_position_by_serial": self._exit_position_by_serial,
             "get_status_with_serials": self._get_status_with_serials,
-        }
+        })
 
         # Legacy tool map — available for manual/informational use ONLY.
         # Never merged into _tool_map; the live LLM agent cannot invoke these.
-        self._legacy_tool_map = {
-            "get_option_chain": self._market_data.get_option_chain,
-        }
+        self._legacy_tool_map = {}
+        if self._market_data is not None:
+            self._legacy_tool_map["get_option_chain"] = self._market_data.get_option_chain
 
     def execute(self, tool_name: str, tool_input: dict) -> dict:
         """
