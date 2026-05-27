@@ -28,11 +28,17 @@ Stages (in pipeline order):
     HARD_GUARDRAIL_BLOCKED  — rejected by hard guardrails (paused/max-positions/timing/stale)
     HARD_GUARDRAIL_PASSED   — passed hard guardrails, entering Python review
     PYTHON_REVIEW_REJECTED  — rejected by deterministic Python indicator/risk checks
-    PYTHON_REVIEW_PASSED    — Python approved; Gemini gatekeeper called
+    PYTHON_REVIEW_PASSED    — Python approved; spread builder called
+    SPREAD_BUILD_REJECTED   — SpreadBuilder returned None (no valid spread candidate)
+    SPREAD_BUILT            — SpreadCandidate built; Gemini gatekeeper called
     GATEKEEPER_REJECTED     — Gemini gatekeeper REJECT or validation/timeout error
     GATEKEEPER_APPROVED     — Gemini gatekeeper APPROVE
-    ORDER_PLACED            — virtual order FILLED or PENDING
-    ORDER_REJECTED          — order execution layer rejected
+    SPREAD_ORDER_PLACED     — both legs filled; OpenSpread recorded
+    SPREAD_ORDER_REJECTED   — spread execution layer rejected (leg fill failure etc.)
+    SPREAD_EXITED           — spread closed (P&L exit / EOD / manual)
+    SPREAD_EXIT_FAILED      — spread close failed (leg fill timeout / error)
+    ORDER_PLACED            — legacy: virtual futures order FILLED or PENDING
+    ORDER_REJECTED          — legacy: virtual futures order rejected
 
 Invariants:
     - Never raises — all errors are logged and swallowed
@@ -51,6 +57,7 @@ from typing import Optional
 logger = logging.getLogger("BlitzTrader.CandidateAudit")
 
 _VALID_STAGES = {
+    # Original stages (kept for backward compat with historical audit files)
     "RAW_CANDIDATE",
     "HARD_GUARDRAIL_BLOCKED",
     "HARD_GUARDRAIL_PASSED",
@@ -60,6 +67,13 @@ _VALID_STAGES = {
     "GATEKEEPER_APPROVED",
     "ORDER_PLACED",
     "ORDER_REJECTED",
+    # Options spread stages (new live path)
+    "SPREAD_BUILD_REJECTED",
+    "SPREAD_BUILT",
+    "SPREAD_ORDER_PLACED",
+    "SPREAD_ORDER_REJECTED",
+    "SPREAD_EXITED",
+    "SPREAD_EXIT_FAILED",
 }
 
 

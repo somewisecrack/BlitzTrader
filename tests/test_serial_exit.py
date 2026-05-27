@@ -495,10 +495,18 @@ def test_new_module_imports_cleanly():
 
 
 def test_registry_imports_new_tools():
-    """ToolRegistry accepts new keyword args without breaking."""
-    from tools.registry import ToolRegistry, LIVE_TOOLS
-    assert "exit_position_by_serial" in LIVE_TOOLS
+    """ToolRegistry exposes spread tools to live agent; futures entry tools are legacy-only."""
+    from tools.registry import ToolRegistry, LIVE_TOOLS, LEGACY_TOOLS
+    # Spread-aware serial exit is in LIVE_TOOLS
+    assert "exit_spread_by_serial" in LIVE_TOOLS
     assert "get_status_with_serials" in LIVE_TOOLS
+    # Legacy futures entry tools are NOT in LIVE_TOOLS
+    assert "place_virtual_order" not in LIVE_TOOLS
+    assert "close_all_positions" not in LIVE_TOOLS
+    assert "close_position" not in LIVE_TOOLS
+    # Legacy tools remain accessible (not destroyed)
+    assert "place_virtual_order" in LEGACY_TOOLS
+    assert "exit_position_by_serial" in LEGACY_TOOLS
 
 
 # ──────────────────────────────────────────────────────────────

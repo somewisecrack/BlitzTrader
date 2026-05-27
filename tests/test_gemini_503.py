@@ -198,6 +198,7 @@ class TestDeterministicCommandsBypassGemini:
         trader._shoonya = MagicMock()
         trader._active_tokens = {}
         trader._agent = MagicMock()
+        trader._spread_portfolio = None  # options path; not initialized in unit tests
 
         chat_msgs = [{"command": "", "text": "show me the pnl", "timestamp": 0}]
 
@@ -222,6 +223,7 @@ class TestDeterministicCommandsBypassGemini:
         trader._shoonya = MagicMock()
         trader._active_tokens = {}
         trader._agent = MagicMock()
+        trader._spread_portfolio = None  # options path; not initialized in unit tests
 
         chat_msgs = [{"command": "", "text": "what are my open positions?", "timestamp": 0}]
 

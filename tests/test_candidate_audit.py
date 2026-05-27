@@ -231,6 +231,13 @@ class TestValidStages(unittest.TestCase):
             "GATEKEEPER_APPROVED",
             "ORDER_PLACED",
             "ORDER_REJECTED",
+            # Options spread stages (live path)
+            "SPREAD_BUILD_REJECTED",
+            "SPREAD_BUILT",
+            "SPREAD_ORDER_PLACED",
+            "SPREAD_ORDER_REJECTED",
+            "SPREAD_EXITED",
+            "SPREAD_EXIT_FAILED",
         }
         self.assertEqual(_VALID_STAGES, expected)
 

@@ -437,10 +437,18 @@ class TestExecutionGuardrails(unittest.TestCase):
 
     def test_after_time_blocks_entry(self):
         """Test 17: Engine returns error after no-entry time."""
+        from unittest.mock import patch
+        from datetime import datetime as _real_dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+        # Simulate 15:30 IST — well past no_entry_after="09:00"
+        _late = _real_dt(2026, 5, 26, 15, 30, 0, tzinfo=_IST)
+
         sm = _mock_state_manager()
         engine = SpreadExecutionEngine(None, sm, no_entry_after="09:00")
-        # Current time is well past 09:00
-        result = engine.place_spread(self._make_candidate())
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = _late
+            result = engine.place_spread(self._make_candidate())
         self.assertFalse(result["ok"])
         self.assertIn("09:00", result["error"])
 

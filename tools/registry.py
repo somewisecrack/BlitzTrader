@@ -6,13 +6,16 @@ Anthropic-compatible JSON schema for each tool.
 
 This is what Claude sees as its available tools.
 
-FUTURES-ONLY ENFORCEMENT
-------------------------
-get_tool_definitions()        — returned to the live LLM agent (FUTURES ONLY)
+OPTIONS-SPREAD ENFORCEMENT
+--------------------------
+get_tool_definitions()        — returned to the live LLM agent (options spreads only)
 get_legacy_tool_definitions() — NOT passed to the agent; available for manual/informational use only
 
 LIVE_TOOLS   — tool names exposed to the live agent
 LEGACY_TOOLS — tool names available only for manual use (never sent to the LLM)
+
+NOTE: place_virtual_order, close_position, close_all_positions are in LEGACY_TOOLS only.
+      Python owns all spread entry and exit execution — Gemini is the gatekeeper only.
 """
 import logging
 from tools.position_serial import (
@@ -36,10 +39,7 @@ LIVE_TOOLS = [
     "get_virtual_balance",
     "get_todays_trades",
     "get_daily_pnl",
-    "place_virtual_order",
     "cancel_order",
-    "close_position",
-    "close_all_positions",
     "get_past_journals",
     "update_memory",
     "set_session_goals",
@@ -47,13 +47,19 @@ LIVE_TOOLS = [
     "get_strategy_docs",
     "send_telegram",
     "log_decision",
-    "exit_position_by_serial",
+    "exit_spread_by_serial",
     "get_status_with_serials",
+    "get_spread_status",
 ]
 
 # Tool names available only for manual/informational use — NEVER sent to the live LLM agent
 LEGACY_TOOLS = [
     "get_option_chain",
+    # Futures execution tools — removed from live path; kept for backtest/manual use
+    "place_virtual_order",
+    "close_position",
+    "close_all_positions",
+    "exit_position_by_serial",
 ]
 
 
@@ -74,6 +80,7 @@ class ToolRegistry:
         live_feed=None,
         shoonya_client=None,
         active_tokens=None,
+        spread_portfolio=None,
     ):
         self._market_data = market_data
         self._order_exec = order_execution
@@ -85,10 +92,12 @@ class ToolRegistry:
         self._live_feed = live_feed
         self._shoonya_client = shoonya_client
         self._active_tokens = active_tokens or {}
+        self._spread_portfolio = spread_portfolio
         self._pending_entry_log = None
 
-        # Build the tool map — NOTE: get_option_chain is NOT in this map so the
-        # live agent cannot call it.  It lives in _legacy_tool_map only.
+        # Build the tool map — NOTE: futures execution tools (place_virtual_order,
+        # close_position, close_all_positions) are NOT exposed to the live LLM.
+        # They live in _legacy_tool_map only.
         # Components that are None (e.g. Q&A agent which has no market_data or
         # order_execution) are simply omitted from the map.
         self._tool_map = {}
@@ -105,17 +114,14 @@ class ToolRegistry:
                 "get_market_depth": self._market_data.get_market_depth,
             })
 
-        # Position & Account / Order Execution (omitted for read-only agents)
+        # Position & Account (read-only — no order execution exposed to LLM)
         if self._order_exec is not None:
             self._tool_map.update({
                 "get_open_positions": self._order_exec.get_open_positions,
                 "get_virtual_balance": self._order_exec.get_virtual_balance,
                 "get_todays_trades": self._order_exec.get_todays_trades,
                 "get_daily_pnl": self._order_exec.get_daily_pnl,
-                "place_virtual_order": self._place_virtual_order_tracked,
                 "cancel_order": self._order_exec.cancel_order,
-                "close_position": self._order_exec.close_position,
-                "close_all_positions": self._order_exec.close_all_positions,
             })
 
         # Always-available tools
@@ -131,9 +137,10 @@ class ToolRegistry:
             "send_telegram": self._telegram.send_telegram,
             # Journal
             "log_decision": self._log_decision_guarded,
-            # Serial-numbered position status + exit-by-serial
-            "exit_position_by_serial": self._exit_position_by_serial,
+            # Spread status + serial exit
+            "exit_spread_by_serial": self._exit_spread_by_serial,
             "get_status_with_serials": self._get_status_with_serials,
+            "get_spread_status": self._get_spread_status,
         })
 
         # Legacy tool map — available for manual/informational use ONLY.
@@ -141,6 +148,13 @@ class ToolRegistry:
         self._legacy_tool_map = {}
         if self._market_data is not None:
             self._legacy_tool_map["get_option_chain"] = self._market_data.get_option_chain
+        if self._order_exec is not None:
+            self._legacy_tool_map.update({
+                "place_virtual_order": self._place_virtual_order_tracked,
+                "close_position": self._order_exec.close_position,
+                "close_all_positions": self._order_exec.close_all_positions,
+                "exit_position_by_serial": self._exit_position_by_serial_legacy,
+            })
 
     def execute(self, tool_name: str, tool_input: dict) -> dict:
         """
@@ -180,8 +194,11 @@ class ToolRegistry:
             logger.exception(f"Tool {tool_name} failed")
             return {"error": f"Tool {tool_name} failed: {e}"}
 
+    # ── Legacy / internal helpers (not exposed to LLM) ──────────────────────
+
     def _place_virtual_order_tracked(self, **tool_input) -> dict:
-        """Track the latest order result so fake ENTER logs can be suppressed."""
+        """Track the latest order result so fake ENTER logs can be suppressed.
+        NOT exposed to the live LLM — legacy/manual use only."""
         result = self._order_exec.place_virtual_order(**tool_input)
         symbol = str(tool_input.get("symbol") or result.get("symbol") or "").upper()
         direction = str(tool_input.get("direction") or result.get("direction") or "").upper()
@@ -192,6 +209,20 @@ class ToolRegistry:
             "result": result,
         }
         return result
+
+    def _exit_position_by_serial_legacy(self, serial: int) -> dict:
+        """Legacy futures serial exit — NOT exposed to the live LLM."""
+        return _exit_by_serial_impl(
+            serial=serial,
+            state_manager=self._order_exec._state,
+            order_execution=self._order_exec,
+            shoonya_client=self._shoonya_client,
+            telegram_handler=self._telegram,
+            active_tokens=self._active_tokens,
+            live_feed=self._live_feed,
+        )
+
+    # ── Live-path tool implementations ──────────────────────────────────────
 
     def _log_decision_guarded(
         self,
@@ -253,52 +284,160 @@ class ToolRegistry:
 
     def _get_status_with_serials(self) -> dict:
         """
-        Generate a structured status message with serial-numbered open positions
+        Generate a structured status message with serial-numbered open spreads
         and persist the index for exit-by-serial.
         """
-        msg, index_payload = build_status_message(
-            state_manager=self._order_exec._state,
-            live_feed=self._live_feed,
-            shoonya_client=self._shoonya_client,
-            active_tokens=self._active_tokens,
-        )
-        save_position_index(index_payload)
-        self._telegram.send_telegram(msg)
+        if self._spread_portfolio is not None:
+            # Spread-aware status — main live path
+            lines = self._spread_portfolio.build_status_lines()
+            msg = "\n".join(lines) if lines else "No open spreads."
+            self._telegram.send_telegram(msg)
+            open_spreads = self._spread_portfolio.get_open_spreads()
+            # Build a serial index for exit_spread_by_serial
+            index_payload = {
+                "positions": [
+                    {"serial": i + 1, "spread_id": s.spread_id}
+                    for i, s in enumerate(open_spreads)
+                ],
+                "generated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                "type": "spreads",
+            }
+            save_position_index(index_payload)
+            return {
+                "status": "sent",
+                "spread_count": len(open_spreads),
+                "generated_at": index_payload["generated_at"],
+            }
+        else:
+            # Fallback: legacy futures status
+            msg, index_payload = build_status_message(
+                state_manager=self._order_exec._state,
+                live_feed=self._live_feed,
+                shoonya_client=self._shoonya_client,
+                active_tokens=self._active_tokens,
+            )
+            save_position_index(index_payload)
+            self._telegram.send_telegram(msg)
+            return {
+                "status": "sent",
+                "position_count": len(index_payload.get("positions", [])),
+                "generated_at": index_payload.get("generated_at"),
+            }
+
+    def _get_spread_status(self) -> dict:
+        """
+        Return current open spreads P&L summary as a dict.
+        Does NOT send Telegram — returns data only.
+        """
+        if self._spread_portfolio is None:
+            return {"error": "Spread portfolio not initialised"}
+        lines = self._spread_portfolio.build_status_lines()
+        open_spreads = self._spread_portfolio.get_open_spreads()
         return {
-            "status": "sent",
-            "position_count": len(index_payload.get("positions", [])),
-            "generated_at": index_payload.get("generated_at"),
+            "open_spreads": len(open_spreads),
+            "summary_lines": lines,
         }
 
-    def _exit_position_by_serial(self, serial: int) -> dict:
+    def _exit_spread_by_serial(self, serial: int) -> dict:
         """
-        Exit the open position identified by its Telegram serial number.
+        Exit the open spread identified by its Telegram serial number.
         Validates index freshness and live state before placing any orders.
         NEVER opens a new position.
         """
-        return _exit_by_serial_impl(
-            serial=serial,
-            state_manager=self._order_exec._state,
-            order_execution=self._order_exec,
-            shoonya_client=self._shoonya_client,
-            telegram_handler=self._telegram,
-            active_tokens=self._active_tokens,
-            live_feed=self._live_feed,
+        import json, os
+        from pathlib import Path
+        from datetime import datetime, timezone, timedelta
+
+        INDEX_PATH = Path("runtime/position_index.json")
+        MAX_AGE_MINUTES = 30
+
+        if self._spread_portfolio is None:
+            msg = "⚠️ Spread portfolio not initialised — cannot exit."
+            self._telegram.send_telegram(msg)
+            return {"error": msg}
+
+        # Load the serial index
+        try:
+            with open(INDEX_PATH, "r", encoding="utf-8") as fh:
+                index = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            msg = "⚠️ No position index found. Call get_status_with_serials() first."
+            self._telegram.send_telegram(msg)
+            return {"error": msg}
+
+        # Check index type
+        if index.get("type") != "spreads":
+            msg = "⚠️ Position index is for legacy futures positions. Use get_status_with_serials() to refresh."
+            self._telegram.send_telegram(msg)
+            return {"error": msg}
+
+        # Check freshness
+        try:
+            generated_at = datetime.fromisoformat(index["generated_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - generated_at
+            if age > timedelta(minutes=MAX_AGE_MINUTES):
+                msg = f"⚠️ Position index is stale ({age.seconds // 60}m old). Call get_status_with_serials() to refresh."
+                self._telegram.send_telegram(msg)
+                return {"error": msg}
+        except Exception:
+            pass  # If we can't parse, proceed anyway
+
+        # Find the spread_id for this serial
+        positions = index.get("positions", [])
+        spread_id = None
+        for p in positions:
+            if p.get("serial") == serial:
+                spread_id = p.get("spread_id")
+                break
+
+        if spread_id is None:
+            msg = f"⚠️ Serial #{serial} not found. Valid serials: {[p['serial'] for p in positions]}."
+            self._telegram.send_telegram(msg)
+            return {"error": msg}
+
+        # Find the live spread object
+        open_spreads = self._spread_portfolio.get_open_spreads()
+        target_spread = None
+        for sp in open_spreads:
+            if sp.spread_id == spread_id:
+                target_spread = sp
+                break
+
+        if target_spread is None:
+            msg = f"⚠️ Spread {spread_id} (serial #{serial}) is no longer open — may have already been closed."
+            self._telegram.send_telegram(msg)
+            return {"error": msg}
+
+        # Close it
+        result = self._spread_portfolio.close_spread(
+            spread=target_spread,
+            reason=f"manual Telegram exit serial #{serial}",
         )
+        if result.get("ok"):
+            msg = (
+                f"✅ Spread #{serial} [{spread_id}] closed manually.\n"
+                f"{target_spread.symbol} {target_spread.spread_type} expiry {target_spread.expiry}\n"
+                f"P&L: ₹{result.get('realized_pnl', 0):+,.2f}"
+            )
+        else:
+            msg = f"⚠️ Failed to close spread #{serial}: {result.get('error', 'unknown error')}"
+        self._telegram.send_telegram(msg)
+        return result
 
     def get_tool_definitions(self) -> list[dict]:
         """
         Return Anthropic-compatible tool definitions for the LIVE LLM agent.
 
-        FUTURES-ONLY: get_option_chain is NOT included here.
-        It lives in get_legacy_tool_definitions() and is never sent to the agent.
+        OPTIONS-SPREAD ONLY: place_virtual_order, close_position, close_all_positions
+        are NOT included here — they live in get_legacy_tool_definitions() only.
+        Python owns all spread execution; Gemini approves/rejects candidates only.
         """
         return [
-            # ── Market Data Tools (FUTURES ONLY) ──
+            # ── Market Data Tools ──
             {
                 "name": "get_spot_price",
                 "description": (
-                    "Get current spot/futures-resolved price for NIFTY or BANKNIFTY. "
+                    "Get current spot price for NIFTY or BANKNIFTY. "
                     "Returns spot_price, change, change_pct, high, low, open."
                 ),
                 "input_schema": {
@@ -313,22 +452,19 @@ class ToolRegistry:
                     "required": ["index"],
                 },
             },
-            # NOTE: get_option_chain is deliberately absent here.
-            # It is available only via get_legacy_tool_definitions() for manual use.
             {
                 "name": "get_quote",
                 "description": (
-                    "Get LTP, best bid, best ask for a specific futures trading symbol. "
-                    "Use this to check the current price of an active futures contract "
-                    "(e.g. NIFTY28APR26F, BANKNIFTY28APR26F). "
-                    "Do NOT use for option symbols — options are not used in live execution."
+                    "Get LTP, best bid, best ask for a specific trading symbol. "
+                    "Use this to check the current price of an active options contract "
+                    "(e.g. NIFTY29MAY2624500CE) or index futures."
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Futures trading symbol, e.g. 'NIFTY28APR26F'",
+                            "description": "Trading symbol, e.g. 'NIFTY29MAY2624500CE'",
                         }
                     },
                     "required": ["symbol"],
@@ -368,9 +504,8 @@ class ToolRegistry:
                     "Get all technical indicators for a symbol computed from Shoonya REST candles "
                     "(primary source, multi-day history) with live-feed candles as fallback. "
                     "ALWAYS call this before evaluating any strategy. Returns: "
-                    "EMA20/50/100 (trend, stacking), RSI14 (momentum), ATR14 (SL sizing), "
+                    "EMA20/50/100 (trend, stacking), RSI14 (momentum), ATR14, "
                     "ADX14 (trend strength), VWAP (intraday bias), avg_volume_20 (VSA), "
-                    "Pivot/R1/R2/S1/S2 (VP-24 pivot bounce), CPR TC/BC/width (VP-20 CPR reversal), "
                     "ema_stacked_bull/bear flags (VP-05 3-EMA trend filter)."
                 ),
                 "input_schema": {
@@ -395,8 +530,6 @@ class ToolRegistry:
                 "description": (
                     "Deterministically scan recent NIFTY/BANKNIFTY candles for approved "
                     "price-action, VSA/VPA confirmation, and daily first-hour strategy setups. "
-                    "Use this every market-analysis iteration so entries are not missed by "
-                    "manual LLM inspection. "
                     "Returns candidate entries with strategy, direction, entry reference, "
                     "stop_loss, target, requires_volume_confirmation, and rule-based reasoning."
                 ),
@@ -446,8 +579,8 @@ class ToolRegistry:
             {
                 "name": "get_open_positions",
                 "description": (
-                    "Get all currently open virtual positions with entry price, "
-                    "current price, and unrealized P&L."
+                    "Get all currently open option spread positions with entry details "
+                    "and unrealized P&L."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -464,7 +597,7 @@ class ToolRegistry:
             },
             {
                 "name": "get_todays_trades",
-                "description": "Get all trades executed today with entry/exit prices and realized P&L.",
+                "description": "Get all option spread trades executed today with entry/exit details and realized P&L.",
                 "input_schema": {
                     "type": "object",
                     "properties": {},
@@ -478,62 +611,6 @@ class ToolRegistry:
                     "properties": {},
                 },
             },
-            # ── Order Execution Tools ──
-            {
-                "name": "place_virtual_order",
-                "description": (
-                    "Place a virtual FUTURES order. MARKET fills immediately at best bid/ask midpoint. "
-                    "LIMIT fills only if LTP touches price within 5 minutes, else auto-cancels. "
-                    "Hard guardrails enforced: max 3 positions, no pyramiding "
-                    "(one open position per instrument), exactly 1 futures lot per trade, "
-                    "no entry after 15:05 IST, daily loss limit, margin limit. "
-                    "FUTURES ONLY: symbol must be the futures tsym (e.g. NIFTY28APR26F). "
-                    "Options (CE/PE) are BLOCKED — do not pass CE/PE symbols."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "symbol": {
-                            "type": "string",
-                            "description": "Futures trading symbol (e.g. 'NIFTY28APR26F'). Options are blocked.",
-                        },
-                        "direction": {
-                            "type": "string",
-                            "description": "BUY or SELL",
-                            "enum": ["BUY", "SELL"],
-                        },
-                        "quantity": {
-                            "type": "integer",
-                            "description": "Exactly 1 futures lot only. Use the resolved lot_size shown in ACTIVE FUTURES INSTRUMENTS.",
-                        },
-                        "order_type": {
-                            "type": "string",
-                            "description": "MARKET or LIMIT",
-                            "enum": ["MARKET", "LIMIT"],
-                            "default": "MARKET",
-                        },
-                        "price": {
-                            "type": "number",
-                            "description": "Limit price (required for LIMIT, ignored for MARKET)",
-                        },
-                        "stop_loss": {
-                            "type": "number",
-                            "description": (
-                                "Stop-loss price. Enforced deterministically on every tick — "
-                                "position auto-closes if LTP crosses this level. ALWAYS set this."
-                            ),
-                        },
-                        "target": {
-                            "type": "number",
-                            "description": (
-                                "Profit target price. Enforced deterministically on every tick — "
-                                "position auto-closes if LTP reaches this level."
-                            ),
-                        },
-                    },
-                    "required": ["symbol", "direction", "quantity", "stop_loss"],
-                },
-            },
             {
                 "name": "cancel_order",
                 "description": "Cancel a pending limit order by order_id.",
@@ -542,35 +619,10 @@ class ToolRegistry:
                     "properties": {
                         "order_id": {
                             "type": "string",
-                            "description": "Order ID returned by place_virtual_order",
+                            "description": "Order ID returned by the order placement system",
                         }
                     },
                     "required": ["order_id"],
-                },
-            },
-            {
-                "name": "close_position",
-                "description": "Close an open position at market price.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "symbol": {
-                            "type": "string",
-                            "description": "Symbol of the position to close",
-                        }
-                    },
-                    "required": ["symbol"],
-                },
-            },
-            {
-                "name": "close_all_positions",
-                "description": (
-                    "Close ALL open positions at market price. "
-                    "Use at 3:15 PM IST (market close) or on /abort command."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {},
                 },
             },
             # ── Memory & Goal Tools ──
@@ -614,9 +666,7 @@ class ToolRegistry:
                 "name": "set_session_goals",
                 "description": (
                     "Set your goals for this trading session. Call this during startup "
-                    "after reading memory and strategy docs. These goals will appear at "
-                    "the top of every market analysis iteration to keep your reasoning "
-                    "grounded in your declared intentions."
+                    "after reading memory and strategy docs."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -624,11 +674,7 @@ class ToolRegistry:
                         "goals": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": (
-                                "List of 2-5 specific, actionable session goals. "
-                                "E.g. 'Avoid trading in first 15 minutes', "
-                                "'Only enter if VIX < 18', 'Max 2 trades today'."
-                            ),
+                            "description": "List of 2-5 specific, actionable session goals.",
                         }
                     },
                     "required": ["goals"],
@@ -647,8 +693,7 @@ class ToolRegistry:
                 "name": "get_strategy_docs",
                 "description": (
                     "Read all strategy documentation. Returns the master trading library "
-                    "and any NSE-specific strategy documents. Call this at session start "
-                    "to understand what strategies to apply."
+                    "and any NSE-specific strategy documents. Call this at session start."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -660,10 +705,9 @@ class ToolRegistry:
                 "name": "send_telegram",
                 "description": (
                     "Send a message to the trader via Telegram. Use for: "
-                    "session start/end, trade entries/exits, status updates, "
-                    "warnings, EOD summary. The system will auto-append verified "
-                    "trade/P&L data to performance messages. NEVER include trade "
-                    "counts or P&L figures you did not get from a tool response."
+                    "session start/end, spread entries/exits, status updates, "
+                    "warnings, EOD summary. NEVER include trade counts or P&L "
+                    "figures you did not get from a tool response."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -681,11 +725,8 @@ class ToolRegistry:
                 "name": "log_decision",
                 "description": (
                     "Log a trading decision to today's journal. In signal-review iterations, "
-                    "call this for every scanner candidate you reject/skip and for executed "
-                    "entries/exits. Do not log routine HOLDs when no candidate exists. "
-                    "Always explain your reasoning clearly. For EOD entries, the system will auto-append "
-                    "verified trade data from the state manager — do NOT fabricate trade "
-                    "counts or P&L numbers in your reasoning text."
+                    "call this for every scanner candidate you reject/skip. "
+                    "Do not log routine HOLDs when no candidate exists."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -717,14 +758,14 @@ class ToolRegistry:
                     "required": ["action", "reason"],
                 },
             },
-            # ── Serial-numbered status + exit-by-serial ──
+            # ── Spread Status + Serial Exit ──
             {
                 "name": "get_status_with_serials",
                 "description": (
-                    "Generate a structured status message with serial-numbered open futures positions, "
+                    "Generate a structured status message with serial-numbered open option spreads, "
                     "send it via Telegram, and persist the serial index. "
                     "Call this when the trader asks for a status update or position summary. "
-                    "Must be called before exit_position_by_serial to refresh the index."
+                    "Must be called before exit_spread_by_serial to refresh the index."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -732,12 +773,24 @@ class ToolRegistry:
                 },
             },
             {
-                "name": "exit_position_by_serial",
+                "name": "get_spread_status",
                 "description": (
-                    "Exit the open futures position identified by its serial number from the last status message. "
-                    "SAFETY: validates index freshness (30 min TTL), re-verifies position is still open, "
-                    "and NEVER opens a new position. "
-                    "Call when user says: 'exit 2', 'close position 3', 'square off #1', 'close serial 2'."
+                    "Return current open spreads count and P&L summary as structured data. "
+                    "Does NOT send Telegram — use get_status_with_serials() for that. "
+                    "Use to check spread state during analysis."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "exit_spread_by_serial",
+                "description": (
+                    "Exit the open option spread identified by its serial number from the last status message. "
+                    "SAFETY: validates index freshness (30 min TTL), re-verifies spread is still open, "
+                    "closes BOTH legs, and NEVER opens a new position. "
+                    "Call when user says: 'exit 2', 'close spread 3', 'square off #1', 'close serial 2'."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -745,12 +798,68 @@ class ToolRegistry:
                         "serial": {
                             "type": "integer",
                             "description": (
-                                "The serial number of the position to exit, "
+                                "The serial number of the spread to exit, "
                                 "as shown in the last status message."
                             ),
                         }
                     },
                     "required": ["serial"],
+                },
+            },
+        ]
+
+    def get_legacy_tool_definitions(self) -> list[dict]:
+        """
+        Return tool definitions for legacy/manual tools.
+        These are NEVER passed to the live LLM agent.
+        Available only for manual diagnostics, backtesting, or explicit developer use.
+        """
+        return [
+            {
+                "name": "place_virtual_order",
+                "description": (
+                    "[LEGACY — not exposed to live agent] "
+                    "Place a virtual FUTURES order. Used for backtesting only. "
+                    "The live path uses SpreadExecutionEngine instead."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "direction": {"type": "string", "enum": ["BUY", "SELL"]},
+                        "quantity": {"type": "integer"},
+                        "order_type": {"type": "string", "enum": ["MARKET", "LIMIT"], "default": "MARKET"},
+                        "price": {"type": "number"},
+                        "stop_loss": {"type": "number"},
+                        "target": {"type": "number"},
+                    },
+                    "required": ["symbol", "direction", "quantity", "stop_loss"],
+                },
+            },
+            {
+                "name": "close_position",
+                "description": "[LEGACY — not exposed to live agent] Close a futures position at market.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"symbol": {"type": "string"}},
+                    "required": ["symbol"],
+                },
+            },
+            {
+                "name": "close_all_positions",
+                "description": "[LEGACY — not exposed to live agent] Close ALL open futures positions.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "get_option_chain",
+                "description": "[LEGACY] Get NSE option chain for manual inspection.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "expiry": {"type": "string"},
+                    },
+                    "required": ["symbol"],
                 },
             },
         ]

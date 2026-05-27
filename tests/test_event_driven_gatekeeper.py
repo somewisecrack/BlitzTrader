@@ -58,6 +58,8 @@ def _bot_with_state(state: dict) -> BlitzTrader:
             "lot_size": 15,
         },
     }
+    # Options path: spread portfolio may not be initialized in unit-test context
+    bot._spread_portfolio = None
     return bot
 
 
@@ -96,10 +98,12 @@ class TestEventDrivenGatekeeper(unittest.TestCase):
 
         self.assertEqual(blocked, [])
         self.assertEqual(len(tradeable), 1)
-        self.assertEqual(tradeable[0]["execution_symbol"], "NIFTY28APR26F")
-        self.assertEqual(tradeable[0]["lot_size"], 25)
+        # Options path: execution_symbol and lot_size are no longer injected by
+        # _filter_tradeable_signals; SpreadBuilder resolves them at entry time.
         self.assertNotIn("score", tradeable[0])
         self.assertNotIn("approved", tradeable[0])
+        # Symbol must pass through unchanged
+        self.assertEqual(tradeable[0]["symbol"], "NIFTY")
 
     def test_same_instrument_open_position_blocks_duplicate_entry(self):
         bot = _bot_with_state(_state(

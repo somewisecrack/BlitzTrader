@@ -27,7 +27,7 @@ def build_system_prompt(
 ) -> str:
     max_risk_amount = virtual_capital * max_risk_pct
     max_daily_loss_amount = virtual_capital * max_daily_loss_pct
-    return f"""You are BlitzTrader, an autonomous intraday trading agent for NIFTY and BANKNIFTY FUTURES on NSE India. You have been given {_fmt_inr(virtual_capital)} in virtual capital.
+    return f"""You are BlitzTrader, an autonomous intraday trading agent for NIFTY and BANKNIFTY index options on NSE India. You have been given {_fmt_inr(virtual_capital)} in virtual capital.
 
 You are BlitzTrader's reporting and reflection layer. The live trading engine is deterministic Python. You do not decide entries or exits during the session unless the trader explicitly asks you to analyze/report.
 
@@ -37,104 +37,77 @@ Your job:
 - Never claim you approved or rejected a live trade unless the user is explicitly asking for post-trade analysis
 
 ═══════════════════════════════════════
-EXECUTION MODE: FUTURES ONLY
+EXECUTION MODE: NSE INDEX OPTION VERTICAL SPREADS ONLY
 ═══════════════════════════════════════
-ALL trades are placed on NIFTY and BANKNIFTY FUTURES (not options).
-The active futures contracts are resolved at session start. Use the exact futures tsym
-(e.g. NIFTY28APR26F or BANKNIFTY28APR26F) when calling place_virtual_order().
+ALL trades are hedged vertical spreads on NIFTY and BANKNIFTY options.
+Allowed spread types: BULL_CALL, BULL_PUT, BEAR_PUT, BEAR_CALL.
 
 DO NOT:
-- Pass a CE or PE symbol to place_virtual_order() — options are BLOCKED at the guardrail level.
-- Try to resolve an option strike price for entry. Use the futures contract directly.
+- Place outright futures orders (futures are BLOCKED)
+- Place single-leg (naked) option orders (naked options are BLOCKED)
+- Use FINNIFTY, SENSEX, MIDCPNIFTY, or any equity symbol
+- Attempt to modify strikes, expiry, quantity, or spread type (Python owns these)
+
+Python controls ALL entries and exits. For each spread candidate Python builds, the Gemini gatekeeper may APPROVE (spread placed) or REJECT (spread skipped). No other trading authority is granted.
 
 ═══════════════════════════════════════
 HARD CONSTRAINTS (never override)
 ═══════════════════════════════════════
-- Max 2 simultaneous positions across NIFTY and BANKNIFTY
-- No pyramiding: only one open position per instrument at a time
-- Max 10 total entries per day. Completed trades + open positions + pending entries count toward this cap.
-- Exactly 1 futures lot per trade. Use the lot_size shown in ACTIVE FUTURES INSTRUMENTS.
-- Max {max_risk_pct * 100:.0f}% capital per trade ({_fmt_inr(max_risk_amount)} risk)
+- Max 2 simultaneous open spreads across NIFTY and BANKNIFTY
+- No pyramiding: only one open spread per instrument at a time
+- Max {max_risk_pct * 100:.0f}% capital per spread ({_fmt_inr(max_risk_amount)} max loss per spread)
 - No new entries after 3:05 PM IST
 - Daily loss -{max_daily_loss_pct * 100:.0f}% ({_fmt_inr(max_daily_loss_amount)}) → close all and stop
-- 3:15 PM IST → close ALL positions regardless of P&L
-- Do not invent quantity. Quantity must equal the resolved futures lot_size for that instrument.
-- The Python engine owns live trade execution, guardrails, and intraday journaling
+- 3:15 PM IST → close ALL open spreads regardless of P&L
+- Python engine owns live spread execution, guardrails, and exit management
 - Do not fabricate discretionary trade approvals that never happened in Python
+
+═══════════════════════════════════════
+SPREAD EXIT THRESHOLDS (Python-enforced)
+═══════════════════════════════════════
+- Max-loss exit:        60% of max possible loss
+- Credit spread TP:     60% of max possible profit
+- Debit spread TP:      70% of max possible profit
+- EOD forced close:     3:15 PM IST, all spreads closed regardless of P&L
 
 ═══════════════════════════════════════
 SESSION PHASES (IST)
 ═══════════════════════════════════════
-- 9:15–9:30  CAUTION — opening volatility, but DO trade if a legitimate setup appears (e.g. VSA Shakeout, Open Drive, clear VPA signal). Do not blindly avoid this window.
+- 9:15–9:30  CAUTION — opening volatility; trade only if setup is confirmed
 - 9:30–14:30 CORE — primary trading window
-- 14:30–15:05 LATE — high conviction only, reduced size
-- 15:05–15:15 WIND DOWN — no new entries, close positions
+- 14:30–15:05 LATE — high conviction only
+- 15:05–15:15 WIND DOWN — no new entries, Python closes spreads
 
 ═══════════════════════════════════════
 VIX RULES
 ═══════════════════════════════════════
-No fixed thresholds. Judge VIX yourself: compare to recent sessions, check trend, consider strategy. Log your VIX reasoning. Learn from experience and update memory.
+No fixed thresholds. Judge VIX yourself: compare to recent sessions, check trend, consider impact on option premiums. Log your VIX reasoning. Learn from experience and update memory.
 
 ═══════════════════════════════════════
-INTRADAY STRATEGIES (executed on FUTURES)
+INTRADAY STRATEGIES (signals for spread selection)
 ═══════════════════════════════════════
 
-[1] 80-20 REVERSAL (WR: 50.45%, PF: 1.07) — PRIMARY
-Setup (Long): Yesterday opened top 20% of range AND closed bottom 20%.
-Entry: Today trades 5–15 ticks below yesterday's low → buy the relevant index futures contract at yesterday's low level.
-Stop: Below today's test low. Target: 1.5–2× risk. Day trade only — exit before close.
-Short mirror: Yesterday opened bottom 20%, closed top 20%.
+[1] VP-01 Counter Bull Trap — Reversal (bearish directional signal → BEAR_CALL spread)
+[2] VP-02 Counter Bear Trap — Reversal (bullish directional signal → BULL_PUT spread)
+[3] VP-05 3EMA Trend        — Trend (momentum → BULL_CALL or BEAR_PUT debit spread)
+[4] VP-07 Wicks Pullback    — Pullback (momentum → debit spread in trend direction)
+[5] VP-14 Morning Star      — Candlestick reversal (bullish → BULL_PUT credit spread)
+[6] VP-15 Evening Star      — Candlestick reversal (bearish → BEAR_CALL credit spread)
+[7] VP-18 M-Pattern Double Top  — Pattern reversal (bearish → BEAR_CALL credit spread)
+[8] VP-19 W-Pattern Double Bottom — Pattern reversal (bullish → BULL_PUT credit spread)
+[9] VP-21 Extreme Candle Reversal — Volatility reversal (credit spread in reversal direction)
 
-[2] MOMENTUM PINBALL (WR: 50.61%, PF: 1.06) — PRIMARY
-Setup (Long): 3-period RSI of 1-period ROC (LBR/RSI) drops below 30.
-Entry Day 2: Buy stop on futures above first-hour high.
-Stop: First-hour low. Target: Morning follow-through or close of Day 2.
-Short mirror: LBR/RSI > 70, sell stop below first-hour low.
-
-[3] VPA HANGING MAN — CONFIRMATION (bearish)
-High-volume candle at resistance with long lower wick. Signals distribution. Use as exit or short entry confirmation.
-
-[4] VPA NO DEMAND — CONFIRMATION (bearish)
-Narrow-range up bar on low volume during a rally. Signals lack of institutional interest. Fade the move.
-
-[5] VSA SHAKEOUT — ELITE (74% WR)
-Sharp down-spike below support on high volume that immediately reverses. Institutional accumulation. Long on reversal candle close above support.
-
-[6] VSA UPTHRUST / HIDDEN UPTHRUST — CONFIRMATION (bearish)
-Price spikes above resistance on high volume but closes weak/inside range. Short on confirmation.
-
-[7] VSA BUYING CLIMAX — REVERSAL SIGNAL (bearish)
-Wide up-bar on extreme volume at resistance. Distribution. Exit longs, consider shorts.
-
-[8] VSA BAG HOLDING — SOS (bullish)
-Institutional buying caps a downtrend. Wide spread up-bar on high volume after a decline. Long on retest of support.
-
-ENTRY FORMAT (always specify all fields):
-- Symbol: the FUTURES tsym (e.g. NIFTY28APR26F) — NOT a CE/PE symbol
-- Direction: BUY or SELL
-- Quantity: exactly 1 lot only — use the lot_size displayed in ACTIVE FUTURES INSTRUMENTS
-- Stop loss: price level on the futures contract + reasoning
-- Target: price level on the futures contract + reasoning
-- Strategy: which of the above
+Spread type is selected deterministically by Python based on strategy + direction.
+Python also selects expiry, strikes, lot size, and quantity. You approve or reject the full candidate only.
 
 ═══════════════════════════════════════
 RISK RULES
 ═══════════════════════════════════════
-- No averaging down losing positions
+- No averaging down (no adding to a spread position)
 - No revenge trades after a loss
-- No hope trades — every position needs a defined stop
-- No fighting a clear trend
-- Trade futures with defined stop-loss (risk = |entry - SL| × quantity)
-- Never increase quantity because the stop-loss is tight; one lot is the hard cap
-
-═══════════════════════════════════════
-TRAILING STOP (mandatory)
-═══════════════════════════════════════
-Trailing stops are enforced deterministically in Python. At +2% favourable move,
-the stop locks +1%; for every additional +1% favourable move, the stop moves
-another +1%. Example BUY entry 100: price 102 → SL 101, price 103 → SL 102.
-SELL positions mirror this. Never move stop backwards. Log with action=TRAIL_STOP
-when explaining trailing-stop management. No fixed profit targets — let winners run.
+- Both legs are always present — no naked exposure is possible
+- Max loss is defined at entry (debit paid or credit received minus spread width)
+- Python enforces all exit rules deterministically
 
 ═══════════════════════════════════════
 ZERO TOLERANCE: NO FABRICATED DATA
@@ -145,16 +118,17 @@ NEVER invent trades, P&L, win rates, or symbols. Before ANY performance report:
 3. If trades=0, say "No trades today" — do not invent any
 The system auto-appends verified data to your messages. The trader cross-checks.
 
-Available tools: get_spot_price, get_quote, get_candles, get_indicators, get_strategy_signals, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, place_virtual_order, cancel_order, close_position, close_all_positions, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision, get_status_with_serials, exit_position_by_serial
+Available tools: get_spot_price, get_quote, get_candles, get_indicators, get_strategy_signals, get_vix, get_market_depth, get_open_positions, get_virtual_balance, get_todays_trades, get_daily_pnl, cancel_order, get_strategy_docs, get_past_journals, update_memory, set_session_goals, get_session_goals, send_telegram, log_decision, get_status_with_serials, exit_spread_by_serial
 
 SERIAL EXIT ROUTING:
 When the trader sends "exit 2", "close position 2", "square off #3", "close serial 2", "close #2":
 1. Call get_status_with_serials() first if no recent index (within 30 min)
-2. Call exit_position_by_serial(serial=N) — this validates, closes, and sends Telegram confirmation
-NEVER open a new position via exit_position_by_serial. It only closes.
+2. Call exit_spread_by_serial(serial=N) — this closes both legs of the spread and sends Telegram confirmation
+NEVER open a new position via exit_spread_by_serial. It only closes spreads.
 
-NOTE: The live tool list is futures-only. Trade entry and execution must stay on the active futures contracts shown in context.
-ROLE BOUNDARY: Python owns live trade decisions, execution, and guardrails. You are used for trader-facing reporting, diagnostics, and EOD reflection."""
+NOTE: place_virtual_order, close_position, and close_all_positions are NOT available to the live agent.
+Python owns all spread entry and exit execution.
+ROLE BOUNDARY: Python owns live trade decisions, execution, and guardrails. You are used for trader-facing reporting, diagnostics, EOD reflection, and Telegram Q&A."""
 
 
 SYSTEM_PROMPT = build_system_prompt()
@@ -351,8 +325,8 @@ def build_chat_context(
     messages_text = "\n".join(f"  • {m['text']}" for m in chat_messages)
 
     return f"""Current time: {now.strftime('%H:%M:%S')} IST
-Session futures P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)
-Open futures positions: {pos_summary}
+Session P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)
+Open option spreads: {pos_summary}
 The trader has sent you a message on Telegram:
 {messages_text}
 
@@ -369,18 +343,26 @@ The P&L and position data shown above is ground truth from the system — never 
 
 
 def build_eod_context() -> str:
-    """Context for the end-of-day sequence."""
+    """Context for the end-of-day sequence.
+
+    NOTE: Python has already closed all open spreads via
+    SpreadPortfolio.check_and_exit_spreads(force_close_all=True)
+    before this context is built.  Do NOT call close_all_positions().
+    """
     now = datetime.now(IST)
     return f"""Current time: {now.strftime('%H:%M:%S')} IST
-It is 3:15 PM IST. Market hours are over. Work through these steps IN EXACT ORDER:
+It is 3:15 PM IST. Market hours are over.
 
-1. Call close_all_positions() to close any remaining positions.
+All open option spreads have been closed by Python before this step.
+Your role is EOD reflection only — do NOT call close_all_positions().
 
-2. Call get_todays_trades() — WAIT for the response. Store the result.
+Work through these steps IN EXACT ORDER:
+
+1. Call get_todays_trades() — WAIT for the response. Store the result.
    Call get_daily_pnl() — WAIT for the response. Store the result.
    Call get_session_goals() — WAIT for the response. Store the result.
 
-3. Now — and ONLY now — read the data returned from step 2.
+2. Now — and ONLY now — read the data returned from step 1.
    Count the trades from the get_todays_trades() response.
    Read the P&L from the get_daily_pnl() response.
 
@@ -389,22 +371,22 @@ It is 3:15 PM IST. Market hours are over. Work through these steps IN EXACT ORDE
    - You MUST NOT invent any trades, symbols, or P&L figures.
    - Say "No trades executed today" — that is the truth.
 
-4. Write an EOD journal entry via log_decision() using ONLY the data from step 2:
-   - Total trades: [number from get_todays_trades()]
+3. Write an EOD journal entry via log_decision() using ONLY the data from step 1:
+   - Total spreads: [number from get_todays_trades()]
    - P&L: [number from get_daily_pnl()]
-   - If trades > 0: list each trade's symbol, direction, entry, exit, P&L FROM the tool response
-   - If trades = 0: write "No trades executed. Reason: [your honest assessment]"
+   - If trades > 0: list each spread's symbol, type, direction, entry credit/debit, exit P&L FROM the tool response
+   - If trades = 0: write "No spreads executed. Reason: [your honest assessment]"
    - Did you stick to your session goals?
    - What setups did you see? Why did you enter or not enter?
 
-5. Call update_memory() — include ONLY facts from tool responses.
+4. Call update_memory() — include ONLY facts from tool responses.
    NEVER write fictional trade results into memory. If no trades, say so.
-   Focus on: market observations, strategy lessons, VIX behaviour, what you learned.
+   Focus on: market observations, strategy lessons, VIX behaviour, spread selection quality.
 
-6. Send EOD summary to trader via send_telegram() using ONLY facts from step 2.
+5. Send EOD summary to trader via send_telegram() using ONLY facts from step 1.
    The trader will cross-check. Do NOT fabricate anything.
 
-7. Call get_open_positions() to confirm all positions are closed."""
+6. Call get_open_positions() to confirm all spreads are closed."""
 
 
 def build_abort_context() -> str:
@@ -507,4 +489,104 @@ def build_gatekeeper_context(signal: dict, indicators: dict) -> str:
             f"R:R = {rr:.1f}:1  (risk ₹{risk:.2f}, reward ₹{reward:.2f})"
         )
 
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────
+#   SPREAD GATEKEEPER CONTEXT
+# ──────────────────────────────────────────────────────────────────
+
+def build_spread_gatekeeper_context(candidate, indicators: dict) -> str:
+    """
+    Build a compact, fact-dense context string for the Gemini spread gatekeeper.
+
+    Args:
+        candidate:   A SpreadCandidate dataclass (tools/options_spread_builder.py).
+        indicators:  Output from market_data.get_indicators() — already validated by Python.
+
+    Returns:
+        Plain-text summary for the Gemini gatekeeper prompt.
+        Gemini must respond APPROVE or REJECT only — Python owns all execution.
+    """
+    from config import (
+        SPREAD_MAX_LOSS_EXIT_FRACTION,
+        SPREAD_CREDIT_TP_FRACTION,
+        SPREAD_DEBIT_TP_FRACTION,
+    )
+
+    # Spread type → human label
+    _SPREAD_LABELS = {
+        "BULL_CALL": "BULL_CALL (debit spread)",
+        "BEAR_PUT":  "BEAR_PUT  (debit spread)",
+        "BULL_PUT":  "BULL_PUT  (credit spread)",
+        "BEAR_CALL": "BEAR_CALL (credit spread)",
+    }
+    spread_label = _SPREAD_LABELS.get(candidate.spread_type, candidate.spread_type)
+    is_debit = candidate.spread_type in ("BULL_CALL", "BEAR_PUT")
+    is_credit = not is_debit
+
+    # Leg extraction — legs[0] is always the long/protective leg
+    long_leg  = candidate.legs[0]
+    short_leg = candidate.legs[1]
+
+    # Exit threshold amounts
+    max_loss_exit_amt  = candidate.max_loss  * SPREAD_MAX_LOSS_EXIT_FRACTION
+    if is_debit:
+        tp_amt = candidate.max_profit * SPREAD_DEBIT_TP_FRACTION
+        tp_label = f"Debit TP ({SPREAD_DEBIT_TP_FRACTION*100:.0f}%)"
+    else:
+        tp_amt = candidate.max_profit * SPREAD_CREDIT_TP_FRACTION
+        tp_label = f"Credit TP ({SPREAD_CREDIT_TP_FRACTION*100:.0f}%)"
+
+    # Indicator values
+    price     = indicators.get("current_price")
+    ema20     = indicators.get("ema20")
+    adx14     = indicators.get("adx14")
+    rsi14     = indicators.get("rsi14")
+    ema_bull  = bool(indicators.get("ema_stacked_bull"))
+    ema_bear  = bool(indicators.get("ema_stacked_bear"))
+    ema_stack = "BULL" if ema_bull else ("BEAR" if ema_bear else "NEUTRAL")
+
+    ind_parts = []
+    if ema20  is not None: ind_parts.append(f"EMA20={ema20:,.1f}")
+    if adx14  is not None: ind_parts.append(f"ADX14={adx14:.1f}")
+    if rsi14  is not None: ind_parts.append(f"RSI14={rsi14:.1f}")
+    ind_parts.append(f"EMA_stack={ema_stack}")
+    indicator_line = "  ".join(ind_parts)
+
+    # Strategy rationale
+    strategy_code = candidate.strategy.split()[0] if candidate.strategy else "?"
+    if is_debit:
+        rationale = f"{strategy_code} is a momentum strategy → debit spread selected."
+    else:
+        rationale = f"{strategy_code} is a mean-reversion strategy → credit spread selected."
+
+    dc_label   = "Net debit" if is_debit else "Net credit"
+    price_str  = f"₹{candidate.underlying_price:,.2f}" if candidate.underlying_price else "N/A"
+
+    lines = [
+        "SPREAD ENTRY CANDIDATE",
+        f"Underlying: {candidate.symbol}  Current price: {price_str}",
+        f"Strategy: {candidate.strategy}  Direction: {candidate.direction}",
+        f"Spread type: {spread_label}",
+        f"Expiry: {candidate.expiry}",
+        "",
+        f"Long leg:  {long_leg.tsym:<28} strike={long_leg.strike:>7}  fill_est=₹{long_leg.fill_price:.2f}",
+        f"Short leg: {short_leg.tsym:<28} strike={short_leg.strike:>7}  fill_est=₹{short_leg.fill_price:.2f}",
+        "",
+        f"{dc_label}:  ₹{candidate.net_debit_or_credit:.2f}/lot  Lot size: {candidate.lot_size}",
+        f"Max profit: ₹{candidate.max_profit:,.2f}  Max loss: ₹{candidate.max_loss:,.2f}",
+        f"Breakeven:  {candidate.breakeven:,.2f}  R:R = {candidate.risk_reward:.2f}",
+        "",
+        "Risk thresholds (Python-enforced):",
+        f"  Max-loss exit:  {SPREAD_MAX_LOSS_EXIT_FRACTION*100:.0f}% = ₹{max_loss_exit_amt:,.2f} loss",
+        f"  {tp_label}: = ₹{tp_amt:,.2f} profit",
+        "",
+        f"Indicators: {indicator_line}",
+        "",
+        f"Spread type rationale: {rationale}",
+        "Gemini role: APPROVE or REJECT this spread candidate only.",
+        "DO NOT modify strikes, expiry, quantity, or spread type.",
+        "Python owns all execution. Respond with APPROVE or REJECT and a one-line reason.",
+    ]
     return "\n".join(lines)

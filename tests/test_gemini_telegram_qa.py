@@ -104,6 +104,7 @@ def _make_trader(pnl: float = 0.0):
     trader._promoted_futures_filters = []
     trader._goals = MagicMock()
     trader._goals.has_goals.return_value = False
+    trader._spread_portfolio = None  # options path; not initialized in unit tests
     return trader
 
 
