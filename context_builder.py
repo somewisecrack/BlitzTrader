@@ -224,10 +224,11 @@ def build_iteration_context(
 
     market_phase = _get_market_phase(now)
 
-    # Build active futures section from resolved tokens
+    # Legacy active-token diagnostics only. Live entries are option spreads built
+    # by Python; Gemini must not call futures order tools from this context.
     futures_section = ""
     if active_tokens:
-        lines = ["ACTIVE FUTURES INSTRUMENTS:"]
+        lines = ["ACTIVE UNDERLYING FEEDS:"]
         for sym in ("NIFTY", "BANKNIFTY"):
             info = active_tokens.get(sym)
             if info and info.get("tsym"):
@@ -240,7 +241,7 @@ def build_iteration_context(
                     f"({exchange}, token: {token}, lot_size: {lot_size})"
                 )
         if len(lines) > 1:
-            lines.append("Use these exact tsym strings when calling place_virtual_order().")
+            lines.append("Do not place futures orders from these feed symbols.")
             futures_section = "\n" + "\n".join(lines) + "\n"
 
     # Build the signal section — pre-injected by background scanner or absent
@@ -253,24 +254,24 @@ BACKGROUND SCANNER — NEW SIGNALS DETECTED ({len(pending_signals)}):
 
 DO NOT call get_strategy_signals() — those results are already above.
 Python has NOT scored these candidates. It only detected possible setups and
-filtered hard no-trade constraints. You are the gatekeeper: approve only if the
-full strategy context is good enough.
-For each signal above you MUST either:
-  a) APPROVE it — call get_indicators() to confirm, then place_virtual_order(), or
-  b) REJECT it — call log_decision() with the exact reason (wrong phase, poor structure, weak trend, spread too wide, etc.)
-Silently ignoring a signal is not allowed."""
+	filtered hard no-trade constraints. You are the gatekeeper: approve only if the
+	full strategy context is good enough.
+	For each signal above you MUST either:
+	  a) APPROVE it — record/log the approval rationale only; Python builds and places the option spread, or
+	  b) REJECT it — call log_decision() with the exact reason (wrong phase, poor structure, weak trend, spread too wide, etc.)
+	Silently ignoring a signal is not allowed."""
         analysis_sequence = """
 MANDATORY ANALYSIS SEQUENCE (signal-triggered iteration):
 1. For each signal listed above:
-   a. Call get_indicators(symbol, interval) for the signal's symbol and tool interval to confirm
-      EMAs, RSI, ADX, ATR align with the strategy rules.
-      For daily-first-hour signals, interval is set to "3" and signal_timeframe shows the setup type.
-   b. If requires_volume_confirmation=true, call get_candles() and verify avg_volume_20.
-   c. If you approve: place_virtual_order() using signal.execution_symbol or the exact FUTURES tsym
-      shown above under ACTIVE FUTURES INSTRUMENTS.
-   d. If you reject: log_decision() with action="REJECT" or action="SKIP" and a specific reason.
-2. After handling all signals, check open positions — adjust stops if needed.
-3. Only place orders if ALL conditions in the strategy doc are met — not just some."""
+	   a. Call get_indicators(symbol, interval) for the signal's symbol and tool interval to confirm
+	      EMAs, RSI, ADX, ATR align with the strategy rules.
+	      For daily-first-hour signals, interval is set to "3" and signal_timeframe shows the setup type.
+	   b. If requires_volume_confirmation=true, call get_candles() and verify avg_volume_20.
+	   c. If you approve: log the approval rationale. Do not call any order-placement tool;
+	      Python will build, gate, and place the hedged option spread.
+	   d. If you reject: log_decision() with action="REJECT" or action="SKIP" and a specific reason.
+	2. After handling all signals, check open positions — adjust stops if needed.
+	3. Only place orders if ALL conditions in the strategy doc are met — not just some."""
     else:
         signal_section = ""
         analysis_sequence = """
@@ -291,7 +292,7 @@ IMPORTANT: Be silent in this iteration unless you have an ACTION:
 - Send Telegram ONLY if you are entering or exiting a position
 - Do NOT send "thinking" or "observing" messages during market scans
 - In signal-review iterations, log every candidate as ENTER/REJECT/SKIP
-- NEVER claim a trade was made unless place_virtual_order() succeeded in THIS iteration
+- NEVER claim a trade was made unless Python confirms the hedged option spread was placed
 
 Reminder: The state data above (P&L, positions, trade count) comes from the system.
 These numbers are GROUND TRUTH. Do not contradict them or invent different numbers.
@@ -394,10 +395,10 @@ def build_abort_context() -> str:
     return """⚠️ ABORT COMMAND RECEIVED.
 
 You must immediately:
-1. Call close_all_positions()
+1. Do NOT open any new positions
 2. Call log_decision() with action=ABORT and your summary
-3. Call send_telegram() confirming all positions closed
-4. Do NOT open any new positions
+3. Call get_status_with_serials() so the trader can close specific option spreads by serial
+4. Call send_telegram() confirming the abort request was received
 
 This overrides all strategy logic."""
 

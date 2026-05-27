@@ -293,7 +293,7 @@ class BlitzTrader:
         )
         self._feed.start()
 
-        # Resolve front-month futures for traded instruments so we get real
+        # Resolve underlying market-data tokens for traded instruments so we get real
         # volume data.  Fall back to index tokens only where we have a known
         # index token (NIFTY, BANKNIFTY).
         active_tokens = dict(NSE_TOKENS)  # starts with VIX index token
@@ -671,21 +671,12 @@ class BlitzTrader:
         Validates the serial index, finds the spread, closes both legs,
         and sends Telegram confirmation.  NEVER opens a new position.
         """
-        import json
-        from datetime import timezone, timedelta
-        from pathlib import Path as _Path
-
-        INDEX_FILE = _Path("runtime/telegram_position_index.json")
-
         if self._spread_portfolio is None:
             self._telegram.send_telegram("⚠️ Spread portfolio not initialised — cannot exit.")
             return
 
-        # Load serial index
-        try:
-            with open(INDEX_FILE, "r", encoding="utf-8") as fh:
-                index = json.load(fh)
-        except (FileNotFoundError, json.JSONDecodeError):
+        index = load_position_index()
+        if not index:
             self._telegram.send_telegram(
                 "⚠️ No position index found. "
                 "Send 'status' or 'positions' first to generate the index."
@@ -742,6 +733,7 @@ class BlitzTrader:
         )
         if result.get("ok"):
             pnl_val = result.get("realized_pnl", 0)
+            invalidate_position_index()
             self._telegram.send_telegram(
                 f"✅ Spread #{serial} [{spread_id}] closed manually.\n"
                 f"{target_spread.symbol} {target_spread.spread_type} expiry {target_spread.expiry}\n"
@@ -1171,6 +1163,14 @@ class BlitzTrader:
             self._logical_instrument(sig.get("symbol", ""))
             for sig in (existing_pending or [])
         )
+        if self._spread_portfolio is not None:
+            try:
+                occupied.update(
+                    self._logical_instrument(spread.symbol)
+                    for spread in self._spread_portfolio.get_open_spreads()
+                )
+            except Exception:
+                logger.exception("Could not read open spreads for no-pyramiding guardrail")
         occupied.discard(None)
 
         trading_date_str = now.strftime("%Y-%m-%d")

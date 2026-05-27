@@ -235,6 +235,26 @@ class TestLiveEntryFlowIsSpreadOnly(unittest.TestCase):
         self.bot._process_tradeable_signals_python([_nifty_signal()])
         self.bot._order_exec.place_virtual_order.assert_not_called()
 
+
+class TestNoPyramidingUsesOpenSpreads(unittest.TestCase):
+    """Open option spreads must reserve their underlying before Gemini is called."""
+
+    def setUp(self):
+        self.bot = _bot_ready()
+
+    def test_open_nifty_spread_blocks_new_nifty_signal(self):
+        self.bot._spread_portfolio.count_open_spreads.return_value = 1
+        self.bot._spread_portfolio.get_open_spreads.return_value = [_fake_open_spread("NIFTY")]
+
+        tradeable, blocked = self.bot._filter_tradeable_signals(
+            [_nifty_signal()],
+            IST.localize(datetime(2026, 5, 29, 10, 0)),
+        )
+
+        self.assertEqual(tradeable, [])
+        self.assertEqual(len(blocked), 1)
+        self.assertIn("No pyramiding: NIFTY", blocked[0]["blocked_reason"])
+
     def test_spread_builder_none_gatekeeper_not_called(self):
         self.bot._spread_builder.build.return_value = None
         self.bot._process_tradeable_signals_python([_nifty_signal()])

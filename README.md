@@ -1,12 +1,12 @@
 # BlitzTrader
 
-An autonomous intraday trading system for NSE index **futures**, deployed on Google Cloud Platform. All trade decisions are deterministic Python. Gemini is the live entry gatekeeper and post-market research assistant.
+An autonomous intraday trading system for hedged NSE index **option vertical spreads**, deployed on Google Cloud Platform. Python scans and enforces hard guardrails; Gemini is the live entry gatekeeper and post-market research assistant.
 
 ## What it does
 
 - Runs every trading day via a systemd timer on a GCP VM (8:20 AM IST)
-- Logs into Shoonya (Finvasia) broker API and resolves front-month futures contracts at startup
-- **Futures trading**: Scans, selects, executes, and manages intraday index futures trades (₹10L capital)
+- Logs into Shoonya (Finvasia) broker API and subscribes to NIFTY/BANKNIFTY market data
+- **Options trading**: Converts approved NIFTY/BANKNIFTY directional setups into hedged vertical spreads (₹10L capital, no leverage)
 - **Two-stage entry gate**: Python hard guardrails → Gemini gatekeeper (5s timeout, APPROVE/REJECT only)
 - **Self-improvement loop**: Post-market script pipeline proposes, backtests, and promotes filter hypotheses — promoted filters are loaded automatically next session
 - Sends real-time alerts and responds to commands via Telegram bot
@@ -20,19 +20,20 @@ systemd timer (8:20 AM IST, Mon–Fri)
         ▼
     main.py
     ├── Startup
-    │     ├── Login + resolve futures tokens
+    │     ├── Login + resolve market-data tokens
     │     ├── Load cross-session memory
     │     └── Load promoted futures filters (wiki/promoted_filters/)
     │
-    ├── Trading loop (every 60s)  ← Python-only, no LLM in decisions
-    │     ├── Futures signals    — VP strategy scanner + filter application
-    │     ├── Two-stage gate     — Python review → Gemini gatekeeper
-    │     ├── OrderExecution     — RMS margin checks, virtual fill
+    ├── Trading loop (every 60s)
+    │     ├── Directional signals — VP strategy scanner + filter application
+    │     ├── Spread builder      — Python selects hedged option vertical
+    │     ├── Two-stage gate      — Python review → Gemini approve/reject
+    │     ├── Spread execution    — long/protective leg first, short leg second
     │     ├── WebSocket feed     — live Shoonya price stream
     │     └── Telegram polling   — commands + alerts
     │
     └── EOD phase
-          ├── Force-close all positions (3:15 PM IST)
+          ├── Force-close all open option spreads (3:15 PM IST)
           ├── Reconcile P&L
           ├── Write trading journal
           └── Gemini EOD summary
@@ -79,23 +80,24 @@ Python hard guardrails  ─── reject ──▶  SKIP (never reaches Gemini)
 Gemini gatekeeper (5s timeout)
         │ APPROVE                   │ REJECT / timeout / error
         ▼                           ▼
-  place order                   discard signal
+  place hedged spread           discard signal
 ```
 
 - **Gemini** is fail-closed: any error, timeout, or malformed response → signal rejected.
-- **Python** owns ALL exits: stop-loss, trailing stop, target, EOD force-close, manual `/abort`.
+- **Python** owns ALL exits: spread profit target, spread max-loss threshold, EOD force-close, and manual serial exit.
 
 ## Key features
 
-### Futures Trading
+### Option Spread Trading
 | Feature | Detail |
 |---|---|
-| Engine | Python-only (no LLM in decisions) |
-| Capital | ₹10,00,000 virtual |
-| Risk | 1 lot/trade, 5% per trade (₹50k max), 5% daily stop |
-| Instruments | NIFTY, BANKNIFTY futures (front-month) |
-| Position caps | Max 2 open; no pyramiding |
-| Execution guard | CE/PE hard-blocked; bare logical names hard-blocked |
+| Engine | Python scanner + Python spread builder + Gemini entry gatekeeper |
+| Capital | ₹10,00,000, no leverage |
+| Instruments | NIFTY and BANKNIFTY option spreads only |
+| Allowed structures | Bull call, bull put, bear put, bear call spreads |
+| Risk | Hedged max loss known before entry; daily stop still enforced |
+| Position caps | Max open spreads from config; no same-underlying pyramiding |
+| Execution guard | Long/protective leg first; short leg only after long fill |
 | Promoted filters | Loaded from `wiki/promoted_filters/` at startup; applied in `_review_signal_python()` |
 
 ### Gemini Gatekeeper
@@ -119,7 +121,7 @@ Gemini gatekeeper (5s timeout)
 
 ## Futures Strategies
 
-All intraday, executed on NIFTY / BANKNIFTY futures:
+All intraday, used as directional setup detectors for NIFTY / BANKNIFTY option spreads:
 
 | Code | Name | Type |
 |---|---|---|

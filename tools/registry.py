@@ -21,6 +21,8 @@ import logging
 from tools.position_serial import (
     build_status_message,
     save_position_index,
+    load_position_index,
+    invalidate_position_index,
     exit_position_by_serial as _exit_by_serial_impl,
 )
 
@@ -299,7 +301,7 @@ class ToolRegistry:
                     {"serial": i + 1, "spread_id": s.spread_id}
                     for i, s in enumerate(open_spreads)
                 ],
-                "generated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
                 "type": "spreads",
             }
             save_position_index(index_payload)
@@ -344,11 +346,8 @@ class ToolRegistry:
         Validates index freshness and live state before placing any orders.
         NEVER opens a new position.
         """
-        import json, os
-        from pathlib import Path
         from datetime import datetime, timezone, timedelta
 
-        INDEX_PATH = Path("runtime/position_index.json")
         MAX_AGE_MINUTES = 30
 
         if self._spread_portfolio is None:
@@ -356,11 +355,8 @@ class ToolRegistry:
             self._telegram.send_telegram(msg)
             return {"error": msg}
 
-        # Load the serial index
-        try:
-            with open(INDEX_PATH, "r", encoding="utf-8") as fh:
-                index = json.load(fh)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
+        index = load_position_index()
+        if not index:
             msg = "⚠️ No position index found. Call get_status_with_serials() first."
             self._telegram.send_telegram(msg)
             return {"error": msg}
@@ -414,6 +410,7 @@ class ToolRegistry:
             reason=f"manual Telegram exit serial #{serial}",
         )
         if result.get("ok"):
+            invalidate_position_index()
             msg = (
                 f"✅ Spread #{serial} [{spread_id}] closed manually.\n"
                 f"{target_spread.symbol} {target_spread.spread_type} expiry {target_spread.expiry}\n"

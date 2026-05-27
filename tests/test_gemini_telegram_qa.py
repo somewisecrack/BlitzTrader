@@ -550,12 +550,12 @@ class TestEODContextBuilderGeminiRole:
             "EOD context must instruct Gemini to send EOD summary via Telegram"
         )
 
-    def test_eod_context_instructs_close_all_positions_first(self):
-        """EOD must deterministically close positions — Gemini confirms the action."""
+    def test_eod_context_does_not_delegate_closing_to_legacy_tool(self):
+        """EOD spread closing is deterministic Python; Gemini only reports."""
         from context_builder import build_eod_context
         ctx = build_eod_context()
-        assert "close_all_positions" in ctx, (
-            "EOD context must include close_all_positions() instruction"
+        assert "do NOT call close_all_positions" in ctx, (
+            "EOD context must explicitly forbid legacy futures close_all_positions()"
         )
 
     def test_eod_context_forbids_inventing_data(self):

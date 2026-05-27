@@ -509,6 +509,49 @@ def test_registry_imports_new_tools():
     assert "exit_position_by_serial" in LEGACY_TOOLS
 
 
+def test_registry_spread_exit_uses_shared_telegram_index(tmp_path):
+    """ToolRegistry exit_spread_by_serial reads the same index saved by status."""
+    from types import SimpleNamespace
+    from tools import position_serial as ps_mod
+    from tools.registry import ToolRegistry
+
+    original_file = ps_mod._INDEX_FILE
+    ps_mod._INDEX_FILE = tmp_path / "telegram_position_index.json"
+    try:
+        spread = SimpleNamespace(
+            spread_id="SPR-TEST-001",
+            symbol="NIFTY",
+            spread_type="BULL_CALL",
+            expiry="29-MAY-2026",
+        )
+        portfolio = MagicMock()
+        portfolio.build_status_lines.return_value = ["#1 NIFTY BULL_CALL"]
+        portfolio.get_open_spreads.return_value = [spread]
+        portfolio.close_spread.return_value = {"ok": True, "realized_pnl": 123.45}
+
+        registry = ToolRegistry(
+            market_data=MagicMock(),
+            order_execution=MagicMock(),
+            telegram=MagicMock(),
+            journal=MagicMock(),
+            strategy_reader=MagicMock(),
+            memory_reader=MagicMock(),
+            goal_manager=MagicMock(),
+            spread_portfolio=portfolio,
+        )
+
+        registry.execute("get_status_with_serials", {})
+        assert ps_mod._INDEX_FILE.exists()
+
+        result = registry.execute("exit_spread_by_serial", {"serial": 1})
+
+        assert result["ok"] is True
+        portfolio.close_spread.assert_called_once()
+        assert not ps_mod._INDEX_FILE.exists()
+    finally:
+        ps_mod._INDEX_FILE = original_file
+
+
 # ──────────────────────────────────────────────────────────────
 #   15–21. FUTURES identity revalidation
 # ──────────────────────────────────────────────────────────────

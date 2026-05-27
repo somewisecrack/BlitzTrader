@@ -452,6 +452,23 @@ class TestExecutionGuardrails(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("09:00", result["error"])
 
+    def test_open_same_underlying_spread_blocks_entry(self):
+        """Execution guardrail also enforces no-pyramiding at the final boundary."""
+        sm = _mock_state_manager(open_spreads=[{"symbol": "NIFTY", "spread_id": "SPR-OPEN"}])
+        engine = SpreadExecutionEngine(None, sm, no_entry_after="15:05")
+
+        from datetime import datetime as _real_dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+        _market_open = _real_dt(2026, 5, 26, 10, 30, 0, tzinfo=_IST)
+
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = _market_open
+            result = engine.place_spread(self._make_candidate())
+
+        self.assertFalse(result["ok"])
+        self.assertIn("no pyramiding", result["error"].lower())
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   TEST 18: Short placed after long fill

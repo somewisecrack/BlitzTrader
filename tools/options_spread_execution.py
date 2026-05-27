@@ -148,6 +148,11 @@ class SpreadExecutionEngine:
         if candidate.symbol not in ("NIFTY", "BANKNIFTY"):
             return f"BLOCKED: forbidden instrument {candidate.symbol!r}"
 
+        for spread in open_spreads:
+            existing_symbol = str(spread.get("symbol", "")).upper()
+            if existing_symbol == candidate.symbol:
+                return f"BLOCKED: no pyramiding — {candidate.symbol} spread already open"
+
         for leg in candidate.legs:
             if leg.exchange != "NFO":
                 return f"BLOCKED: leg exchange {leg.exchange!r} is not NFO"
