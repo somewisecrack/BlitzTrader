@@ -22,6 +22,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from typing import Optional
+from urllib.parse import unquote
 
 import pytz
 
@@ -45,6 +46,26 @@ _OPTION_CODE = {
     "CE": "C",
     "PE": "P",
 }
+
+def _clean_tsym(tsym: str) -> str:
+    """Normalize Shoonya trading symbols for matching only; preserve raw tsym for orders."""
+    return re.sub(r"[^A-Z0-9]", "", unquote(str(tsym or "")).upper())
+
+
+def _option_type_matches(raw: object, expected: str) -> bool:
+    if raw in (None, ""):
+        return False
+    value = str(raw).upper().strip()
+    return value in {expected, _OPTION_CODE[expected]}
+
+
+def _strike_matches(raw: object, expected: int) -> bool:
+    if raw in (None, ""):
+        return False
+    try:
+        return int(float(raw)) == int(expected)
+    except (TypeError, ValueError):
+        return False
 
 
 def round_to_strike(price: float, symbol: str) -> int:
@@ -268,63 +289,42 @@ class OptionsChain:
         if cache_key in self._token_cache:
             return self._token_cache[cache_key]
 
-        # Search by expiry prefix: e.g. "NIFTY26MAY26" for 26-MAY-2026
+        # Shoonya docs define option tsym as:
+        # SymbolName + ExpDate + 'C'/'P' + StrikePrice.
+        # SearchScrip accepts partial text, but live responses can vary by how
+        # narrowly they match, so try exact contract, expiry prefix, then symbol.
         exp_suffix = expiry.strftime("%d%b%y").upper()     # "26MAY26"
-        search_text = f"{sym}{exp_suffix}"                  # "NIFTY26MAY26"
-        results = self._client.search_scrip("NFO", search_text) if self._client else None
+        search_prefix = f"{sym}{exp_suffix}"                # "NIFTY26MAY26"
+        expected_tsym = f"{search_prefix}{_OPTION_CODE[ot]}{int(strike)}"
+        search_texts = [expected_tsym, search_prefix, sym]
+
+        results = []
+        seen: set[tuple[str, str]] = set()
+        if self._client:
+            for search_text in search_texts:
+                search_hits = self._client.search_scrip("NFO", search_text) or []
+                for hit in search_hits:
+                    dedupe_key = (str(hit.get("token", "")), str(hit.get("tsym", "")))
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    results.append(hit)
+                if any(
+                    self._row_matches_option(r, sym, expiry, strike, ot, search_prefix, expected_tsym)
+                    for r in results
+                ):
+                    break
+
         if not results:
             logger.warning(
-                "resolve_option_token: no results for %s %s %d%s",
-                sym, expiry_str, strike, ot,
+                "resolve_option_token: no SearchScrip results for %s %s %s",
+                sym, expiry_str, expected_tsym,
             )
             return None
 
         for r in results:
-            if r.get("instname") != "OPTIDX":
-                continue
-            tsym = r.get("tsym", "")
-            # Shoonya tsym format: NIFTY26MAY26C24500 / NIFTY26MAY26P24500.
-            # Keep a legacy suffix as tolerance for mock/broker variants, but the
-            # documented Shoonya shape is SYMBOL + DDMMMYY + C/P + STRIKE.
-            expected_tsym = f"{search_text}{_OPTION_CODE[ot]}{strike}"
-            legacy_suffix = f"{strike}{ot}"
-            # Also verify symname/optiontype if present
-            r_strike = r.get("strprc") or r.get("strike")
-            r_otype  = r.get("optt") or r.get("option_type") or r.get("optiontype")
-
-            tsym_upper = tsym.upper()
-            field_strike_ok = True
-            if r_strike not in (None, ""):
-                try:
-                    field_strike_ok = int(float(r_strike)) == int(strike)
-                except (TypeError, ValueError):
-                    field_strike_ok = False
-            field_otype_ok = True
-            if r_otype:
-                ro = str(r_otype).upper()
-                field_otype_ok = ro in {ot, _OPTION_CODE[ot]}
-
-            field_match = (
-                r_strike not in (None, "")
-                and bool(r_otype)
-                and tsym_upper.startswith(search_text)
-                and field_strike_ok
-                and field_otype_ok
-            )
-            if (
-                tsym_upper == expected_tsym
-                or (tsym_upper.startswith(search_text) and tsym_upper.endswith(legacy_suffix))
-                or field_match
-            ):
-                # Verify expiry field too
-                r_expiry = r.get("exd", "")
-                try:
-                    r_exp_date = datetime.strptime(r_expiry, _EXPIRY_FORMAT).date()
-                except ValueError:
-                    r_exp_date = None
-                if r_exp_date and r_exp_date != expiry:
-                    continue
-
+            if self._row_matches_option(r, sym, expiry, strike, ot, search_prefix, expected_tsym):
+                tsym = r.get("tsym", "")
                 lot_size = None
                 for key in ("ls", "lotsize", "lot_size"):
                     raw = r.get(key)
@@ -351,10 +351,63 @@ class OptionsChain:
                 return info
 
         logger.warning(
-            "resolve_option_token: no matching OPTIDX found for %s %s %d%s",
-            sym, expiry_str, strike, ot,
+            "resolve_option_token: no matching OPTIDX found for %s %s %s; "
+            "sample_tsyms=%s",
+            sym,
+            expiry_str,
+            expected_tsym,
+            [r.get("tsym") for r in results[:8]],
         )
         return None
+
+    @staticmethod
+    def _row_matches_option(
+        row: dict,
+        sym: str,
+        expiry: date,
+        strike: int,
+        option_type: str,
+        search_prefix: str,
+        expected_tsym: str,
+    ) -> bool:
+        """Match Shoonya SearchScrip/GetOptionChain rows by documented fields and tsym."""
+        if row.get("instname") not in (None, "", "OPTIDX"):
+            return False
+
+        tsym = _clean_tsym(row.get("tsym", ""))
+        if not tsym:
+            return False
+
+        prefix_re = re.compile(r"^" + re.escape(sym) + r"\d")
+        if not prefix_re.match(tsym):
+            return False
+
+        r_expiry = row.get("exd", "")
+        if r_expiry:
+            try:
+                if datetime.strptime(str(r_expiry), _EXPIRY_FORMAT).date() != expiry:
+                    return False
+            except ValueError:
+                return False
+        elif not tsym.startswith(search_prefix):
+            return False
+
+        r_strike = row.get("strprc") or row.get("strike")
+        r_otype = row.get("optt") or row.get("option_type") or row.get("optiontype")
+        field_match = (
+            _strike_matches(r_strike, strike)
+            and _option_type_matches(r_otype, option_type)
+        )
+        if field_match:
+            return True
+
+        # Documented Shoonya shape: NIFTY02JUN26C24100 / NIFTY02JUN26P24100.
+        if tsym == expected_tsym:
+            return True
+
+        # Tolerate legacy/mock CE/PE suffix rows without making them preferred.
+        legacy_expected = f"{search_prefix}{int(strike)}{option_type}"
+        return tsym == legacy_expected
 
     # ── Live quotes ──────────────────────────────────────────────────────────
 
