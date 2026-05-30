@@ -61,7 +61,8 @@ def _make_quote(ltp=50.0, bid=49.0, ask=51.0) -> dict:
 def _make_token_info(symbol="NIFTY", strike=24500, otype="CE",
                      expiry=None, lot_size=75) -> dict:
     expiry = expiry or date(2026, 5, 28)
-    tsym = f"{symbol}{expiry.strftime('%d%b%y').upper()}{strike}{otype}"
+    shoonya_otype = {"CE": "C", "PE": "P"}[otype]
+    tsym = f"{symbol}{expiry.strftime('%d%b%y').upper()}{shoonya_otype}{strike}"
     return {
         "token": f"T{strike}",
         "tsym": tsym,
@@ -84,8 +85,8 @@ def _make_open_spread(
     short_fill=20.0,
     long_token="T1",
     short_token="T2",
-    long_tsym="NIFTY28MAY2624500CE",
-    short_tsym="NIFTY28MAY2624600CE",
+    long_tsym="NIFTY28MAY26C24500",
+    short_tsym="NIFTY28MAY26C24600",
     lot_size=75,
     max_loss=2250.0,
     max_profit=5250.0,
@@ -409,8 +410,8 @@ class TestExecutionGuardrails(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY",
             spread_type="BULL_CALL",
@@ -479,8 +480,8 @@ class TestShortAfterLongFill(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY",
             spread_type="BULL_CALL",
@@ -553,8 +554,8 @@ class TestEmergencyClose(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY", spread_type="BULL_CALL", direction="BULLISH",
             expiry=expiry, expiry_str="28-MAY-2026",
@@ -599,7 +600,7 @@ class TestEmergencyClose(unittest.TestCase):
         emergency_call = all_calls[-1]
         self.assertEqual(emergency_call.kwargs["buy_or_sell"], "SELL")
         self.assertEqual(emergency_call.kwargs["price_type"], "MKT")
-        self.assertEqual(emergency_call.kwargs["tradingsymbol"], "NIFTY28MAY2624500CE")
+        self.assertEqual(emergency_call.kwargs["tradingsymbol"], "NIFTY28MAY26C24500")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -611,8 +612,8 @@ class TestFullSuccessReturnsOpenSpread(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY", spread_type="BULL_CALL", direction="BULLISH",
             expiry=expiry, expiry_str="28-MAY-2026",
@@ -738,6 +739,49 @@ class TestQuoteValidation(unittest.TestCase):
         ok, reason = _is_quote_valid({"lp": "1", "bp1": "0.5", "sp1": "1.5"}, "BUY",
                                       min_ltp=2.0)
         self.assertFalse(ok)
+
+
+class TestOptionsChainTokenResolution(unittest.TestCase):
+    """Shoonya option symbols are SYMBOL + DDMMMYY + C/P + STRIKE."""
+
+    def test_resolves_shoonya_call_symbol(self):
+        client = MagicMock()
+        client.search_scrip.return_value = [
+            {
+                "instname": "OPTIDX",
+                "tsym": "NIFTY02JUN26C24100",
+                "token": "11111",
+                "exd": "02-JUN-2026",
+                "ls": "65",
+                "strprc": "24100",
+                "optt": "CE",
+            }
+        ]
+        chain = OptionsChain(client)
+
+        result = chain.resolve_option_token("NIFTY", date(2026, 6, 2), 24100, "CE")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["tsym"], "NIFTY02JUN26C24100")
+        self.assertEqual(result["token"], "11111")
+        self.assertEqual(result["lot_size"], 65)
+
+    def test_rejects_old_strike_then_ce_shape_when_real_shape_present(self):
+        client = MagicMock()
+        client.search_scrip.return_value = [
+            {
+                "instname": "OPTIDX",
+                "tsym": "NIFTY02JUN26C24100",
+                "token": "11111",
+                "exd": "02-JUN-2026",
+                "ls": "65",
+            }
+        ]
+        chain = OptionsChain(client)
+
+        result = chain.resolve_option_token("NIFTY", date(2026, 6, 2), 24100, "PE")
+
+        self.assertIsNone(result)
 
 
 class TestBuildStrikes(unittest.TestCase):

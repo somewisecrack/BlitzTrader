@@ -12,8 +12,8 @@ All methods return None / empty on failure — never raise.
 All hard checks (naked short, bad token, stale quote) are enforced HERE.
 
 Shoonya option symbol format (NSE F&O):
-  NIFTY26MAY2624500CE  →  SYMBOL + DDMMMYY + STRIKE(int) + CE/PE
-  e.g. NIFTY 26-MAY-2026 strike 24500 Call = NIFTY26MAY2624500CE
+  NIFTY26MAY26C24500  →  SYMBOL + DDMMMYY + C/P + STRIKE(int)
+  e.g. NIFTY 26-MAY-2026 strike 24500 Call = NIFTY26MAY26C24500
   Instname for index options: OPTIDX
 """
 from __future__ import annotations
@@ -40,6 +40,11 @@ _STRIKE_STEP = {
 
 # Shoonya expiry date string format in search results
 _EXPIRY_FORMAT = "%d-%b-%Y"   # e.g. "26-MAY-2026"
+
+_OPTION_CODE = {
+    "CE": "C",
+    "PE": "P",
+}
 
 
 def round_to_strike(price: float, symbol: str) -> int:
@@ -278,15 +283,39 @@ class OptionsChain:
             if r.get("instname") != "OPTIDX":
                 continue
             tsym = r.get("tsym", "")
-            # tsym format: NIFTY26MAY2624500CE
-            # Check it ends with STRIKE + OPTION_TYPE
-            expected_suffix = f"{strike}{ot}"
+            # Shoonya tsym format: NIFTY26MAY26C24500 / NIFTY26MAY26P24500.
+            # Keep a legacy suffix as tolerance for mock/broker variants, but the
+            # documented Shoonya shape is SYMBOL + DDMMMYY + C/P + STRIKE.
+            expected_tsym = f"{search_text}{_OPTION_CODE[ot]}{strike}"
+            legacy_suffix = f"{strike}{ot}"
             # Also verify symname/optiontype if present
             r_strike = r.get("strprc") or r.get("strike")
             r_otype  = r.get("optt") or r.get("option_type") or r.get("optiontype")
 
-            # Primary: match tsym suffix directly
-            if tsym.endswith(expected_suffix):
+            tsym_upper = tsym.upper()
+            field_strike_ok = True
+            if r_strike not in (None, ""):
+                try:
+                    field_strike_ok = int(float(r_strike)) == int(strike)
+                except (TypeError, ValueError):
+                    field_strike_ok = False
+            field_otype_ok = True
+            if r_otype:
+                ro = str(r_otype).upper()
+                field_otype_ok = ro in {ot, _OPTION_CODE[ot]}
+
+            field_match = (
+                r_strike not in (None, "")
+                and bool(r_otype)
+                and tsym_upper.startswith(search_text)
+                and field_strike_ok
+                and field_otype_ok
+            )
+            if (
+                tsym_upper == expected_tsym
+                or (tsym_upper.startswith(search_text) and tsym_upper.endswith(legacy_suffix))
+                or field_match
+            ):
                 # Verify expiry field too
                 r_expiry = r.get("exd", "")
                 try:

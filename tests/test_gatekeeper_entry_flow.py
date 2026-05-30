@@ -59,8 +59,8 @@ IST = pytz.timezone("Asia/Kolkata")
 
 def _fake_candidate() -> SpreadCandidate:
     expiry = date(2026, 5, 29)
-    long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY29MAY2624500CE", "NFO", 75, {}, 51.0)
-    short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY29MAY2624600CE", "NFO", 75, {}, 20.0)
+    long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY29MAY26C24500", "NFO", 75, {}, 51.0)
+    short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY29MAY26C24600", "NFO", 75, {}, 20.0)
     return SpreadCandidate(
         symbol="NIFTY",
         spread_type="BULL_CALL",
@@ -90,14 +90,14 @@ def _fake_open_spread() -> OpenSpread:
         expiry="29-MAY-2026",
         lot_size=75,
         lots=1,
-        long_tsym="NIFTY29MAY2624500CE",
+        long_tsym="NIFTY29MAY26C24500",
         long_token="T1",
         long_action="BUY",
         long_strike=24500,
         long_option_type="CE",
         long_fill_price=51.0,
         long_order_id="ORD001",
-        short_tsym="NIFTY29MAY2624600CE",
+        short_tsym="NIFTY29MAY26C24600",
         short_token="T2",
         short_action="SELL",
         short_strike=24600,
@@ -248,8 +248,8 @@ class TestGatekeeperApproveFlow(unittest.TestCase):
     def test_telegram_message_includes_both_legs(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
         msg = self.bot._telegram.send_telegram.call_args[0][0]
-        self.assertIn("NIFTY29MAY2624500CE", msg)
-        self.assertIn("NIFTY29MAY2624600CE", msg)
+        self.assertIn("NIFTY29MAY26C24500", msg)
+        self.assertIn("NIFTY29MAY26C24600", msg)
 
     def test_telegram_message_includes_max_profit_and_max_loss(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -461,8 +461,8 @@ class TestGatekeeperContextBuilding(unittest.TestCase):
             "ema_stacked_bear": False,
         }
         ctx = build_spread_gatekeeper_context(candidate, indicators)
-        self.assertIn("NIFTY29MAY2624500CE", ctx)
-        self.assertIn("NIFTY29MAY2624600CE", ctx)
+        self.assertIn("NIFTY29MAY26C24500", ctx)
+        self.assertIn("NIFTY29MAY26C24600", ctx)
         self.assertIn("BULL_CALL", ctx)
         self.assertIn("APPROVE or REJECT", ctx)
 

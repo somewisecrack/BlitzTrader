@@ -30,6 +30,7 @@ Returns:
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ from tools.options_spread_builder import SpreadCandidate, SpreadLeg
 logger = logging.getLogger("BlitzTrader.SpreadExecution")
 
 IST = pytz.timezone("Asia/Kolkata")
+
+_SHOONYA_OPTION_TSYM_RE = re.compile(r"^(NIFTY|BANKNIFTY)\d{2}[A-Z]{3}\d{2}[CP]\d+$")
 
 # How long (seconds) to wait for a leg fill before treating as timeout
 _DEFAULT_FILL_TIMEOUT = 300   # 5 minutes
@@ -156,9 +159,9 @@ class SpreadExecutionEngine:
         for leg in candidate.legs:
             if leg.exchange != "NFO":
                 return f"BLOCKED: leg exchange {leg.exchange!r} is not NFO"
-            # Reject if tsym looks like a futures contract
+            # Reject if tsym looks like a futures contract or a non-Shoonya option.
             tsym = leg.tsym.upper()
-            if tsym.endswith("F") or (tsym[-1].isdigit() and "CE" not in tsym and "PE" not in tsym):
+            if tsym.endswith("F") or not _SHOONYA_OPTION_TSYM_RE.match(tsym):
                 return f"BLOCKED: tsym {tsym!r} does not look like an option contract"
 
         return None  # all clear

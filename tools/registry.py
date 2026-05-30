@@ -454,14 +454,14 @@ class ToolRegistry:
                 "description": (
                     "Get LTP, best bid, best ask for a specific trading symbol. "
                     "Use this to check the current price of an active options contract "
-                    "(e.g. NIFTY29MAY2624500CE) or index futures."
+                    "(e.g. NIFTY29MAY26C24500) or index futures."
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Trading symbol, e.g. 'NIFTY29MAY2624500CE'",
+                            "description": "Trading symbol, e.g. 'NIFTY29MAY26C24500'",
                         }
                     },
                     "required": ["symbol"],

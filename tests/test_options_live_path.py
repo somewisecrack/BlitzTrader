@@ -49,8 +49,8 @@ IST = pytz.timezone("Asia/Kolkata")
 
 def _fake_candidate() -> SpreadCandidate:
     expiry = date(2026, 5, 29)
-    long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY29MAY2624500CE", "NFO", 75, {}, 51.0)
-    short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY29MAY2624600CE", "NFO", 75, {}, 20.0)
+    long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY29MAY26C24500", "NFO", 75, {}, 51.0)
+    short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY29MAY26C24600", "NFO", 75, {}, 20.0)
     return SpreadCandidate(
         symbol="NIFTY",
         spread_type="BULL_CALL",
@@ -80,14 +80,14 @@ def _fake_open_spread(symbol="NIFTY", spread_type="BULL_CALL") -> OpenSpread:
         expiry="29-MAY-2026",
         lot_size=75,
         lots=1,
-        long_tsym="NIFTY29MAY2624500CE",
+        long_tsym="NIFTY29MAY26C24500",
         long_token="T1",
         long_action="BUY",
         long_strike=24500,
         long_option_type="CE",
         long_fill_price=51.0,
         long_order_id="ORD001",
-        short_tsym="NIFTY29MAY2624600CE",
+        short_tsym="NIFTY29MAY26C24600",
         short_token="T2",
         short_action="SELL",
         short_strike=24600,
@@ -334,8 +334,8 @@ class TestTelegramMessages(unittest.TestCase):
         self.msg = self.bot._telegram.send_telegram.call_args[0][0]
 
     def test_entry_message_has_both_leg_tsyms(self):
-        self.assertIn("NIFTY29MAY2624500CE", self.msg)
-        self.assertIn("NIFTY29MAY2624600CE", self.msg)
+        self.assertIn("NIFTY29MAY26C24500", self.msg)
+        self.assertIn("NIFTY29MAY26C24600", self.msg)
 
     def test_entry_message_has_expiry_and_economics(self):
         self.assertIn("29-MAY-2026", self.msg)
@@ -353,8 +353,8 @@ class TestTelegramMessages(unittest.TestCase):
         self.bot._spread_portfolio.build_status_lines.return_value = [
             "Open Option Spreads",
             "1. [SPR-20260529-093000-AABBCC] NIFTY BULL_CALL expiry=29-MAY-2026",
-            "   Long:  NIFTY29MAY2624500CE entry=₹51.00",
-            "   Short: NIFTY29MAY2624600CE entry=₹20.00",
+            "   Long:  NIFTY29MAY26C24500 entry=₹51.00",
+            "   Short: NIFTY29MAY26C24600 entry=₹20.00",
             "   Unrealized P&L: ₹+231.00",
         ]
         self.bot._spread_portfolio.get_open_spreads.return_value = [_fake_open_spread()]

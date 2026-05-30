@@ -81,7 +81,7 @@ class VirtualLedger:
         """
         Simulate a MARKET order fill by sweeping the visible order book.
 
-        :param symbol:    Trading symbol (e.g., 'NIFTY27MAR24500CE')
+        :param symbol:    Trading symbol (e.g., 'NIFTY27MAR24C24500')
         :param direction: 'BUY' or 'SELL'
         :param quantity:  Number of units
         :param best_bid:  Current best bid price
