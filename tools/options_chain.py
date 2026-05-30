@@ -22,7 +22,6 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from typing import Optional
-from urllib.parse import unquote
 
 import pytz
 
@@ -49,7 +48,7 @@ _OPTION_CODE = {
 
 def _clean_tsym(tsym: str) -> str:
     """Normalize Shoonya trading symbols for matching only; preserve raw tsym for orders."""
-    return re.sub(r"[^A-Z0-9]", "", unquote(str(tsym or "")).upper())
+    return re.sub(r"[^A-Z0-9]", "", str(tsym or "").upper())
 
 
 def _option_type_matches(raw: object, expected: str) -> bool:
@@ -291,29 +290,11 @@ class OptionsChain:
 
         # Shoonya docs define option tsym as:
         # SymbolName + ExpDate + 'C'/'P' + StrikePrice.
-        # SearchScrip accepts partial text, but live responses can vary by how
-        # narrowly they match, so try exact contract, expiry prefix, then symbol.
+        # Search only that exact documented trading symbol. No fallback search.
         exp_suffix = expiry.strftime("%d%b%y").upper()     # "26MAY26"
         search_prefix = f"{sym}{exp_suffix}"                # "NIFTY26MAY26"
         expected_tsym = f"{search_prefix}{_OPTION_CODE[ot]}{int(strike)}"
-        search_texts = [expected_tsym, search_prefix, sym]
-
-        results = []
-        seen: set[tuple[str, str]] = set()
-        if self._client:
-            for search_text in search_texts:
-                search_hits = self._client.search_scrip("NFO", search_text) or []
-                for hit in search_hits:
-                    dedupe_key = (str(hit.get("token", "")), str(hit.get("tsym", "")))
-                    if dedupe_key in seen:
-                        continue
-                    seen.add(dedupe_key)
-                    results.append(hit)
-                if any(
-                    self._row_matches_option(r, sym, expiry, strike, ot, search_prefix, expected_tsym)
-                    for r in results
-                ):
-                    break
+        results = self._client.search_scrip("NFO", expected_tsym) if self._client else None
 
         if not results:
             logger.warning(
@@ -405,9 +386,7 @@ class OptionsChain:
         if tsym == expected_tsym:
             return True
 
-        # Tolerate legacy/mock CE/PE suffix rows without making them preferred.
-        legacy_expected = f"{search_prefix}{int(strike)}{option_type}"
-        return tsym == legacy_expected
+        return False
 
     # ── Live quotes ──────────────────────────────────────────────────────────
 

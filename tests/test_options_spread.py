@@ -783,20 +783,18 @@ class TestOptionsChainTokenResolution(unittest.TestCase):
 
         self.assertIsNone(result)
 
-    def test_searches_exact_contract_before_prefix(self):
+    def test_searches_exact_contract_only(self):
         client = MagicMock()
-        client.search_scrip.side_effect = [
-            [
-                {
-                    "instname": "OPTIDX",
-                    "tsym": "NIFTY02JUN26C24100",
-                    "token": "11111",
-                    "exd": "02-JUN-2026",
-                    "ls": "65",
-                    "strprc": "24100.00",
-                    "optt": "CE",
-                }
-            ],
+        client.search_scrip.return_value = [
+            {
+                "instname": "OPTIDX",
+                "tsym": "NIFTY02JUN26C24100",
+                "token": "11111",
+                "exd": "02-JUN-2026",
+                "ls": "65",
+                "strprc": "24100.00",
+                "optt": "CE",
+            }
         ]
         chain = OptionsChain(client)
 
@@ -806,37 +804,15 @@ class TestOptionsChainTokenResolution(unittest.TestCase):
         self.assertEqual(result["tsym"], "NIFTY02JUN26C24100")
         client.search_scrip.assert_called_once_with("NFO", "NIFTY02JUN26C24100")
 
-    def test_falls_back_to_symbol_search_and_matches_fields(self):
+    def test_does_not_fallback_when_exact_contract_search_misses(self):
         client = MagicMock()
-        client.search_scrip.side_effect = [
-            [],
-            [],
-            [
-                {
-                    "instname": "OPTIDX",
-                    "tsym": "NIFTY02JUN26P23900",
-                    "token": "22222",
-                    "exd": "02-JUN-2026",
-                    "ls": "65",
-                    "strprc": "23900.00",
-                    "optt": "PE",
-                }
-            ],
-        ]
+        client.search_scrip.return_value = []
         chain = OptionsChain(client)
 
         result = chain.resolve_option_token("NIFTY", date(2026, 6, 2), 23900, "PE")
 
-        self.assertIsNotNone(result)
-        self.assertEqual(result["token"], "22222")
-        self.assertEqual(
-            [call.args for call in client.search_scrip.call_args_list],
-            [
-                ("NFO", "NIFTY02JUN26P23900"),
-                ("NFO", "NIFTY02JUN26"),
-                ("NFO", "NIFTY"),
-            ],
-        )
+        self.assertIsNone(result)
+        client.search_scrip.assert_called_once_with("NFO", "NIFTY02JUN26P23900")
 
 
 class TestBuildStrikes(unittest.TestCase):
