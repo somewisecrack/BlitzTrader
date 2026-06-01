@@ -238,6 +238,29 @@ class TestSpreadTypeSelection(unittest.TestCase):
         self.assertEqual(_select_spread_type("BEARISH", "VP-15"), "BEAR_CALL")
 
 
+class TestExpiryConfigWiring(unittest.TestCase):
+    """Ensure expiry-selection config is actually passed to OptionsChain."""
+
+    @patch("config.MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD", 3)
+    @patch("config.ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS", True)
+    def test_builder_passes_expiry_config_to_chain(self):
+        chain = _mock_options_chain()
+        builder = SpreadBuilder(chain, max_risk_rupees=10000)
+
+        result = builder.build(
+            {"symbol": "NIFTY", "direction": "SELL", "strategy": "VP-15"},
+            underlying_price=24500,
+        )
+
+        self.assertIsNotNone(result)
+        chain.select_expiry.assert_called_once_with(
+            "NIFTY",
+            "BEAR_CALL",
+            allow_same_day=True,
+            min_days_credit=3,
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #   TEST 9: Bad quote rejects candidate
 # ──────────────────────────────────────────────────────────────────────────────
