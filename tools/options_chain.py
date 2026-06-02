@@ -200,14 +200,31 @@ class OptionsChain:
 
         today = date.today()
         expiry_set: set[date] = set()
+        # Use cleaned tsym (strips spaces and special chars) for matching —
+        # some Shoonya responses include spaces in NIFTY tsyms e.g. "NIFTY 05JUN26C24500"
         prefix_digit_re = re.compile(r"^" + re.escape(sym) + r"\d")
+        # Option tsym pattern: SYMBOL + DDMMMYY + C/P + STRIKE
+        option_tsym_re = re.compile(r"^" + re.escape(sym) + r"\d{2}[A-Z]{3}\d{2}[CP]\d+$")
 
         for r in results:
-            if r.get("instname") != "OPTIDX":
+            # Accept instname "OPTIDX", blank, or None.
+            # Shoonya sometimes omits or varies instname; tsym pattern is the
+            # reliable discriminator.  Matches _row_matches_option() permissiveness.
+            instname = r.get("instname", "")
+            if instname and instname != "OPTIDX":
                 continue
-            tsym = r.get("tsym", "")
+
+            tsym_raw = r.get("tsym", "")
+            tsym = _clean_tsym(tsym_raw)   # strip spaces / special chars
+            if not tsym:
+                continue
+            # Must start with the exact symbol followed by a digit
             if not prefix_digit_re.match(tsym):
                 continue
+            # Must look like an option contract (not a futures contract)
+            if not option_tsym_re.match(tsym):
+                continue
+
             exd = r.get("exd", "")
             try:
                 expiry = datetime.strptime(exd, _EXPIRY_FORMAT).date()
@@ -218,6 +235,18 @@ class OptionsChain:
             if exclude_today and expiry == today:
                 continue
             expiry_set.add(expiry)
+
+        if not expiry_set and results:
+            # Diagnostic: log sample of what Shoonya actually returned so future
+            # failures are easier to triage without needing a live debug session.
+            sample = results[:5]
+            logger.warning(
+                "get_available_expiries(%s): %d search results but 0 valid expiries — "
+                "sample instnames=%s sample_tsyms=%s",
+                sym, len(results),
+                [r.get("instname") for r in sample],
+                [r.get("tsym") for r in sample],
+            )
 
         return sorted(expiry_set)
 
