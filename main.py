@@ -57,6 +57,7 @@ from config import (
     MEMORY_FILE,
     NO_NEW_ENTRY_AFTER,
     LIMIT_ORDER_TIMEOUT_SECONDS,
+    LIVE_ORDER_EXECUTION,
     NSE_TOKENS,
     RCLONE_FOLDER,
     RCLONE_REMOTE,
@@ -391,12 +392,19 @@ class BlitzTrader:
             self._options_chain,
             max_risk_rupees=OPTION_SPREAD_MAX_RISK_RUPEES,
         )
+        _virtual = not LIVE_ORDER_EXECUTION
+        logger.info(
+            "Execution mode: %s (LIVE_ORDER_EXECUTION=%s)",
+            "VIRTUAL/SIMULATED" if _virtual else "LIVE BROKER",
+            LIVE_ORDER_EXECUTION,
+        )
         self._spread_exec = SpreadExecutionEngine(
             self._shoonya,
             self._state,
             max_open_spreads=MAX_OPEN_OPTION_SPREADS,
             no_entry_after=NO_NEW_ENTRY_AFTER,
             fill_timeout_seconds=LIMIT_ORDER_TIMEOUT_SECONDS,
+            virtual=_virtual,
         )
         self._spread_portfolio = SpreadPortfolio(
             self._shoonya,
@@ -405,6 +413,7 @@ class BlitzTrader:
             max_loss_exit_fraction=SPREAD_MAX_LOSS_EXIT_FRACTION,
             credit_tp_fraction=SPREAD_CREDIT_TP_FRACTION,
             debit_tp_fraction=SPREAD_DEBIT_TP_FRACTION,
+            virtual=_virtual,
         )
         logger.info("✓ Options spread components initialized")
 

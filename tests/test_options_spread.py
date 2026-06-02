@@ -548,7 +548,8 @@ class TestShortAfterLongFill(unittest.TestCase):
 
         mock_client.get_order_book.side_effect = fake_order_book
 
-        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05")
+        # virtual=False so broker placement calls are actually made
+        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05", virtual=False)
 
         from datetime import datetime as _real_dt
         import pytz as _pytz
@@ -604,7 +605,8 @@ class TestEmergencyClose(unittest.TestCase):
             {"norenordno": long_order_id, "status": "COMPLETE", "avgprc": "51.0"}
         ]
 
-        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05")
+        # virtual=False so broker placement calls are actually made
+        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05", virtual=False)
 
         from datetime import datetime as _real_dt
         import pytz as _pytz
@@ -657,7 +659,8 @@ class TestFullSuccessReturnsOpenSpread(unittest.TestCase):
             [{"norenordno": "ORD-LONG-001", "status": "COMPLETE", "avgprc": "51.5"}],
             [{"norenordno": "ORD-SHORT-002", "status": "COMPLETE", "avgprc": "19.5"}],
         ]
-        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05")
+        # virtual=False so broker placement calls are actually made
+        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05", virtual=False)
 
         from datetime import datetime as _real_dt
         import pytz as _pytz
@@ -860,6 +863,212 @@ class TestBuildStrikes(unittest.TestCase):
         long_s, short_s = _build_strikes("BEAR_CALL", 24500, "NIFTY", 2)
         self.assertEqual(long_s, 24600)   # OTM CE (higher, protective)
         self.assertEqual(short_s, 24500)  # ATM CE (lower) — the sold leg
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   VIRTUAL MODE TESTS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_candidate_nifty() -> SpreadCandidate:
+    expiry = date(2026, 5, 28)
+    long_leg  = SpreadLeg("BUY",  "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+    short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
+    return SpreadCandidate(
+        symbol="NIFTY", spread_type="BULL_CALL", direction="BULLISH",
+        expiry=expiry, expiry_str="28-MAY-2026",
+        legs=[long_leg, short_leg], lot_size=75, lots=1,
+        net_debit_or_credit=31.0, max_profit=5175.0, max_loss=2325.0,
+        breakeven=24531.0, risk_reward=2.2,
+    )
+
+
+class TestVirtualPlaceSpread(unittest.TestCase):
+    """Virtual execution engine: approved spread is simulated without broker calls."""
+
+    def setUp(self):
+        from datetime import datetime as _real_dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+        self._market_open = _real_dt(2026, 5, 26, 10, 30, 0, tzinfo=_IST)
+
+    def _engine(self):
+        # virtual=True is the default; pass it explicitly for clarity
+        return SpreadExecutionEngine(None, _mock_state_manager(), no_entry_after="15:05", virtual=True)
+
+    def test_virtual_returns_ok_true(self):
+        """Virtual mode: place_spread returns ok=True."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        self.assertTrue(result["ok"], result)
+
+    def test_virtual_returns_open_spread(self):
+        """Virtual mode: result contains a fully populated OpenSpread."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        spread = result["spread"]
+        self.assertIsInstance(spread, OpenSpread)
+        self.assertTrue(spread.spread_id.startswith("SPR-"))
+        self.assertEqual(spread.symbol, "NIFTY")
+        self.assertEqual(spread.long_fill_price, 51.0)
+        self.assertEqual(spread.short_fill_price, 20.0)
+
+    def test_virtual_fill_prices_from_candidate(self):
+        """Virtual fill prices come from candidate leg fill_price, not broker."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        spread = result["spread"]
+        self.assertEqual(spread.long_fill_price, 51.0)
+        self.assertEqual(spread.short_fill_price, 20.0)
+
+    def test_virtual_does_not_call_place_order(self):
+        """Virtual mode: Shoonya place_order is never called."""
+        mock_client = MagicMock()
+        engine = SpreadExecutionEngine(
+            mock_client, _mock_state_manager(), no_entry_after="15:05", virtual=True
+        )
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            engine.place_spread(_make_candidate_nifty())
+        mock_client.place_order.assert_not_called()
+
+    def test_virtual_persists_spread_to_state(self):
+        """Virtual mode: open spread is written to state_manager."""
+        sm = _mock_state_manager()
+        engine = SpreadExecutionEngine(mock_client := MagicMock(), sm, no_entry_after="15:05", virtual=True)
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = engine.place_spread(_make_candidate_nifty())
+        self.assertTrue(result["ok"])
+        sm.update_state.assert_called()  # state was persisted
+
+    def test_virtual_order_id_is_virtual_marker(self):
+        """Virtual mode: order IDs are clearly marked as virtual, not real broker IDs."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        spread = result["spread"]
+        self.assertIn("VIRTUAL", spread.long_order_id)
+        self.assertIn("VIRTUAL", spread.short_order_id)
+
+    def test_virtual_message_contains_virtual_label(self):
+        """Virtual mode: result message is clearly labelled [VIRTUAL]."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        self.assertIn("[VIRTUAL]", result["message"])
+
+    def test_virtual_guardrails_still_enforced(self):
+        """Virtual mode: hard guardrails (paused, time cutoff) still block entry."""
+        sm = _mock_state_manager(paused=True)
+        engine = SpreadExecutionEngine(None, sm, virtual=True)
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = engine.place_spread(_make_candidate_nifty())
+        self.assertFalse(result["ok"])
+        self.assertIn("paused", result["error"].lower())
+
+
+class TestVirtualCloseSpread(unittest.TestCase):
+    """Virtual portfolio: close_spread simulates exit without broker calls."""
+
+    def _make_spread(self) -> OpenSpread:
+        return _make_open_spread(
+            max_loss=2325.0, max_profit=5175.0, net_dc=31.0,
+            long_fill=51.0, short_fill=20.0,
+        )
+
+    def _portfolio(self):
+        from tools.options_spread_portfolio import SpreadPortfolio
+        return SpreadPortfolio(None, _mock_state_manager(), virtual=True)
+
+    def test_virtual_close_returns_ok(self):
+        """Virtual close returns ok=True."""
+        result = self._portfolio().close_spread(
+            self._make_spread(), reason="EOD", pnl_data={"long_ltp": 55.0, "short_ltp": 18.0}
+        )
+        self.assertTrue(result["ok"], result)
+
+    def test_virtual_close_uses_ltp_for_pnl(self):
+        """Virtual close uses pnl_data LTPs as close prices when available."""
+        spread = self._make_spread()
+        result = self._portfolio().close_spread(
+            spread, reason="take-profit",
+            pnl_data={"long_ltp": 60.0, "short_ltp": 15.0, "data_ok": True},
+        )
+        qty = spread.lot_size * spread.lots  # 75
+        expected_pnl = (60.0 - 51.0) * qty - (15.0 - 20.0) * qty  # +675 + 375 = +1050
+        self.assertAlmostEqual(result["realized_pnl"], expected_pnl, places=1)
+        self.assertEqual(result["long_close_price"], 60.0)
+        self.assertEqual(result["short_close_price"], 15.0)
+
+    def test_virtual_close_falls_back_to_entry_price(self):
+        """Virtual close falls back to entry price if pnl_data has no LTP."""
+        spread = self._make_spread()
+        result = self._portfolio().close_spread(spread, reason="manual", pnl_data=None)
+        self.assertTrue(result["ok"])
+        # With no LTP, close at entry → zero P&L
+        self.assertAlmostEqual(result["realized_pnl"], 0.0, places=1)
+
+    def test_virtual_close_does_not_call_place_order(self):
+        """Virtual close never calls Shoonya place_order."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        mock_client = MagicMock()
+        portfolio = SpreadPortfolio(mock_client, _mock_state_manager(), virtual=True)
+        portfolio.close_spread(
+            self._make_spread(), reason="test",
+            pnl_data={"long_ltp": 55.0, "short_ltp": 18.0},
+        )
+        mock_client.place_order.assert_not_called()
+
+    def test_virtual_close_message_contains_virtual_label(self):
+        """Virtual close result message is labelled [VIRTUAL]."""
+        result = self._portfolio().close_spread(
+            self._make_spread(), reason="EOD",
+            pnl_data={"long_ltp": 55.0, "short_ltp": 18.0},
+        )
+        self.assertIn("[VIRTUAL]", result["message"])
+
+    def test_virtual_close_removes_spread_from_state(self):
+        """Virtual close removes the spread from state_manager."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        sm = _mock_state_manager()
+        portfolio = SpreadPortfolio(None, sm, virtual=True)
+        portfolio.close_spread(self._make_spread(), reason="EOD")
+        sm.update_state.assert_called()
+
+
+class TestVirtualModeDefaultConfig(unittest.TestCase):
+    """LIVE_ORDER_EXECUTION env var defaults to False → virtual mode is on by default."""
+
+    def test_live_order_execution_default_is_false(self):
+        """LIVE_ORDER_EXECUTION must default to False when env var is absent."""
+        import os
+        import importlib
+        saved = os.environ.pop("LIVE_ORDER_EXECUTION", None)
+        try:
+            import config as cfg
+            importlib.reload(cfg)
+            self.assertFalse(cfg.LIVE_ORDER_EXECUTION)
+        finally:
+            if saved is not None:
+                os.environ["LIVE_ORDER_EXECUTION"] = saved
+            importlib.reload(cfg)
+
+    def test_live_order_execution_true_when_env_set(self):
+        """LIVE_ORDER_EXECUTION=true activates live broker mode."""
+        import os
+        import importlib
+        os.environ["LIVE_ORDER_EXECUTION"] = "true"
+        try:
+            import config as cfg
+            importlib.reload(cfg)
+            self.assertTrue(cfg.LIVE_ORDER_EXECUTION)
+        finally:
+            del os.environ["LIVE_ORDER_EXECUTION"]
+            importlib.reload(cfg)
 
 
 if __name__ == "__main__":

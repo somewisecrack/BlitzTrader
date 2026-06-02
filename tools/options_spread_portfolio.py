@@ -199,6 +199,7 @@ class SpreadPortfolio:
         credit_tp_fraction: float = 0.60,
         debit_tp_fraction: float = 0.70,
         fill_timeout_seconds: int = _DEFAULT_FILL_TIMEOUT,
+        virtual: bool = True,
     ):
         self._client = shoonya_client
         self._state = state_manager
@@ -207,6 +208,7 @@ class SpreadPortfolio:
         self._credit_tp_frac = credit_tp_fraction
         self._debit_tp_frac = debit_tp_fraction
         self._fill_timeout = fill_timeout_seconds
+        self._virtual = virtual
 
     # ── Portfolio accessors ───────────────────────────────────────────────────
 
@@ -267,17 +269,79 @@ class SpreadPortfolio:
         """
         Close both legs of an open spread.
 
-        Close order: buy-to-close short leg FIRST (reduces naked risk),
-                     then sell-to-close long leg.
+        In virtual mode fills are taken from live quotes (pnl_data) if available,
+        otherwise from entry prices.  No broker API calls are made.
+
+        In live mode close order is: buy-to-close short leg FIRST (reduces naked
+        risk), then sell-to-close long leg.
 
         Returns structured result dict.
         """
         qty = spread.lot_size * spread.lots
         logger.info(
-            "close_spread[%s]: closing %s %s reason=%r qty=%d",
+            "close_spread[%s]: closing %s %s reason=%r qty=%d mode=%s",
             spread.spread_id, spread.symbol, spread.spread_type, reason, qty,
+            "VIRTUAL" if self._virtual else "LIVE",
         )
 
+        if self._virtual:
+            return self._close_spread_virtual(spread, reason, pnl_data, qty)
+        return self._close_spread_live(spread, reason, pnl_data, qty)
+
+    def _close_spread_virtual(
+        self,
+        spread: OpenSpread,
+        reason: str,
+        pnl_data: Optional[dict],
+        qty: int,
+    ) -> dict:
+        """
+        Simulate spread close without broker API calls.
+        Uses current LTP from pnl_data if available; falls back to entry prices.
+        """
+        data = pnl_data or {}
+        btc_fill = data.get("short_ltp") or spread.short_fill_price
+        stc_fill = data.get("long_ltp") or spread.long_fill_price
+
+        realized_pnl = (
+            (stc_fill - spread.long_fill_price) * qty
+            - (btc_fill - spread.short_fill_price) * qty
+        )
+
+        self._remove_spread_from_state(spread.spread_id)
+        self._update_daily_pnl(realized_pnl)
+
+        message = (
+            f"[VIRTUAL] Spread {spread.spread_id} closed ({reason}): "
+            f"{spread.symbol} {spread.spread_type}\n"
+            f"  Short closed: {spread.short_tsym} @ ₹{btc_fill:.2f}\n"
+            f"  Long  closed: {spread.long_tsym} @ ₹{stc_fill:.2f}\n"
+            f"  Realized P&L: ₹{realized_pnl:+.2f}"
+        )
+        logger.info("close_spread[%s]: %s", spread.spread_id, message)
+
+        return {
+            "ok": True,
+            "spread_id": spread.spread_id,
+            "symbol": spread.symbol,
+            "spread_type": spread.spread_type,
+            "reason": reason,
+            "realized_pnl": realized_pnl,
+            "short_close_price": btc_fill,
+            "long_close_price": stc_fill,
+            "message": message,
+        }
+
+    def _close_spread_live(
+        self,
+        spread: OpenSpread,
+        reason: str,
+        pnl_data: Optional[dict],
+        qty: int,
+    ) -> dict:
+        """
+        Live broker path: buy-to-close short leg first, then sell-to-close long leg.
+        """
         # ── Step 1: Buy-to-close short leg ────────────────────────────────
         btc_order_id, err = self._place_close_order(
             tsym=spread.short_tsym,
@@ -287,8 +351,7 @@ class SpreadPortfolio:
         )
         if btc_order_id is None:
             logger.error(
-                "close_spread[%s]: short leg close failed — %s; "
-                "leaving spread open",
+                "close_spread[%s]: short leg close failed — %s; leaving spread open",
                 spread.spread_id, err,
             )
             return {
@@ -331,7 +394,6 @@ class SpreadPortfolio:
                 spread.spread_id, spread.long_tsym,
             )
             self._emergency_close_long(spread.long_tsym, qty)
-            # Still remove from state so we don't retry
             self._remove_spread_from_state(spread.spread_id)
             return {
                 "ok": False,
@@ -362,14 +424,11 @@ class SpreadPortfolio:
             spread.spread_id, spread.long_tsym, stc_fill,
         )
 
-        # ── Compute realized P&L ───────────────────────────────────────────
-        qty_full = qty
         realized_pnl = (
-            (stc_fill - spread.long_fill_price) * qty_full
-            - (btc_fill - spread.short_fill_price) * qty_full
+            (stc_fill - spread.long_fill_price) * qty
+            - (btc_fill - spread.short_fill_price) * qty
         )
 
-        # ── Update state ───────────────────────────────────────────────────
         self._remove_spread_from_state(spread.spread_id)
         self._update_daily_pnl(realized_pnl)
 

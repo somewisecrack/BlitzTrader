@@ -11,17 +11,25 @@ Hard invariants (enforced here, never bypassed):
   5. Only NIFTY and BANKNIFTY.
   6. No basket / simultaneous orders.
 
-Order flow:
+Execution modes
+───────────────
+  virtual=True  (default, LIVE_ORDER_EXECUTION=false in config):
+    Both legs are filled immediately at fill_price_estimate from SpreadCandidate.
+    No Shoonya API calls are made.  The OpenSpread is persisted to state as normal
+    so all downstream P&L tracking, exit logic, and serial-exit flows work unchanged.
+
+  virtual=False (LIVE_ORDER_EXECUTION=true):
+    Live broker path — place LIMIT orders via Shoonya, poll for fill confirmation.
+    Only enable when broker connectivity and order routing have been fully tested.
+
+Order flow (live mode):
   place_spread(candidate)
     ├─ Guardrail checks (paused, stopped, max-positions, time, instrument)
-    ├─ Place long leg → wait for fill confirmation (up to LIMIT_ORDER_TIMEOUT_SECONDS)
+    ├─ Place long leg → wait for fill confirmation (up to fill_timeout_seconds)
     │     └─ if fill fails → abort, return error (no short leg, no exposure)
     ├─ Place short leg → wait for fill confirmation
     │     └─ if fill fails → emergency close long leg → return error
     └─ Record OpenSpread → return success
-
-Each leg uses a LIMIT order at the fill_price_estimate from SpreadCandidate;
-if the limit lapses, it is cancelled before the emergency path runs.
 
 Returns:
   {"ok": True,  "spread": OpenSpread, ...}            on success
@@ -115,12 +123,14 @@ class SpreadExecutionEngine:
         max_open_spreads: int = 2,
         no_entry_after: str = "15:05",
         fill_timeout_seconds: int = _DEFAULT_FILL_TIMEOUT,
+        virtual: bool = True,
     ):
         self._client = shoonya_client
         self._state = state_manager
         self._max_open_spreads = max_open_spreads
         self._no_entry_after = no_entry_after
         self._fill_timeout = fill_timeout_seconds
+        self._virtual = virtual
 
     # ── Guardrails ────────────────────────────────────────────────────────────
 
@@ -293,6 +303,9 @@ class SpreadExecutionEngine:
         """
         Execute both legs of the spread with safety invariants enforced.
 
+        In virtual mode (self._virtual=True) fills are simulated immediately
+        using candidate.legs[*].fill_price — no broker calls are made.
+
         Returns:
           {"ok": True, "spread": OpenSpread, "message": str}          on success
           {"ok": False, "error": str, "emergency": bool}              on failure
@@ -314,17 +327,80 @@ class SpreadExecutionEngine:
                 "emergency": False,
             }
 
-        # ── Guardrails ────────────────────────────────────────────────────
+        # ── Guardrails (always enforced regardless of mode) ───────────────
         blocked = self._check_guardrails(candidate)
         if blocked:
             logger.warning("SpreadExecution: %s", blocked)
             return {"ok": False, "error": blocked, "emergency": False}
 
         qty = candidate.lot_size * candidate.lots
-
         spread_id = _generate_spread_id()
+
+        # ── Branch: virtual vs live ───────────────────────────────────────
+        if self._virtual:
+            return self._place_spread_virtual(candidate, spread_id, long_leg, short_leg, qty)
+        return self._place_spread_live(candidate, spread_id, long_leg, short_leg, qty)
+
+    def _place_spread_virtual(
+        self,
+        candidate: SpreadCandidate,
+        spread_id: str,
+        long_leg,
+        short_leg,
+        qty: int,
+    ) -> dict:
+        """
+        Simulate spread execution without any broker API calls.
+        Fills are taken directly from candidate leg fill_price estimates.
+        """
+        long_fill = long_leg.fill_price
+        short_fill = short_leg.fill_price
+
         logger.info(
-            "SpreadExecution[%s]: placing %s %s %s expiry=%s "
+            "SpreadExecution[%s]: VIRTUAL %s %s %s expiry=%s "
+            "long=%s@%.2f short=%s@%.2f qty=%d",
+            spread_id,
+            candidate.symbol, candidate.spread_type, candidate.direction,
+            candidate.expiry_str,
+            long_leg.tsym, long_fill,
+            short_leg.tsym, short_fill,
+            qty,
+        )
+
+        spread = self._build_open_spread(
+            candidate, spread_id, long_leg, short_leg,
+            long_fill, short_fill,
+            long_order_id="VIRTUAL-LONG",
+            short_order_id="VIRTUAL-SHORT",
+        )
+        self._record_open_spread(spread)
+
+        net_str = _net_str(candidate.net_debit_or_credit)
+        message = (
+            f"[VIRTUAL] Spread {spread_id} opened: "
+            f"{candidate.symbol} {candidate.spread_type} expiry={candidate.expiry_str}\n"
+            f"  Long:  {long_leg.tsym} @ ₹{long_fill:.2f}\n"
+            f"  Short: {short_leg.tsym} @ ₹{short_fill:.2f}\n"
+            f"  {net_str} | max profit ₹{candidate.max_profit:.2f} | "
+            f"max loss ₹{candidate.max_loss:.2f}"
+        )
+        logger.info("SpreadExecution[%s]: %s", spread_id, message)
+        return {"ok": True, "spread": spread, "message": message}
+
+    def _place_spread_live(
+        self,
+        candidate: SpreadCandidate,
+        spread_id: str,
+        long_leg,
+        short_leg,
+        qty: int,
+    ) -> dict:
+        """
+        Live broker path — place LIMIT orders via Shoonya and poll for fills.
+        Long leg first, short leg only after long fill is confirmed.
+        """
+        logger.info(
+            "SpreadExecution[%s]: LIVE placing %s %s %s expiry=%s "
             "long=%s@%.2f short=%s@%.2f qty=%d",
             spread_id,
             candidate.symbol, candidate.spread_type, candidate.direction,
@@ -345,20 +421,15 @@ class SpreadExecutionEngine:
         # ── Step 2: Confirm long fill ──────────────────────────────────────
         long_actual_fill, fill_err = self._wait_for_fill(long_order_id, long_leg.tsym)
         if long_actual_fill is None:
-            # Long leg did not fill — cancel and abort (no exposure created)
             self._cancel_order(long_order_id)
             logger.error(
                 "SpreadExecution[%s]: long leg fill failed — %s (cancelled)", spread_id, fill_err
             )
-            return {
-                "ok": False,
-                "error": f"Long leg fill failed: {fill_err}",
-                "emergency": False,
-            }
+            return {"ok": False, "error": f"Long leg fill failed: {fill_err}", "emergency": False}
 
         logger.info(
             "SpreadExecution[%s]: long leg filled %s @ ₹%.2f",
-            spread_id, long_leg.tsym, long_actual_fill
+            spread_id, long_leg.tsym, long_actual_fill,
         )
 
         # ── Step 3: Place short leg (ONLY after long confirmed) ───────────
@@ -396,12 +467,44 @@ class SpreadExecutionEngine:
 
         logger.info(
             "SpreadExecution[%s]: short leg filled %s @ ₹%.2f",
-            spread_id, short_leg.tsym, short_actual_fill
+            spread_id, short_leg.tsym, short_actual_fill,
         )
 
         # ── Step 5: Record open spread ─────────────────────────────────────
+        spread = self._build_open_spread(
+            candidate, spread_id, long_leg, short_leg,
+            long_actual_fill, short_actual_fill,
+            long_order_id=str(long_order_id),
+            short_order_id=str(short_order_id),
+        )
+        self._record_open_spread(spread)
+
+        net_str = _net_str(candidate.net_debit_or_credit)
+        message = (
+            f"Spread {spread_id} opened: {candidate.symbol} {candidate.spread_type} "
+            f"expiry={candidate.expiry_str}\n"
+            f"  Long:  {long_leg.tsym} @ ₹{long_actual_fill:.2f}\n"
+            f"  Short: {short_leg.tsym} @ ₹{short_actual_fill:.2f}\n"
+            f"  {net_str} | max profit ₹{candidate.max_profit:.2f} | "
+            f"max loss ₹{candidate.max_loss:.2f}"
+        )
+        logger.info("SpreadExecution[%s]: %s", spread_id, message)
+        return {"ok": True, "spread": spread, "message": message}
+
+    @staticmethod
+    def _build_open_spread(
+        candidate: SpreadCandidate,
+        spread_id: str,
+        long_leg,
+        short_leg,
+        long_fill: float,
+        short_fill: float,
+        long_order_id: str,
+        short_order_id: str,
+    ) -> "OpenSpread":
+        """Construct an OpenSpread dataclass from a filled candidate."""
         now_ist = datetime.now(IST)
-        spread = OpenSpread(
+        return OpenSpread(
             spread_id=spread_id,
             symbol=candidate.symbol,
             spread_type=candidate.spread_type,
@@ -414,15 +517,15 @@ class SpreadExecutionEngine:
             long_action="BUY",
             long_strike=long_leg.strike,
             long_option_type=long_leg.option_type,
-            long_fill_price=long_actual_fill,
-            long_order_id=str(long_order_id),
+            long_fill_price=long_fill,
+            long_order_id=long_order_id,
             short_tsym=short_leg.tsym,
             short_token=short_leg.token,
             short_action="SELL",
             short_strike=short_leg.strike,
             short_option_type=short_leg.option_type,
-            short_fill_price=short_actual_fill,
-            short_order_id=str(short_order_id),
+            short_fill_price=short_fill,
+            short_order_id=short_order_id,
             net_debit_or_credit=candidate.net_debit_or_credit,
             max_profit=candidate.max_profit,
             max_loss=candidate.max_loss,
@@ -432,26 +535,6 @@ class SpreadExecutionEngine:
             strategy=candidate.strategy,
             underlying_at_entry=candidate.underlying_price,
         )
-
-        # Persist to state
-        self._record_open_spread(spread)
-
-        net_str = (
-            f"net debit ₹{candidate.net_debit_or_credit:.2f}"
-            if candidate.net_debit_or_credit >= 0
-            else f"net credit ₹{abs(candidate.net_debit_or_credit):.2f}"
-        )
-        message = (
-            f"Spread {spread_id} opened: {candidate.symbol} {candidate.spread_type} "
-            f"expiry={candidate.expiry_str}\n"
-            f"  Long:  {long_leg.tsym} @ ₹{long_actual_fill:.2f}\n"
-            f"  Short: {short_leg.tsym} @ ₹{short_actual_fill:.2f}\n"
-            f"  {net_str} | max profit ₹{candidate.max_profit:.2f} | "
-            f"max loss ₹{candidate.max_loss:.2f}"
-        )
-        logger.info("SpreadExecution[%s]: %s", spread_id, message)
-
-        return {"ok": True, "spread": spread, "message": message}
 
     def _record_open_spread(self, spread: OpenSpread) -> None:
         """Append the spread to state_manager open_spreads list."""
@@ -474,3 +557,10 @@ def _generate_spread_id() -> str:
     now = datetime.now(IST)
     uid = uuid.uuid4().hex[:6].upper()
     return f"SPR-{now.strftime('%Y%m%d-%H%M%S')}-{uid}"
+
+
+def _net_str(net_debit_or_credit: float) -> str:
+    """Format net debit/credit for log messages."""
+    if net_debit_or_credit >= 0:
+        return f"net debit ₹{net_debit_or_credit:.2f}"
+    return f"net credit ₹{abs(net_debit_or_credit):.2f}"
