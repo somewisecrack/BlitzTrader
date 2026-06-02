@@ -185,7 +185,12 @@ class OptionsChain:
         """
         Return sorted list of expiry dates for index options of the given symbol.
 
-        Filters to OPTIDX instname only. Excludes expired and (optionally) today.
+        Strategy:
+          1. Generic search — fast, works most days.
+          2. Date-specific fallback — required on weekly expiry days (e.g. NIFTY
+             expires every Tuesday; on that day the generic search returns only
+             today's contracts which are then excluded by exclude_today).
+
         Returns [] if no results.
         """
         sym = symbol.upper()
@@ -193,37 +198,81 @@ class OptionsChain:
             logger.error("get_available_expiries: %s not in allowed underlyings", sym)
             return []
 
-        results = self._client.search_scrip("NFO", sym) if self._client else None
-        if not results:
-            logger.warning("get_available_expiries(%s): no results from search_scrip", sym)
-            return []
-
         today = date.today()
         expiry_set: set[date] = set()
-        # Use cleaned tsym (strips spaces and special chars) for matching —
-        # some Shoonya responses include spaces in NIFTY tsyms e.g. "NIFTY 05JUN26C24500"
+
+        # ── Pass 1: generic search ────────────────────────────────────────────
+        generic_results = self._client.search_scrip("NFO", sym) if self._client else None
+        if generic_results:
+            self._parse_expiries_from_results(
+                generic_results, sym, today, after_today, exclude_today, expiry_set
+            )
+        else:
+            logger.warning("get_available_expiries(%s): generic search returned nothing", sym)
+
+        # ── Pass 2: date-specific fallback ────────────────────────────────────
+        # Required on expiry days: generic search returns only today's (excluded)
+        # contracts.  Search the next 8 weeks day-by-day; stop once we find two
+        # distinct future expiry dates (weekly + monthly is enough to trade).
+        if not expiry_set and self._client:
+            logger.info(
+                "get_available_expiries(%s): generic search found no future expiries "
+                "(today may be an expiry day) — trying date-specific fallback",
+                sym,
+            )
+            for days_ahead in range(1, 57):          # look up to 8 weeks ahead
+                candidate = today + timedelta(days=days_ahead)
+                date_suffix = candidate.strftime("%d%b%y").upper()   # e.g. "09JUN26"
+                search_term = f"{sym}{date_suffix}"
+                results = self._client.search_scrip("NFO", search_term) or []
+                before = len(expiry_set)
+                self._parse_expiries_from_results(
+                    results, sym, today, after_today, exclude_today, expiry_set
+                )
+                if len(expiry_set) >= 2:
+                    # Have at least weekly + one more — enough to select expiry
+                    break
+
+            if expiry_set:
+                logger.info(
+                    "get_available_expiries(%s): date-specific fallback found %d expiries: %s",
+                    sym, len(expiry_set), sorted(expiry_set),
+                )
+            else:
+                logger.warning(
+                    "get_available_expiries(%s): no expiries found via generic or "
+                    "date-specific search",
+                    sym,
+                )
+
+        return sorted(expiry_set)
+
+    @staticmethod
+    def _parse_expiries_from_results(
+        results: list,
+        sym: str,
+        today: date,
+        after_today: bool,
+        exclude_today: bool,
+        expiry_set: set,
+    ) -> None:
+        """Parse option expiry dates from SearchScrip rows into expiry_set (in-place)."""
         prefix_digit_re = re.compile(r"^" + re.escape(sym) + r"\d")
-        # Option tsym pattern: SYMBOL + DDMMMYY + C/P + STRIKE
-        option_tsym_re = re.compile(r"^" + re.escape(sym) + r"\d{2}[A-Z]{3}\d{2}[CP]\d+$")
+        option_tsym_re  = re.compile(r"^" + re.escape(sym) + r"\d{2}[A-Z]{3}\d{2}[CP]\d+$")
 
         for r in results:
-            # Accept instname "OPTIDX", blank, or None.
-            # Shoonya sometimes omits or varies instname; tsym pattern is the
-            # reliable discriminator.  Matches _row_matches_option() permissiveness.
+            # Accept instname "OPTIDX", blank, or None — Shoonya sometimes omits it
             instname = r.get("instname", "")
             if instname and instname != "OPTIDX":
                 continue
 
-            tsym_raw = r.get("tsym", "")
-            tsym = _clean_tsym(tsym_raw)   # strip spaces / special chars
+            tsym = _clean_tsym(r.get("tsym", ""))
             if not tsym:
                 continue
-            # Must start with the exact symbol followed by a digit
             if not prefix_digit_re.match(tsym):
                 continue
-            # Must look like an option contract (not a futures contract)
             if not option_tsym_re.match(tsym):
-                continue
+                continue   # futures have no C/P suffix
 
             exd = r.get("exd", "")
             try:
@@ -235,20 +284,6 @@ class OptionsChain:
             if exclude_today and expiry == today:
                 continue
             expiry_set.add(expiry)
-
-        if not expiry_set and results:
-            # Diagnostic: log sample of what Shoonya actually returned so future
-            # failures are easier to triage without needing a live debug session.
-            sample = results[:5]
-            logger.warning(
-                "get_available_expiries(%s): %d search results but 0 valid expiries — "
-                "sample instnames=%s sample_tsyms=%s",
-                sym, len(results),
-                [r.get("instname") for r in sample],
-                [r.get("tsym") for r in sample],
-            )
-
-        return sorted(expiry_set)
 
     def select_expiry(
         self,
