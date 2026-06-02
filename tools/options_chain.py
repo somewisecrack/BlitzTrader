@@ -172,7 +172,8 @@ class OptionsChain:
 
     def __init__(self, shoonya_client):
         self._client = shoonya_client
-        self._token_cache: dict[str, dict] = {}  # key: "NIFTY|26-MAY-2026|24500|CE"
+        self._token_cache: dict[str, dict] = {}   # key: "NIFTY|26-MAY-2026|24500|CE"
+        self._expiry_cache: dict[str, list] = {}  # key: sym → sorted expiry list (today-scoped)
 
     # ── Expiry discovery ──────────────────────────────────────────────────────
 
@@ -198,7 +199,17 @@ class OptionsChain:
             logger.error("get_available_expiries: %s not in allowed underlyings", sym)
             return []
 
+        # Session-level cache keyed by sym + today's date — avoids repeating the
+        # expensive date-specific fallback loop for every signal in the same scan.
         today = date.today()
+        cache_key = f"{sym}|{today}"
+        if cache_key in self._expiry_cache:
+            cached = self._expiry_cache[cache_key]
+            # Re-filter for today/after_today in case caller uses different flags
+            return [e for e in cached
+                    if (not after_today or e >= today)
+                    and (not exclude_today or e != today)]
+
         expiry_set: set[date] = set()
 
         # ── Pass 1: generic search ────────────────────────────────────────────
@@ -245,7 +256,12 @@ class OptionsChain:
                     sym,
                 )
 
-        return sorted(expiry_set)
+        result = sorted(expiry_set)
+        # Cache all found expiries for today; re-filtering on retrieve handles flags
+        self._expiry_cache[cache_key] = result
+        return [e for e in result
+                if (not after_today or e >= today)
+                and (not exclude_today or e != today)]
 
     @staticmethod
     def _parse_expiries_from_results(
