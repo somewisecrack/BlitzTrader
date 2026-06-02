@@ -193,11 +193,10 @@ class SpreadExecutionEngine:
         if not self._client:
             return None, "no Shoonya client available (paper trading mode)"
         try:
-            # Shoonya place_order parameters:
-            # buy_or_sell, product_type, exchange, tradingsymbol, quantity,
-            # discloseqty, price_type, price, trigger_price, retention, remarks
+            # Shoonya API: buy_or_sell uses 'B' / 'S' (not full words)
+            shoonya_side = "B" if action == "BUY" else "S"
             resp = self._client.place_order(
-                buy_or_sell=action,
+                buy_or_sell=shoonya_side,
                 product_type="M",          # NRML for options
                 exchange="NFO",
                 tradingsymbol=tsym,
@@ -273,7 +272,7 @@ class SpreadExecutionEngine:
             return
         try:
             resp = self._client.place_order(
-                buy_or_sell="SELL",
+                buy_or_sell="S",           # Shoonya API: 'S' not 'SELL'
                 product_type="M",
                 exchange="NFO",
                 tradingsymbol=long_leg.tsym,

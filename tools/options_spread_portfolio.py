@@ -467,9 +467,11 @@ class SpreadPortfolio:
             return None, "no Shoonya client (paper mode)"
         price_type = "LMT" if ref_price and ref_price > 0 else "MKT"
         price = ref_price if price_type == "LMT" else 0
+        # Shoonya API: buy_or_sell uses 'B' / 'S' (not full words)
+        shoonya_side = "B" if action == "BUY" else "S"
         try:
             resp = self._client.place_order(
-                buy_or_sell=action,
+                buy_or_sell=shoonya_side,
                 product_type="M",
                 exchange="NFO",
                 tradingsymbol=tsym,
@@ -525,7 +527,7 @@ class SpreadPortfolio:
             return
         try:
             resp = self._client.place_order(
-                buy_or_sell="SELL",
+                buy_or_sell="S",           # Shoonya API: 'S' not 'SELL'
                 product_type="M",
                 exchange="NFO",
                 tradingsymbol=tsym,

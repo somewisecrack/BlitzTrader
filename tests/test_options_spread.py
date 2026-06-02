@@ -565,8 +565,9 @@ class TestShortAfterLongFill(unittest.TestCase):
         # Verify call order: first call must be BUY, second must be SELL
         calls = mock_client.place_order.call_args_list
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].kwargs["buy_or_sell"], "BUY")
-        self.assertEqual(calls[1].kwargs["buy_or_sell"], "SELL")
+        # Shoonya API uses 'B'/'S', not full words
+        self.assertEqual(calls[0].kwargs["buy_or_sell"], "B")
+        self.assertEqual(calls[1].kwargs["buy_or_sell"], "S")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -623,7 +624,7 @@ class TestEmergencyClose(unittest.TestCase):
         # Verify emergency market sell was placed for long leg
         all_calls = mock_client.place_order.call_args_list
         emergency_call = all_calls[-1]
-        self.assertEqual(emergency_call.kwargs["buy_or_sell"], "SELL")
+        self.assertEqual(emergency_call.kwargs["buy_or_sell"], "S")  # Shoonya: 'S' not 'SELL'
         self.assertEqual(emergency_call.kwargs["price_type"], "MKT")
         self.assertEqual(emergency_call.kwargs["tradingsymbol"], "NIFTY28MAY26C24500")
 
