@@ -47,17 +47,39 @@ _DEFAULT_FILL_TIMEOUT = 300  # seconds
 #   LIVE P&L
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _get_ltp(token: str, exchange: str, shoonya_client, live_feed) -> Optional[float]:
+# ── LTP validation constants ──────────────────────────────────────────────────
+
+# Hard cap: no intraday NSE index option premium can plausibly exceed ₹10,000.
+# Underlying index levels (NIFTY ~23k, BANKNIFTY ~53k) are orders of magnitude
+# higher — if an LTP approaches this cap something is very wrong.
+_MAX_OPTION_LTP = 10_000.0
+
+# Reject an LTP that is more than this multiple above the entry fill price.
+# 30x allows for legitimate large intraday moves while catching index-level leakage.
+# Example: fill=₹100, max accepted LTP = ₹3,000.  At ₹53,000 → rejected.
+_MAX_LTP_FILL_MULTIPLE = 30.0
+
+# A small tolerance added to max_profit / max_loss before rejecting as invalid.
+# Expressed as a fraction of (max_profit + max_loss) to be spread-proportional.
+_PNL_TOLERANCE_FRACTION = 0.05   # 5 % of the total spread risk range
+
+
+def _get_ltp_with_source(
+    token: str,
+    exchange: str,
+    shoonya_client,
+    live_feed,
+) -> tuple[Optional[float], str]:
     """
     Fetch last traded price for an option token.
-    Priority: WebSocket LTP → REST quote.
-    Returns None if unavailable.
+    Returns (ltp, source) where source is 'websocket' | 'rest' | 'none'.
+    Priority: WebSocket LTP (if fresh) → REST quote.
     """
     if live_feed:
         try:
             ltp = live_feed.get_ltp(token)
-            if ltp:
-                return float(ltp)
+            if ltp and float(ltp) > 0:
+                return float(ltp), "websocket"
         except Exception:
             pass
     if shoonya_client:
@@ -67,10 +89,47 @@ def _get_ltp(token: str, exchange: str, shoonya_client, live_feed) -> Optional[f
                 for key in ("lp", "ltp"):
                     val = q.get(key)
                     if val:
-                        return float(val)
+                        raw = float(val)
+                        if raw > 0:
+                            return raw, "rest"
         except Exception:
             pass
-    return None
+    return None, "none"
+
+
+def _validate_option_ltp(
+    ltp: float,
+    entry_fill: float,
+    tsym: str,
+    spread_id: str,
+    leg: str,          # "long" or "short"
+) -> tuple[bool, str]:
+    """
+    Validate a single option leg LTP for plausibility.
+
+    Rejects:
+    - Non-positive prices
+    - Prices above the hard cap (catches underlying index leakage)
+    - Prices far above entry fill (catches index-level substitution)
+
+    Returns (True, "") if valid, (False, reason) if suspect.
+    """
+    if ltp <= 0:
+        return False, f"{leg} leg {tsym} non-positive LTP {ltp}"
+
+    if ltp > _MAX_OPTION_LTP:
+        return False, (
+            f"{leg} leg {tsym} LTP ₹{ltp:.2f} exceeds hard cap "
+            f"₹{_MAX_OPTION_LTP:,.0f} — likely underlying-index price, not option premium"
+        )
+
+    if entry_fill > 0 and ltp > entry_fill * _MAX_LTP_FILL_MULTIPLE:
+        return False, (
+            f"{leg} leg {tsym} LTP ₹{ltp:.2f} is {ltp/entry_fill:.1f}× entry fill "
+            f"₹{entry_fill:.2f} — exceeds {_MAX_LTP_FILL_MULTIPLE:.0f}× plausibility limit"
+        )
+
+    return True, ""
 
 
 def compute_spread_pnl(
@@ -79,53 +138,102 @@ def compute_spread_pnl(
     live_feed,
 ) -> dict:
     """
-    Compute current P&L for an open spread.
+    Compute current P&L for an open spread with strict validation.
 
-    For a BOUGHT option (long leg): current value = current LTP
-    For a SOLD option (short leg):  current liability = current LTP
+    P&L formula (uniform for debit and credit):
+      pnl = (long_ltp  - long_fill)  * qty
+          - (short_ltp - short_fill) * qty
 
-    current_value_long  = long_ltp  * lot_size * lots
-    current_liability_short = short_ltp * lot_size * lots
+    Three layers of validation are applied before returning data_ok=True:
+      1. Each LTP must be positive and pass plausibility checks.
+      2. Computed raw P&L must lie within defined-risk bounds
+         [-(max_loss + tolerance), +(max_profit + tolerance)].
+      3. If any check fails: data_ok=False, unrealized_pnl=None, reason logged.
 
-    For DEBIT spreads (net_debit_or_credit >= 0):
-      pnl = (long_ltp - short_ltp) * lot_size * lots - net_debit_or_credit * lot_size * lots
-          = ((long_ltp - short_ltp) - net_debit_or_credit) * lot_size * lots
+    This prevents impossible P&L values (e.g. ₹1.5M when max_profit=₹4k)
+    caused by index-level prices contaminating option quote lookups.
 
-    For CREDIT spreads (net_debit_or_credit < 0, i.e. net_credit = -net_debit_or_credit):
-      pnl = net_credit * lot_size * lots - (short_ltp - long_ltp) * lot_size * lots
-          = (net_credit - (short_ltp - long_ltp)) * lot_size * lots
-
-    Simplified uniformly:
-      pnl = (long_ltp - long_fill) * lot_size * lots
-          - (short_ltp - short_fill) * lot_size * lots
-
-    Returns dict with keys: long_ltp, short_ltp, unrealized_pnl, data_ok
+    Returns dict with keys:
+      long_ltp, short_ltp, unrealized_pnl, data_ok[, reason, source_long, source_short]
     """
-    lot_size = spread.lot_size
-    lots = spread.lots
-    qty = lot_size * lots
+    qty = spread.lot_size * spread.lots
 
-    long_ltp = _get_ltp(spread.long_token, "NFO", shoonya_client, live_feed)
-    short_ltp = _get_ltp(spread.short_token, "NFO", shoonya_client, live_feed)
+    long_ltp,  source_long  = _get_ltp_with_source(spread.long_token,  "NFO", shoonya_client, live_feed)
+    short_ltp, source_short = _get_ltp_with_source(spread.short_token, "NFO", shoonya_client, live_feed)
 
+    # ── Guard 1: missing quotes ───────────────────────────────────────────────
     if long_ltp is None or short_ltp is None:
+        missing = []
+        if long_ltp  is None: missing.append(f"long({spread.long_tsym})")
+        if short_ltp is None: missing.append(f"short({spread.short_tsym})")
         return {
-            "long_ltp": long_ltp,
-            "short_ltp": short_ltp,
-            "unrealized_pnl": None,
-            "data_ok": False,
+            "long_ltp": long_ltp, "short_ltp": short_ltp,
+            "unrealized_pnl": None, "data_ok": False,
+            "reason": f"quote_unavailable: {', '.join(missing)}",
         }
 
-    pnl = (
-        (long_ltp - spread.long_fill_price) * qty
-        - (short_ltp - spread.short_fill_price) * qty
+    # ── Guard 2: per-leg LTP plausibility ─────────────────────────────────────
+    ok_long,  reason_long  = _validate_option_ltp(long_ltp,  spread.long_fill_price,  spread.long_tsym,  spread.spread_id, "long")
+    ok_short, reason_short = _validate_option_ltp(short_ltp, spread.short_fill_price, spread.short_tsym, spread.spread_id, "short")
+
+    if not ok_long or not ok_short:
+        reasons = [r for r in (reason_long, reason_short) if r]
+        reason_str = "; ".join(reasons)
+        logger.error(
+            "compute_spread_pnl[%s]: INVALID QUOTE — %s "
+            "(long_ltp=%.2f src=%s, short_ltp=%.2f src=%s, "
+            "long_fill=%.2f, short_fill=%.2f)",
+            spread.spread_id, reason_str,
+            long_ltp, source_long, short_ltp, source_short,
+            spread.long_fill_price, spread.short_fill_price,
+        )
+        return {
+            "long_ltp": long_ltp, "short_ltp": short_ltp,
+            "unrealized_pnl": None, "data_ok": False,
+            "reason": f"invalid_ltp: {reason_str}",
+        }
+
+    # ── Raw P&L ───────────────────────────────────────────────────────────────
+    raw_pnl = (long_ltp - spread.long_fill_price) * qty \
+            - (short_ltp - spread.short_fill_price) * qty
+
+    # ── Guard 3: defined-risk P&L bounds ─────────────────────────────────────
+    tolerance = (spread.max_profit + spread.max_loss) * _PNL_TOLERANCE_FRACTION
+    if raw_pnl > spread.max_profit + tolerance or raw_pnl < -(spread.max_loss + tolerance):
+        reason_str = (
+            f"pnl ₹{raw_pnl:+.2f} outside defined-risk bounds "
+            f"[₹-{spread.max_loss + tolerance:.2f}, ₹{spread.max_profit + tolerance:.2f}] "
+            f"(max_profit=₹{spread.max_profit:.2f}, max_loss=₹{spread.max_loss:.2f})"
+        )
+        logger.error(
+            "compute_spread_pnl[%s]: IMPOSSIBLE P&L — %s "
+            "(long_ltp=%.2f src=%s, short_ltp=%.2f src=%s)",
+            spread.spread_id, reason_str,
+            long_ltp, source_long, short_ltp, source_short,
+        )
+        return {
+            "long_ltp": long_ltp, "short_ltp": short_ltp,
+            "unrealized_pnl": None, "data_ok": False,
+            "reason": f"invalid_pnl_outside_defined_risk: {reason_str}",
+        }
+
+    logger.debug(
+        "compute_spread_pnl[%s]: long=%s ltp=%.2f(%s) fill=%.2f | "
+        "short=%s ltp=%.2f(%s) fill=%.2f | pnl=₹%+.2f | "
+        "max_profit=₹%.2f max_loss=₹%.2f",
+        spread.spread_id,
+        spread.long_tsym,  long_ltp,  source_long,  spread.long_fill_price,
+        spread.short_tsym, short_ltp, source_short, spread.short_fill_price,
+        raw_pnl, spread.max_profit, spread.max_loss,
     )
 
     return {
-        "long_ltp": long_ltp,
-        "short_ltp": short_ltp,
-        "unrealized_pnl": pnl,
-        "data_ok": True,
+        "long_ltp":       long_ltp,
+        "short_ltp":      short_ltp,
+        "unrealized_pnl": raw_pnl,
+        "data_ok":        True,
+        "source_long":    source_long,
+        "source_short":   source_short,
     }
 
 
@@ -209,6 +317,8 @@ class SpreadPortfolio:
         self._debit_tp_frac = debit_tp_fraction
         self._fill_timeout = fill_timeout_seconds
         self._virtual = virtual
+        # Track invalid-quote incidents for EOD reporting
+        self._invalid_quote_count: int = 0
 
     # ── Portfolio accessors ───────────────────────────────────────────────────
 
@@ -231,6 +341,56 @@ class SpreadPortfolio:
     def count_open_spreads(self) -> int:
         return len(self.get_open_spreads())
 
+    def subscribe_spread_legs(self, spread: "OpenSpread") -> None:
+        """
+        Subscribe both option leg tokens to the live WebSocket feed.
+        Called immediately after a spread is opened so that future P&L
+        ticks come via WebSocket rather than only REST.
+        """
+        if not self._feed:
+            return
+        pairs = [
+            ("NFO", spread.long_token),
+            ("NFO", spread.short_token),
+        ]
+        try:
+            self._feed.subscribe(pairs)
+            logger.info(
+                "subscribe_spread_legs[%s]: subscribed NFO|%s, NFO|%s",
+                spread.spread_id, spread.long_token, spread.short_token,
+            )
+        except Exception:
+            logger.exception("subscribe_spread_legs[%s]: failed", spread.spread_id)
+
+    def unsubscribe_spread_legs(self, spread: "OpenSpread") -> None:
+        """
+        Unsubscribe option leg tokens from the live feed after a spread closes,
+        provided no other open spread still needs those tokens.
+        """
+        if not self._feed:
+            return
+        open_spreads = self.get_open_spreads()
+        still_needed = {
+            tok
+            for s in open_spreads
+            if s.spread_id != spread.spread_id
+            for tok in (s.long_token, s.short_token)
+        }
+        to_unsub = [
+            ("NFO", tok)
+            for tok in (spread.long_token, spread.short_token)
+            if tok not in still_needed
+        ]
+        if to_unsub:
+            try:
+                self._feed.unsubscribe(to_unsub)
+                logger.info(
+                    "unsubscribe_spread_legs[%s]: unsubscribed %s",
+                    spread.spread_id, to_unsub,
+                )
+            except Exception:
+                logger.exception("unsubscribe_spread_legs[%s]: failed", spread.spread_id)
+
     # ── Scan tick ─────────────────────────────────────────────────────────────
 
     def check_and_exit_spreads(self, force_close_all: bool = False) -> list[dict]:
@@ -245,6 +405,15 @@ class SpreadPortfolio:
 
         for spread in open_spreads:
             pnl_data = compute_spread_pnl(spread, self._client, self._feed)
+
+            # Track invalid-quote incidents for session reporting
+            if not pnl_data.get("data_ok") and not force_close_all:
+                self._invalid_quote_count += 1
+                logger.warning(
+                    "check_and_exit_spreads[%s]: quote invalid — %s — skip exit check",
+                    spread.spread_id, pnl_data.get("reason", "unknown"),
+                )
+
             do_exit, reason = should_exit(
                 spread, pnl_data,
                 max_loss_exit_fraction=self._max_loss_frac,
@@ -297,19 +466,80 @@ class SpreadPortfolio:
     ) -> dict:
         """
         Simulate spread close without broker API calls.
-        Uses current LTP from pnl_data if available; falls back to entry prices.
+
+        Close prices are taken from pnl_data LTPs only if the pnl_data passed
+        full validation (data_ok=True).  For EOD forced close where pnl_data
+        may be None/invalid, we use entry prices (zero realized P&L) and mark
+        the reason clearly.  We never invent prices.
         """
-        data = pnl_data or {}
-        btc_fill = data.get("short_ltp") or spread.short_fill_price
-        stc_fill = data.get("long_ltp") or spread.long_fill_price
+        # Allow entry-price fallback for:
+        #  - EOD forced close (force_close_all=True → reason contains "EOD" or "force")
+        #  - Manual Telegram exits (user explicitly requests close)
+        # Block entry-price fallback for automatic threshold exits (take-profit / max-loss)
+        # to prevent impossible P&L from triggering state mutations.
+        reason_lower = reason.lower()
+        allow_entry_fallback = (
+            "eod" in reason_lower
+            or "force" in reason_lower
+            or "manual" in reason_lower
+        )
+        data_valid = pnl_data and pnl_data.get("data_ok")
+
+        if data_valid:
+            btc_fill = pnl_data["short_ltp"]
+            stc_fill = pnl_data["long_ltp"]
+        elif allow_entry_fallback:
+            # Intentional close without live data — use entry prices (P&L = 0)
+            btc_fill = spread.short_fill_price
+            stc_fill = spread.long_fill_price
+            logger.warning(
+                "close_spread[%s]: closing with no valid quote data (reason=%r) — "
+                "using entry prices, realized P&L recorded as ₹0.00",
+                spread.spread_id, reason,
+            )
+        else:
+            # Automatic threshold exit with bad data: refuse to protect state
+            reason_detail = (pnl_data or {}).get("reason", "no pnl_data")
+            logger.error(
+                "close_spread[%s]: REFUSED automatic close — pnl_data invalid: %s. "
+                "Spread remains open. (Automatic exits require validated quote data.)",
+                spread.spread_id, reason_detail,
+            )
+            return {
+                "ok": False,
+                "spread_id": spread.spread_id,
+                "error": f"close refused: invalid quote data ({reason_detail})",
+                "emergency": False,
+            }
 
         realized_pnl = (
             (stc_fill - spread.long_fill_price) * qty
             - (btc_fill - spread.short_fill_price) * qty
         )
 
-        self._remove_spread_from_state(spread.spread_id)
+        # Final sanity: even with entry-price fallback, verify realized is bounded
+        tolerance = (spread.max_profit + spread.max_loss) * _PNL_TOLERANCE_FRACTION
+        if realized_pnl > spread.max_profit + tolerance or realized_pnl < -(spread.max_loss + tolerance):
+            logger.error(
+                "close_spread[%s]: realized P&L ₹%+.2f violates defined-risk bounds "
+                "[₹-%.2f, ₹%.2f] — NOT updating daily_pnl",
+                spread.spread_id, realized_pnl,
+                spread.max_loss + tolerance, spread.max_profit + tolerance,
+            )
+            self._remove_spread_from_state(spread.spread_id)
+            return {
+                "ok": False,
+                "spread_id": spread.spread_id,
+                "error": (
+                    f"realized P&L ₹{realized_pnl:+.2f} outside defined-risk bounds "
+                    f"(max_profit=₹{spread.max_profit:.2f}, max_loss=₹{spread.max_loss:.2f})"
+                ),
+                "emergency": False,
+            }
+
+        self._remove_spread_from_state(spread.spread_id, realized_pnl=realized_pnl, reason=reason)
         self._update_daily_pnl(realized_pnl)
+        self.unsubscribe_spread_legs(spread)
 
         message = (
             f"[VIRTUAL] Spread {spread.spread_id} closed ({reason}): "
@@ -429,7 +659,7 @@ class SpreadPortfolio:
             - (btc_fill - spread.short_fill_price) * qty
         )
 
-        self._remove_spread_from_state(spread.spread_id)
+        self._remove_spread_from_state(spread.spread_id, realized_pnl=realized_pnl, reason=reason)
         self._update_daily_pnl(realized_pnl)
 
         message = (
@@ -548,24 +778,80 @@ class SpreadPortfolio:
 
     # ── State mutations ───────────────────────────────────────────────────────
 
-    def _remove_spread_from_state(self, spread_id: str) -> None:
+    def _remove_spread_from_state(
+        self, spread_id: str, realized_pnl: Optional[float] = None, reason: str = ""
+    ) -> None:
         try:
             state = self._state.get_state()
             open_spreads = [
                 s for s in (state.get("open_spreads", []) or [])
                 if s.get("spread_id") != spread_id
             ]
-            self._state.update_state(open_spreads=open_spreads)
+            # Mark closed in spreads_traded ledger
+            spreads_traded = list(state.get("spreads_traded", []) or [])
+            for t in spreads_traded:
+                if t.get("spread_id") == spread_id:
+                    t["closed"] = True
+                    if realized_pnl is not None:
+                        t["realized_pnl"] = realized_pnl
+                    if reason:
+                        t["close_reason"] = reason
+                    break
+            self._state.update_state(
+                open_spreads=open_spreads,
+                spreads_traded=spreads_traded,
+            )
         except Exception:
             logger.exception("_remove_spread_from_state failed for %s (non-fatal)", spread_id)
 
     def _update_daily_pnl(self, realized_pnl: float) -> None:
+        """Update daily P&L in state. Guards against NaN/inf corruption."""
         try:
+            import math
+            if not math.isfinite(realized_pnl):
+                logger.error(
+                    "_update_daily_pnl: non-finite P&L ₹%s rejected", realized_pnl
+                )
+                return
             state = self._state.get_state()
             current = float(state.get("daily_pnl", 0) or 0)
-            self._state.update_state(daily_pnl=current + realized_pnl)
+            new_pnl = current + realized_pnl
+            virtual_capital = float(state.get("virtual_capital", 1_000_000) or 1_000_000)
+            new_pct = (new_pnl / virtual_capital * 100) if virtual_capital else 0.0
+            self._state.update_state(
+                daily_pnl=new_pnl,
+                daily_pnl_pct=round(new_pct, 4),
+            )
         except Exception:
             logger.exception("_update_daily_pnl failed (non-fatal)")
+
+    def get_session_stats(self) -> dict:
+        """
+        Return structured session statistics for EOD reporting.
+        Reads spread trade history from state (spreads_traded list).
+        """
+        try:
+            state = self._state.get_state()
+            spreads_traded = state.get("spreads_traded", []) or []
+            realized = sum(t.get("realized_pnl", 0) for t in spreads_traded if isinstance(t.get("realized_pnl"), (int, float)))
+            open_spreads = self.get_open_spreads()
+            unrealized = 0.0
+            for sp in open_spreads:
+                pnl_data = compute_spread_pnl(sp, self._client, self._feed)
+                if pnl_data.get("data_ok") and pnl_data["unrealized_pnl"] is not None:
+                    unrealized += pnl_data["unrealized_pnl"]
+            return {
+                "spreads_opened":   len(spreads_traded),
+                "spreads_closed":   len([t for t in spreads_traded if t.get("closed")]),
+                "spreads_open_now": len(open_spreads),
+                "realized_pnl":     realized,
+                "unrealized_pnl":   unrealized,
+                "invalid_quote_incidents": self._invalid_quote_count,
+                "daily_pnl":        float(state.get("daily_pnl", 0) or 0),
+            }
+        except Exception:
+            logger.exception("get_session_stats failed")
+            return {}
 
     # ── Status summary ────────────────────────────────────────────────────────
 

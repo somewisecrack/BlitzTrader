@@ -27,14 +27,17 @@ def _default_state(virtual_capital: float) -> dict:
         "margin_used": 0.0,
         "daily_pnl": 0.0,
         "daily_pnl_pct": 0.0,
-        "positions": [],        # Open positions
+        "positions": [],        # Open positions (futures legacy)
         "pending_orders": [],   # Unfilled limit orders
-        "trades": [],           # Completed trades (entry + exit)
+        "trades": [],           # Completed trades (futures legacy)
         "trade_count": 0,
         "emitted_signal_keys": [],
         "notifications_sent": {},
         "is_paused": False,
         "is_stopped": False,
+        # Options spread tracking
+        "open_spreads": [],     # Currently open spreads
+        "spreads_traded": [],   # All spreads that were opened this session
     }
 
 

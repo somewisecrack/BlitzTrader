@@ -1408,6 +1408,9 @@ class BlitzTrader:
                             f"Gatekeeper: {gate_reason} ({gate_confidence:.0%})."
                         ),
                     )
+                    # Subscribe option leg tokens for accurate WebSocket P&L feed
+                    if self._spread_portfolio:
+                        self._spread_portfolio.subscribe_spread_legs(open_spread)
                     self._notify_spread_entry(
                         signal=signal,
                         candidate=candidate,

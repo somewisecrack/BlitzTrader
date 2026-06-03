@@ -536,13 +536,25 @@ class SpreadExecutionEngine:
         )
 
     def _record_open_spread(self, spread: OpenSpread) -> None:
-        """Append the spread to state_manager open_spreads list."""
+        """Append the spread to open_spreads AND spreads_traded in state."""
         try:
             import dataclasses
+            spread_dict = dataclasses.asdict(spread)
             state = self._state.get_state()
             open_spreads = list(state.get("open_spreads", []) or [])
-            open_spreads.append(dataclasses.asdict(spread))
-            self._state.update_state(open_spreads=open_spreads)
+            open_spreads.append(spread_dict)
+            # Also add to spreads_traded ledger for session reporting
+            spreads_traded = list(state.get("spreads_traded", []) or [])
+            spreads_traded.append({
+                **spread_dict,
+                "closed": False,
+                "realized_pnl": None,
+                "close_reason": None,
+            })
+            self._state.update_state(
+                open_spreads=open_spreads,
+                spreads_traded=spreads_traded,
+            )
         except Exception:
             logger.exception("_record_open_spread: failed to persist spread (non-fatal)")
 

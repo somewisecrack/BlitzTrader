@@ -1072,5 +1072,295 @@ class TestVirtualModeDefaultConfig(unittest.TestCase):
             importlib.reload(cfg)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+#   REGRESSION TESTS: impossible option P&L / quote contamination (2026-06-03)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+#  Root cause: Shoonya's GetQuotes API returned the underlying index level (e.g.
+#  BANKNIFTY ~53,309 or NIFTY ~23,228) as the option LTP in edge cases, causing
+#  virtual spread P&L to reach ±₹1.5M instead of the defined-risk max of ±₹5k.
+#
+#  These tests assert that compute_spread_pnl() and _close_spread_virtual()
+#  detect and reject such contaminated quotes.
+
+from tools.options_spread_portfolio import (
+    compute_spread_pnl,
+    _validate_option_ltp,
+    _MAX_OPTION_LTP,
+    _MAX_LTP_FILL_MULTIPLE,
+    _PNL_TOLERANCE_FRACTION,
+)
+
+
+def _make_banknifty_bear_call(
+    long_fill: float = 960.65,
+    short_fill: float = 1107.55,
+    max_profit: float = 4407.0,
+    max_loss: float = 4407.0,
+) -> OpenSpread:
+    """BANKNIFTY BEAR_CALL as traded on 2026-06-03 09:17."""
+    return OpenSpread(
+        spread_id="SPR-REGR-BANKNIFTY",
+        symbol="BANKNIFTY",
+        spread_type="BEAR_CALL",
+        direction="BEARISH",
+        expiry="30-JUN-2026",
+        lot_size=15,
+        lots=2,
+        long_tsym="BANKNIFTY30JUN26C53900",
+        long_token="75580",
+        long_action="BUY",
+        long_strike=53900,
+        long_option_type="CE",
+        long_fill_price=long_fill,
+        long_order_id="VIRTUAL-LONG",
+        short_tsym="BANKNIFTY30JUN26C53600",
+        short_token="75571",
+        short_action="SELL",
+        short_strike=53600,
+        short_option_type="CE",
+        short_fill_price=short_fill,
+        short_order_id="VIRTUAL-SHORT",
+        net_debit_or_credit=-(short_fill - long_fill),  # credit spread
+        max_profit=max_profit,
+        max_loss=max_loss,
+        breakeven=53600 + (short_fill - long_fill),
+        opened_at="2026-06-03T09:17:00+05:30",
+    )
+
+
+def _make_nifty_bear_call(
+    long_fill: float = 151.45,
+    short_fill: float = 197.00,
+    max_profit: float = 2956.0,
+    max_loss: float = 3569.0,
+) -> OpenSpread:
+    """NIFTY BEAR_CALL as traded on 2026-06-03 10:02."""
+    return OpenSpread(
+        spread_id="SPR-REGR-NIFTY",
+        symbol="NIFTY",
+        spread_type="BEAR_CALL",
+        direction="BEARISH",
+        expiry="09-JUN-2026",
+        lot_size=65,
+        lots=1,
+        long_tsym="NIFTY09JUN26C23400",
+        long_token="66100",
+        long_action="BUY",
+        long_strike=23400,
+        long_option_type="CE",
+        long_fill_price=long_fill,
+        long_order_id="VIRTUAL-LONG",
+        short_tsym="NIFTY09JUN26C23300",
+        short_token="66095",
+        short_action="SELL",
+        short_strike=23300,
+        short_option_type="CE",
+        short_fill_price=short_fill,
+        short_order_id="VIRTUAL-SHORT",
+        net_debit_or_credit=-(short_fill - long_fill),  # credit spread
+        max_profit=max_profit,
+        max_loss=max_loss,
+        breakeven=23300 + (short_fill - long_fill),
+        opened_at="2026-06-03T10:02:00+05:30",
+    )
+
+
+class TestQuoteContaminationRejection(unittest.TestCase):
+    """Regression: underlying-index prices must never be accepted as option LTPs."""
+
+    # ── _validate_option_ltp unit tests ──────────────────────────────────────
+
+    def test_validate_rejects_banknifty_index_level(self):
+        """BANKNIFTY option LTP of ₹53,309 is the index price — must be rejected."""
+        ok, reason = _validate_option_ltp(
+            ltp=53309.15, entry_fill=960.65,
+            tsym="BANKNIFTY30JUN26C53900", spread_id="SPR-REGR", leg="long"
+        )
+        self.assertFalse(ok)
+        self.assertIn("hard cap", reason)
+
+    def test_validate_rejects_nifty_index_level(self):
+        """NIFTY option LTP of ₹23,228 is the index price — must be rejected."""
+        ok, reason = _validate_option_ltp(
+            ltp=23228.45, entry_fill=197.00,
+            tsym="NIFTY09JUN26C23300", spread_id="SPR-REGR", leg="short"
+        )
+        self.assertFalse(ok)
+        self.assertIn("hard cap", reason)
+
+    def test_validate_rejects_ltp_above_fill_multiple(self):
+        """LTP 50× entry fill triggers fill-multiple guard."""
+        ok, reason = _validate_option_ltp(
+            ltp=5001.0, entry_fill=100.0,       # 50.01× — above 30× limit
+            tsym="NIFTY09JUN26C23300", spread_id="SPR-REGR", leg="short"
+        )
+        self.assertFalse(ok)
+        self.assertIn("plausibility limit", reason)
+
+    def test_validate_accepts_normal_option_premium(self):
+        """Normal option premiums (₹100–₹2000) are accepted."""
+        for ltp, fill in [(100.0, 80.0), (960.65, 800.0), (1500.0, 1000.0), (197.0, 151.45)]:
+            ok, reason = _validate_option_ltp(
+                ltp=ltp, entry_fill=fill,
+                tsym="TEST", spread_id="SPR-REGR", leg="long"
+            )
+            self.assertTrue(ok, f"ltp={ltp} fill={fill} unexpectedly rejected: {reason}")
+
+    def test_validate_rejects_zero_ltp(self):
+        ok, reason = _validate_option_ltp(0.0, 100.0, "TEST", "SPR", "long")
+        self.assertFalse(ok)
+
+    def test_validate_rejects_negative_ltp(self):
+        ok, reason = _validate_option_ltp(-5.0, 100.0, "TEST", "SPR", "long")
+        self.assertFalse(ok)
+
+    # ── compute_spread_pnl integration tests ─────────────────────────────────
+
+    def test_compute_pnl_rejects_banknifty_index_as_long_ltp(self):
+        """compute_spread_pnl returns data_ok=False if long_ltp is BANKNIFTY level."""
+        spread = _make_banknifty_bear_call()
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "53309.15", "stat": "Ok"}
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "1111.00"}
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+        self.assertIsNone(result["unrealized_pnl"])
+        self.assertIn("invalid_ltp", result.get("reason", ""))
+
+    def test_compute_pnl_rejects_nifty_index_as_short_ltp(self):
+        """compute_spread_pnl returns data_ok=False if short_ltp is NIFTY level."""
+        spread = _make_nifty_bear_call()
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "23228.45"}
+            if token == spread.short_token
+            else {"stat": "Ok", "lp": "140.00"}
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+        self.assertIsNone(result["unrealized_pnl"])
+
+    def test_compute_pnl_rejects_pnl_above_max_profit(self):
+        """P&L above max_profit is treated as invalid even with plausible leg LTPs."""
+        spread = _make_banknifty_bear_call(
+            long_fill=960.65, short_fill=1107.55,
+            max_profit=4407.0, max_loss=4407.0
+        )
+        qty = spread.lot_size * spread.lots  # 30
+        # Construct LTPs that produce P&L = 2 × max_profit (impossible)
+        # pnl = (long_ltp - 960.65)*30 - (short_ltp - 1107.55)*30
+        # Set long_ltp=1107.55+294.4=1401.95, short_ltp=960.65 → pnl≈12,939 > 4407
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "1401.95"}
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "960.65"}
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+        self.assertIn("defined_risk", result.get("reason", ""))
+
+    def test_compute_pnl_rejects_pnl_below_max_loss(self):
+        """P&L below -max_loss is treated as invalid."""
+        spread = _make_nifty_bear_call(max_profit=2956.0, max_loss=3569.0)
+        qty = spread.lot_size * spread.lots  # 65
+        # Produce P&L = -2 × max_loss (impossible)
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "100.00"}    # long (23400CE) much cheaper → huge loss
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "360.00"}   # short closed at 360 → huge loss
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"], f"Expected invalid P&L rejection: {result}")
+
+    def test_compute_pnl_valid_within_bounds(self):
+        """Normal P&L within spread bounds is accepted."""
+        spread = _make_banknifty_bear_call()
+        mock_client = MagicMock()
+        # Modest move: long gained ₹50, short gained ₹30 → net P&L moderate
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "1010.65"}    # long: 960.65 + 50
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "1077.55"}   # short: 1107.55 - 30
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertTrue(result["data_ok"])
+        self.assertIsNotNone(result["unrealized_pnl"])
+        # P&L must be within defined-risk bounds
+        self.assertLessEqual(result["unrealized_pnl"], spread.max_profit * 1.1)
+        self.assertGreaterEqual(result["unrealized_pnl"], -spread.max_loss * 1.1)
+
+    # ── should_exit blocks when data_ok=False ─────────────────────────────────
+
+    def test_should_exit_blocks_on_invalid_data(self):
+        """should_exit returns (False, '') when pnl_data has data_ok=False."""
+        from tools.options_spread_portfolio import should_exit
+        spread = _make_banknifty_bear_call()
+        bad_data = {
+            "data_ok": False,
+            "long_ltp": 53309.15,
+            "short_ltp": 1111.0,
+            "unrealized_pnl": None,
+            "reason": "invalid_ltp",
+        }
+        do_exit, reason = should_exit(spread, bad_data)
+        self.assertFalse(do_exit)
+        self.assertEqual(reason, "")
+
+    # ── _close_spread_virtual guards ──────────────────────────────────────────
+
+    def test_virtual_close_refuses_automatic_exit_with_invalid_data(self):
+        """Automatic threshold exit refuses to close when pnl_data is invalid."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        portfolio = SpreadPortfolio(None, _mock_state_manager(), virtual=True)
+        spread = _make_banknifty_bear_call()
+        bad_data = {"data_ok": False, "reason": "invalid_ltp: BANKNIFTY index leaked"}
+
+        # "take-profit" reason is automatic — should be refused
+        result = portfolio.close_spread(spread, reason="take-profit triggered", pnl_data=bad_data)
+        self.assertFalse(result["ok"])
+        self.assertIn("refused", result["error"].lower())
+
+    def test_virtual_close_allows_manual_exit_without_data(self):
+        """Manual Telegram exit closes at entry prices when no live data available."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        portfolio = SpreadPortfolio(None, _mock_state_manager(), virtual=True)
+        spread = _make_banknifty_bear_call()
+
+        result = portfolio.close_spread(spread, reason="manual Telegram exit", pnl_data=None)
+        self.assertTrue(result["ok"])
+        self.assertAlmostEqual(result["realized_pnl"], 0.0, places=1)
+
+    def test_virtual_close_allows_eod_forced_close_without_data(self):
+        """EOD forced close proceeds at entry prices when quote data unavailable."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        portfolio = SpreadPortfolio(None, _mock_state_manager(), virtual=True)
+        spread = _make_banknifty_bear_call()
+
+        result = portfolio.close_spread(spread, reason="EOD forced close", pnl_data=None)
+        self.assertTrue(result["ok"])
+        self.assertAlmostEqual(result["realized_pnl"], 0.0, places=1)
+
+    def test_daily_pnl_not_updated_after_refused_close(self):
+        """State daily_pnl must not change when a close is refused due to bad data."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        sm = _mock_state_manager()
+        portfolio = SpreadPortfolio(None, sm, virtual=True)
+        spread = _make_banknifty_bear_call()
+        bad_data = {"data_ok": False, "reason": "invalid_ltp"}
+
+        portfolio.close_spread(spread, reason="take-profit triggered", pnl_data=bad_data)
+        # update_state should NOT have been called with daily_pnl change
+        for call in sm.update_state.call_args_list:
+            kwargs = call.kwargs if call.kwargs else (call.args[0] if call.args else {})
+            self.assertNotIn("daily_pnl", kwargs,
+                msg="daily_pnl must not be updated after a refused close")
+
+
 if __name__ == "__main__":
     unittest.main()
