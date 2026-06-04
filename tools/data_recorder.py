@@ -216,6 +216,8 @@ class DataRecorder:
     def finalize_and_upload(self) -> dict:
         """
         Copy the daily export folder to Google Drive via configured destination.
+        The export includes all subdirectories under data_exports/YYYYMMDD/,
+        including atm_options/ when ATM option recording was active.
 
         Supported destinations:
         - GOOGLE_DRIVE_UPLOAD_DIR=/path/to/mounted/GoogleDrive/folder
@@ -224,6 +226,10 @@ class DataRecorder:
         with self._lock:
             if self._uploaded:
                 return {"status": "already_uploaded", "local_dir": str(self._day_dir)}
+
+        atm_dir = self._day_dir / "atm_options"
+        if atm_dir.exists():
+            logger.info("finalize_and_upload: atm_options present — will be included in export")
 
         if self._direct_drive_mode:
             with self._lock:
@@ -234,6 +240,7 @@ class DataRecorder:
                 "method": "mounted_drive",
                 "destination": str(self._day_dir),
                 "local_dir": str(self._day_dir),
+                "atm_options_included": atm_dir.exists(),
             }
 
         result = {"status": "no_destination_configured", "local_dir": str(self._day_dir)}
@@ -243,11 +250,17 @@ class DataRecorder:
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(self._day_dir, dest)
-            result = {"status": "uploaded", "method": "copy", "destination": str(dest), "local_dir": str(self._day_dir)}
+            result = {
+                "status": "uploaded",
+                "method": "copy",
+                "destination": str(dest),
+                "local_dir": str(self._day_dir),
+                "atm_options_included": atm_dir.exists(),
+            }
             with self._lock:
                 self._uploaded = True
             self._prune_old_local_exports()
-            logger.info(f"Markdown export copied to Google Drive folder: {dest}")
+            logger.info(f"Export copied to Google Drive folder: {dest}")
             return result
 
         if self._rclone_remote:
@@ -266,16 +279,22 @@ class DataRecorder:
                 raise RuntimeError(
                     f"rclone copy failed with exit {proc.returncode}: {error_tail}"
                 )
-            result = {"status": "uploaded", "method": "rclone", "destination": remote_path, "local_dir": str(self._day_dir)}
+            result = {
+                "status": "uploaded",
+                "method": "rclone",
+                "destination": remote_path,
+                "local_dir": str(self._day_dir),
+                "atm_options_included": atm_dir.exists(),
+            }
             with self._lock:
                 self._uploaded = True
             self._prune_old_local_exports()
-            logger.info(f"Markdown export uploaded via rclone: {remote_path}")
+            logger.info(f"Export uploaded via rclone: {remote_path}")
             return result
 
         with self._lock:
             self._uploaded = True
-        logger.warning("Markdown export not uploaded: configure GOOGLE_DRIVE_UPLOAD_DIR or RCLONE_REMOTE")
+        logger.warning("Export not uploaded: configure GOOGLE_DRIVE_UPLOAD_DIR or RCLONE_REMOTE")
         return result
 
     def _append_markdown_record(

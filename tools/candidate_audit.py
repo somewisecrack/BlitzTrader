@@ -60,6 +60,11 @@ _VALID_STAGES = {
     "GATEKEEPER_APPROVED",
     "ORDER_PLACED",
     "ORDER_REJECTED",
+    # Option-spread pipeline stages
+    "SPREAD_BUILD_REJECTED",   # SpreadBuilder could not construct a valid spread
+    "SPREAD_BUILD_SUCCESS",    # SpreadBuilder produced a valid candidate
+    "SPREAD_ORDER_PLACED",     # Both spread legs filled successfully
+    "SPREAD_ORDER_FAILED",     # Spread leg placement or fill failed
 }
 
 

@@ -336,7 +336,7 @@ class TestBuildReviewMarkdown:
         stats = compute_trade_stats(executed)
         patterns = detect_patterns(executed, rejected)
         md = build_review_markdown(REVIEW_DATE, executed, rejected, stats, patterns, [], [])
-        assert "Futures trades executed: 7" in md, (
+        assert "Legacy futures trades: 7" in md, (
             "Review should show exactly 7 trades (NIFTY+BANKNIFTY only, FINNIFTY excluded)"
         )
 
@@ -362,7 +362,7 @@ class TestBuildReviewMarkdown:
         executed, _ = self._get_trades_and_rejected(tmp_path)
         stats = compute_trade_stats(executed)
         md = build_review_markdown(REVIEW_DATE, executed, [], stats, [], [], [])
-        assert "Net P&L:" in md
+        assert "Legacy futures P&L:" in md
         assert "N/A (P&L data not available)" not in md, (
             "P&L should be shown when live_state.json provides it"
         )
@@ -371,7 +371,7 @@ class TestBuildReviewMarkdown:
         executed, _ = self._get_trades_and_rejected(tmp_path)
         stats = compute_trade_stats(executed)
         md = build_review_markdown(REVIEW_DATE, executed, [], stats, [], [], [])
-        assert "Wins: 1" in md
+        assert "wins: 1" in md.lower()
         assert "Losses: 6" in md
 
     def test_rejected_count_in_summary(self, tmp_path):
@@ -404,7 +404,7 @@ class TestBuildReviewMarkdown:
         assert "123" not in md, "Review must not show 123 trades"
         assert "emitted_signal" not in md.lower()
         # Must have the correct trade count
-        assert "Futures trades executed: 7" in md
+        assert "Legacy futures trades: 7" in md
 
 
 # ---------------------------------------------------------------------------

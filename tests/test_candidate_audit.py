@@ -231,6 +231,10 @@ class TestValidStages(unittest.TestCase):
             "GATEKEEPER_APPROVED",
             "ORDER_PLACED",
             "ORDER_REJECTED",
+            "SPREAD_BUILD_REJECTED",
+            "SPREAD_BUILD_SUCCESS",
+            "SPREAD_ORDER_PLACED",
+            "SPREAD_ORDER_FAILED",
         }
         self.assertEqual(_VALID_STAGES, expected)
 

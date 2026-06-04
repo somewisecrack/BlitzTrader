@@ -1,0 +1,21 @@
+{
+  "id": "HYP-20260604-001",
+  "scope": "futures",
+  "symbol": "BANKNIFTY",
+  "strategy": "VP-09",
+  "direction": "BUY",
+  "status": "proposed",
+  "proposed_date": "2026-06-04",
+  "proposed_by": "post_market_pipeline",
+  "description": "Block BANKNIFTY VP-09 BUY signals when RSI14 > 70 (overbought momentum risk).",
+  "evidence": "On 2026-06-04, BANKNIFTY VP-09 BUY entries in overbought RSI conditions (RSI > 70) underperformed. Gemini gatekeeper also flagged RSI overbought as a concern in two of these signals before approving, but they still resulted in losses once the momentum reversed. Hypothesis: blocking these entries deterministically in Python would improve the strategy's win rate.",
+  "filter": {
+    "block_when": {
+      "rsi14_gt": 70
+    }
+  },
+  "backtest_config": {
+    "lookback_days": 30,
+    "min_trades": 5
+  }
+}

@@ -438,11 +438,11 @@ class TestExecutionGuardrails(unittest.TestCase):
     def test_after_time_blocks_entry(self):
         """Test 17: Engine returns error after no-entry time."""
         sm = _mock_state_manager()
-        engine = SpreadExecutionEngine(None, sm, no_entry_after="09:00")
-        # Current time is well past 09:00
+        # Use "00:00" — always past midnight so guardrail fires regardless of wall-clock time
+        engine = SpreadExecutionEngine(None, sm, no_entry_after="00:00")
         result = engine.place_spread(self._make_candidate())
         self.assertFalse(result["ok"])
-        self.assertIn("09:00", result["error"])
+        self.assertIn("00:00", result["error"])
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -374,37 +374,51 @@ def build_eod_context() -> str:
     return f"""Current time: {now.strftime('%H:%M:%S')} IST
 It is 3:15 PM IST. Market hours are over. Work through these steps IN EXACT ORDER:
 
-1. Call close_all_positions() to close any remaining positions.
+1. Call close_all_positions() to close any remaining futures positions.
 
 2. Call get_todays_trades() — WAIT for the response. Store the result.
+   Call get_todays_spread_trades() — WAIT for the response. Store the result.
    Call get_daily_pnl() — WAIT for the response. Store the result.
    Call get_session_goals() — WAIT for the response. Store the result.
 
 3. Now — and ONLY now — read the data returned from step 2.
-   Count the trades from the get_todays_trades() response.
-   Read the P&L from the get_daily_pnl() response.
+   From get_todays_trades(): check BOTH futures_count AND spread_count.
+   From get_todays_spread_trades(): read closed_count, open_count, total_realized_pnl.
+   From get_daily_pnl(): read daily_pnl, spread_realized_pnl, futures_realized_pnl.
 
-   ⚠️ CRITICAL: If get_todays_trades() returned an EMPTY list or trades=0:
-   - Your trade count is 0. Your win rate is N/A.
-   - You MUST NOT invent any trades, symbols, or P&L figures.
-   - Say "No trades executed today" — that is the truth.
+   ⚠️ CRITICAL RULE — activity detection:
+   - If futures_count = 0 AND spread_count = 0 AND open_count = 0: no activity today.
+     Say "No trades or spreads executed today." Do NOT invent numbers.
+   - If spread_count > 0 OR open_count > 0: option-spread activity occurred.
+     NEVER say "No trades were executed" when spreads exist.
+   - Report option spreads using "Option spreads opened/exited" language.
+   - Report futures trades separately if any exist.
 
 4. Write an EOD journal entry via log_decision() using ONLY the data from step 2:
-   - Total trades: [number from get_todays_trades()]
-   - P&L: [number from get_daily_pnl()]
-   - If trades > 0: list each trade's symbol, direction, entry, exit, P&L FROM the tool response
-   - If trades = 0: write "No trades executed. Reason: [your honest assessment]"
+   Option spread activity (from get_todays_spread_trades()):
+   - Spreads opened: [closed_count + open_count]
+   - Spreads exited: [closed_count]
+   - Spreads still open: [open_count]
+   - Realized option-spread P&L: [total_realized_pnl from get_todays_spread_trades()]
+   - For each closed spread: spread_id, symbol, spread_type, reason, realized_pnl
+   Legacy futures trades (from get_todays_trades() futures_trades field):
+   - Report only if futures_count > 0
    - Did you stick to your session goals?
-   - What setups did you see? Why did you enter or not enter?
+   - What setups did you see and why did you enter or not enter?
 
 5. Call update_memory() — include ONLY facts from tool responses.
-   NEVER write fictional trade results into memory. If no trades, say so.
-   Focus on: market observations, strategy lessons, VIX behaviour, what you learned.
+   NEVER write fictional trade results into memory.
+   Focus on: spread performance, market observations, strategy lessons, what you learned.
 
 6. Send EOD summary to trader via send_telegram() using ONLY facts from step 2.
    The trader will cross-check. Do NOT fabricate anything.
+   Template:
+     📊 EOD Summary — [date]
+     Option spreads: [N] opened, [M] exited | P&L: ₹[X]
+     [If futures_count > 0: Futures trades: [N] | Futures P&L: ₹[X]]
+     Net session P&L: ₹[from get_daily_pnl()]
 
-7. Call get_open_positions() to confirm all positions are closed."""
+7. Call get_open_positions() to confirm all futures positions are closed."""
 
 
 def build_abort_context() -> str:

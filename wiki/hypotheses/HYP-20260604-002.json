@@ -1,0 +1,21 @@
+{
+  "id": "HYP-20260604-002",
+  "scope": "futures",
+  "symbol": "NIFTY",
+  "strategy": "VP-15",
+  "direction": "SELL",
+  "status": "proposed",
+  "proposed_date": "2026-06-04",
+  "proposed_by": "post_market_pipeline",
+  "description": "Block NIFTY VP-15 SELL signals when EMA stack is neutral (neither bullish nor bearish alignment).",
+  "evidence": "On 2026-06-04, NIFTY VP-15 SELL setups that fired during neutral EMA stacking (ema_stacked_bull=false AND ema_stacked_bear=false) showed no clear trend confirmation. The Gemini gatekeeper was uncertain on several of these and mentioned the lack of EMA directional confirmation in its reasoning. A deterministic block when the EMA stack is neutral may reduce noise trades for this strategy.",
+  "filter": {
+    "block_when": {
+      "ema_stacked_bear": false
+    }
+  },
+  "backtest_config": {
+    "lookback_days": 30,
+    "min_trades": 5
+  }
+}

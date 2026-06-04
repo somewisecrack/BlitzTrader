@@ -131,11 +131,12 @@ class TestValidateHypothesis:
         assert ok is False
         assert "coint_pvalue" in err.lower() or "pairs" in err.lower()
 
-    def test_rejects_live_gatekeeper_phrase(self):
+    def test_gemini_gatekeeper_phrase_now_allowed(self):
+        # "gemini gatekeeper" is intentionally allowed — Gemini is back as live entry gatekeeper.
+        # Evidence and descriptions may freely reference it.
         hyp = _minimal_hypothesis(claim="Use gemini gatekeeper to approve trades")
         ok, err = validate_hypothesis(hyp)
-        assert ok is False
-        assert "prohibited" in err.lower() or "gatekeeper" in err.lower()
+        assert ok is True, f"Expected gemini gatekeeper reference to pass, got: {err}"
 
     def test_rejects_live_approval_phrase(self):
         hyp = _minimal_hypothesis(notes="requires live approval from the agent")

@@ -35,6 +35,7 @@ LIVE_TOOLS = [
     "get_open_positions",
     "get_virtual_balance",
     "get_todays_trades",
+    "get_todays_spread_trades",
     "get_daily_pnl",
     "place_virtual_order",
     "cancel_order",
@@ -111,6 +112,7 @@ class ToolRegistry:
                 "get_open_positions": self._order_exec.get_open_positions,
                 "get_virtual_balance": self._order_exec.get_virtual_balance,
                 "get_todays_trades": self._order_exec.get_todays_trades,
+                "get_todays_spread_trades": self._order_exec.get_todays_spread_trades,
                 "get_daily_pnl": self._order_exec.get_daily_pnl,
                 "place_virtual_order": self._place_virtual_order_tracked,
                 "cancel_order": self._order_exec.cancel_order,
@@ -464,7 +466,23 @@ class ToolRegistry:
             },
             {
                 "name": "get_todays_trades",
-                "description": "Get all trades executed today with entry/exit prices and realized P&L.",
+                "description": (
+                    "Get all trades executed today: both legacy futures trades and closed "
+                    "option spreads. Check both futures_trades and spread_trades fields. "
+                    "If spread_count > 0 there were option spread trades even if futures_count = 0."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "get_todays_spread_trades",
+                "description": (
+                    "Get only the closed option-spread trades for today with full details: "
+                    "spread type, legs, fill prices, realized P&L, close reason. "
+                    "Also reports currently open spreads. Use at EOD to summarize spread activity."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {},
@@ -472,7 +490,10 @@ class ToolRegistry:
             },
             {
                 "name": "get_daily_pnl",
-                "description": "Get current net P&L for the session as amount and percentage.",
+                "description": (
+                    "Get current net P&L for the session as amount and percentage. "
+                    "Includes breakdown: spread_realized_pnl and futures_realized_pnl."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {},

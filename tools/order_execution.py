@@ -517,17 +517,54 @@ class OrderExecutionTools:
         return self._state.get_balance()
 
     def get_todays_trades(self) -> dict:
-        """Get all trades executed today."""
-        trades = self._state.get_trades()
-        return {"trades": trades, "count": len(trades)}
+        """Get all trades executed today (futures trades and closed option spreads)."""
+        futures_trades = self._state.get_trades()
+        spread_trades = self._state.get_traded_spreads()
+        spreads_opened = len(self._state.get_state().get("open_spreads", []))
+        return {
+            "futures_trades": futures_trades,
+            "futures_count": len(futures_trades),
+            "spread_trades": spread_trades,
+            "spread_count": len(spread_trades),
+            "open_spreads_remaining": spreads_opened,
+            # Legacy field for backward compat with EOD context
+            "trades": futures_trades,
+            "count": len(futures_trades),
+            "note": (
+                "spread_trades contains closed option-spread records with realized P&L. "
+                "futures_trades contains legacy futures trade records."
+            ) if spread_trades or futures_trades else "No trades today.",
+        }
+
+    def get_todays_spread_trades(self) -> dict:
+        """Get only the closed option-spread trades for today with realized P&L."""
+        spreads = self._state.get_traded_spreads()
+        open_spreads = self._state.get_state().get("open_spreads", []) or []
+        total_realized = sum(float(s.get("realized_pnl", 0)) for s in spreads)
+        return {
+            "spreads_closed": spreads,
+            "closed_count": len(spreads),
+            "open_spreads": open_spreads,
+            "open_count": len(open_spreads),
+            "total_realized_pnl": round(total_realized, 2),
+            "formatted_realized": f"₹{total_realized:+,.2f}",
+        }
 
     def get_daily_pnl(self) -> dict:
-        """Get current net P&L for the session."""
+        """Get current net P&L for the session (futures + option spreads combined)."""
         pnl, pnl_pct = self._state.get_daily_pnl()
+        spread_trades = self._state.get_traded_spreads()
+        spread_realized = sum(float(s.get("realized_pnl", 0)) for s in spread_trades)
+        futures_trades = self._state.get_trades()
+        futures_realized = sum(float(t.get("pnl", 0) or 0) for t in futures_trades)
         return {
             "daily_pnl": pnl,
             "daily_pnl_pct": round(pnl_pct, 2),
             "formatted": f"₹{pnl:+,.2f} ({pnl_pct:+.2f}%)",
+            "spread_realized_pnl": round(spread_realized, 2),
+            "futures_realized_pnl": round(futures_realized, 2),
+            "spread_count": len(spread_trades),
+            "futures_count": len(futures_trades),
         }
 
     # ──────────────────────────────────────────────────────────

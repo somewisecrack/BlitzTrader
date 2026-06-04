@@ -6,8 +6,9 @@ Reads runtime artifacts for a given trading day and produces a daily review
 markdown in wiki/daily_reviews/YYYY-MM-DD.md.
 
 Source-of-truth priority:
-  1. runtime/live_state.json  "trades" array  (actual executed trades with P&L)
-  2. journals/YYYYMMDD.md     ENTER_LONG / ENTER_SHORT entries (fallback)
+  1. runtime/live_state.json  "spreads_traded" array  (closed option spreads with P&L)
+  2. runtime/live_state.json  "trades" array           (legacy futures trades)
+  3. journals/YYYYMMDD.md     ENTER_LONG / ENTER_SHORT entries (fallback)
 
 NEVER counts emitted_signal_keys, placeholder rows, or pairs trades.
 
@@ -91,6 +92,65 @@ def _epoch_to_time_str(epoch: float) -> str:
 
 
 # ── live_state.json parsing (PRIMARY source) ───────────────────────────────────
+
+
+def parse_spreads_from_live_state(live_state_path: Path, review_date: date) -> tuple[list[dict], list[dict]]:
+    """
+    Parse runtime/live_state.json to extract option-spread activity.
+
+    Returns:
+        (closed_spreads, open_spreads)
+        where each spread dict has keys: spread_id, symbol, spread_type, direction,
+        strategy, opened_at, closed_at, realized_pnl, close_reason, etc.
+
+    Only returns spreads whose opened_at falls on review_date (IST).
+    """
+    if not live_state_path.exists():
+        return [], []
+    try:
+        data = json.loads(live_state_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  WARNING: Could not parse {live_state_path}: {e}", file=sys.stderr)
+        return [], []
+
+    def _parse_ist_date(iso_str: str) -> date | None:
+        if not iso_str:
+            return None
+        try:
+            import pytz
+            IST = pytz.timezone("Asia/Kolkata")
+            dt = datetime.fromisoformat(iso_str)
+            if dt.tzinfo is None:
+                dt = IST.localize(dt)
+            else:
+                dt = dt.astimezone(IST)
+            return dt.date()
+        except Exception:
+            return None
+
+    closed = []
+    raw_closed = data.get("spreads_traded", [])
+    if isinstance(raw_closed, list):
+        for s in raw_closed:
+            if not isinstance(s, dict):
+                continue
+            opened_date = _parse_ist_date(s.get("opened_at", ""))
+            if opened_date is not None and opened_date != review_date:
+                continue
+            closed.append(s)
+
+    open_spreads = []
+    raw_open = data.get("open_spreads", [])
+    if isinstance(raw_open, list):
+        for s in raw_open:
+            if not isinstance(s, dict):
+                continue
+            opened_date = _parse_ist_date(s.get("opened_at", ""))
+            if opened_date is not None and opened_date != review_date:
+                continue
+            open_spreads.append(s)
+
+    return closed, open_spreads
 
 
 def parse_live_state(live_state_path: Path, review_date: date) -> list[dict]:
@@ -625,16 +685,8 @@ def parse_candidate_audit(audit_path: Path) -> dict:
     """
     Parse the candidate audit JSONL file for a trading day.
 
-    Returns a summary dict:
-      {
-        "raw_total":       int,   # total raw scanner candidates
-        "guardrail_blocked": int, # blocked by hard guardrails
-        "python_rejected": int,   # rejected by Python review
-        "gatekeeper_rejected": int,
-        "gatekeeper_approved": int,
-        "orders_placed":   int,
-        "by_signal_id":    dict,  # full audit trail per signal
-      }
+    Returns a summary dict covering both the futures pipeline and the
+    option-spread pipeline stages.
     """
     result = {
         "raw_total": 0,
@@ -643,6 +695,10 @@ def parse_candidate_audit(audit_path: Path) -> dict:
         "gatekeeper_rejected": 0,
         "gatekeeper_approved": 0,
         "orders_placed": 0,
+        "spread_build_rejected": 0,
+        "spread_build_success": 0,
+        "spread_order_placed": 0,
+        "spread_order_failed": 0,
         "by_signal_id": {},
     }
     if not audit_path.exists():
@@ -676,12 +732,32 @@ def parse_candidate_audit(audit_path: Path) -> dict:
                     result["gatekeeper_approved"] += 1
                 elif stage == "ORDER_PLACED":
                     result["orders_placed"] += 1
-                # Note: GEMMA_OPINION stages in historical audit files are
-                # silently skipped — they do not affect any counters.
+                elif stage == "SPREAD_BUILD_REJECTED":
+                    result["spread_build_rejected"] += 1
+                elif stage == "SPREAD_BUILD_SUCCESS":
+                    result["spread_build_success"] += 1
+                elif stage == "SPREAD_ORDER_PLACED":
+                    result["spread_order_placed"] += 1
+                elif stage == "SPREAD_ORDER_FAILED":
+                    result["spread_order_failed"] += 1
+                # Historical GEMMA_OPINION stages are silently skipped.
     except Exception:
         pass
 
     return result
+
+
+def build_spread_stats(closed_spreads: list) -> dict:
+    """Compute summary stats from closed option spreads."""
+    wins = sum(1 for s in closed_spreads if float(s.get("realized_pnl", 0)) > 0)
+    losses = sum(1 for s in closed_spreads if float(s.get("realized_pnl", 0)) <= 0)
+    net_pnl = sum(float(s.get("realized_pnl", 0)) for s in closed_spreads)
+    return {
+        "total": len(closed_spreads),
+        "wins": wins,
+        "losses": losses,
+        "net_pnl": net_pnl,
+    }
 
 
 def build_review_markdown(
@@ -694,33 +770,52 @@ def build_review_markdown(
     indicator_notes: list,
     source_note: str = "",
     candidate_audit: dict | None = None,
+    closed_spreads: list | None = None,
+    open_spreads: list | None = None,
 ) -> str:
     date_str = review_date.isoformat()
+    closed_spreads = closed_spreads or []
+    open_spreads = open_spreads or []
+    spread_stats = build_spread_stats(closed_spreads)
     lines = []
 
-    lines.append(f"# Futures Daily Review — {date_str}")
+    lines.append(f"# Daily Review — {date_str}")
     lines.append("")
 
     # Summary
     lines.append("## Summary")
     lines.append(f"- Date: {date_str}")
-    lines.append(f"- Futures trades executed: {stats['total']}")
-    if stats["total"] > 0:
-        win_rate = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
-        lines.append(f"- Wins: {stats['wins']} | Losses: {stats['losses']} | Win rate: {win_rate:.0f}%")
-        if stats["pnl_known"] and stats["net_pnl"] is not None:
-            lines.append(f"- Net P&L: ₹{stats['net_pnl']:+,.2f}")
-        else:
-            lines.append("- Net P&L: N/A (P&L data not available)")
+
+    # Option spread summary (primary trading vehicle)
+    if closed_spreads or open_spreads:
+        lines.append(f"- Option spreads opened: {spread_stats['total'] + len(open_spreads)}")
+        lines.append(f"- Option spreads exited: {spread_stats['total']}")
+        lines.append(f"- Open spreads remaining: {len(open_spreads)}")
+        if spread_stats["total"] > 0:
+            win_rate = spread_stats["wins"] / spread_stats["total"] * 100
+            lines.append(
+                f"- Spread wins: {spread_stats['wins']} | "
+                f"Losses: {spread_stats['losses']} | Win rate: {win_rate:.0f}%"
+            )
+        lines.append(f"- Net option-spread P&L: ₹{spread_stats['net_pnl']:+,.2f}")
     else:
-        lines.append("- Wins: 0 | Losses: 0 | Win rate: N/A")
-        lines.append("- Net P&L: N/A")
+        lines.append("- Option spreads opened: 0")
+        lines.append("- Option spreads exited: 0")
+
+    # Legacy futures summary (only shown when futures trades actually exist)
+    if stats["total"] > 0:
+        win_rate = stats["wins"] / stats["total"] * 100
+        lines.append(f"- Legacy futures trades: {stats['total']}")
+        lines.append(f"- Futures wins: {stats['wins']} | Losses: {stats['losses']} | Win rate: {win_rate:.0f}%")
+        if stats["pnl_known"] and stats["net_pnl"] is not None:
+            lines.append(f"- Legacy futures P&L: ₹{stats['net_pnl']:+,.2f}")
+
     lines.append(f"- Rejected signals: {len(rejected)}")
     if source_note:
         lines.append(f"- _Source: {source_note}_")
     lines.append("")
 
-    # Log issues (compact, no raw log content)
+    # Log issues
     if log_messages:
         lines.append("## Log Issues")
         for msg in log_messages[:20]:
@@ -734,14 +829,40 @@ def build_review_markdown(
             lines.append(f"- {note}")
         lines.append("")
 
-    # Executed trades table
-    lines.append("## Executed Trades")
+    # Option spreads table
+    lines.append("## Option Spreads")
+    if closed_spreads:
+        lines.append("| Opened | Spread ID | Symbol | Type | Strategy | Realized P&L | Reason |")
+        lines.append("|--------|-----------|--------|------|----------|-------------|--------|")
+        for s in closed_spreads:
+            opened = str(s.get("opened_at", "—"))[:16]
+            sid = s.get("spread_id", "—")
+            sym = s.get("symbol", "—")
+            stype = s.get("spread_type", "—")
+            strategy = s.get("strategy") or "—"
+            pnl = float(s.get("realized_pnl", 0))
+            reason = s.get("close_reason", "—")
+            lines.append(f"| {opened} | {sid} | {sym} | {stype} | {strategy} | ₹{pnl:+,.2f} | {reason} |")
+    if open_spreads:
+        lines.append("")
+        lines.append("**Open spreads (not yet exited):**")
+        for s in open_spreads:
+            opened = str(s.get("opened_at", "—"))[:16]
+            sid = s.get("spread_id", "—")
+            sym = s.get("symbol", "—")
+            stype = s.get("spread_type", "—")
+            lines.append(f"- {sid}: {sym} {stype} opened {opened} (unrealized)")
+    if not closed_spreads and not open_spreads:
+        lines.append("_No option spreads opened on this date._")
+    lines.append("")
+
+    # Legacy futures trades table (only shown when they exist)
     if executed:
+        lines.append("## Legacy Futures Trades")
         lines.append("| Time | Symbol | Direction | Strategy | P&L |")
         lines.append("|------|--------|-----------|----------|-----|")
         for t in executed:
             time_val = t.get("time", "—")
-            # Skip rows where required fields are placeholders
             sym = t.get("symbol", "")
             direction = t.get("direction", "")
             if not sym or not direction or "—" in sym:
@@ -755,14 +876,11 @@ def build_review_markdown(
             else:
                 pnl_str = str(pnl_raw)
             lines.append(f"| {time_val} | {sym} | {direction} | {strategy} | {pnl_str} |")
-    else:
-        lines.append("_No futures trades executed on this date._")
-    lines.append("")
+        lines.append("")
 
-    # Loss clusters (grouped executed losses by strategy — primary target for Gemini)
-    loss_clusters_section = build_loss_clusters_section(executed)
-    lines.append(loss_clusters_section)
-    lines.append("")
+        loss_clusters_section = build_loss_clusters_section(executed)
+        lines.append(loss_clusters_section)
+        lines.append("")
 
     # Rejected signals table
     lines.append("## Rejected Signals")
@@ -774,17 +892,16 @@ def build_review_markdown(
             sym = r.get("symbol", "")
             strategy = r.get("strategy", "")
             reason = r.get("reason", r.get("reason:", ""))
-            # Skip placeholder rows
             if not sym or not strategy or not reason:
                 continue
             if "—" in sym or "—" in strategy:
                 continue
             lines.append(f"| {time_val} | {sym} | {strategy} | {reason} |")
     else:
-        lines.append("_No rejected futures signals on this date._")
+        lines.append("_No rejected signals on this date._")
     lines.append("")
 
-    # Signal Gate Audit (from candidate audit JSONL)
+    # Signal Gate Audit
     if candidate_audit:
         lines.append("## Signal Gate Audit")
         raw = candidate_audit.get("raw_total", 0)
@@ -792,15 +909,26 @@ def build_review_markdown(
         py_rej = candidate_audit.get("python_rejected", 0)
         gk_rej = candidate_audit.get("gatekeeper_rejected", 0)
         gk_app = candidate_audit.get("gatekeeper_approved", 0)
+        spread_built = candidate_audit.get("spread_build_success", 0)
+        spread_rej = candidate_audit.get("spread_build_rejected", 0)
+        spread_placed = candidate_audit.get("spread_order_placed", 0)
+        spread_failed = candidate_audit.get("spread_order_failed", 0)
         placed = candidate_audit.get("orders_placed", 0)
-        lines.append(f"| Stage | Count |")
-        lines.append(f"|-------|-------|")
+        lines.append("| Stage | Count |")
+        lines.append("|-------|-------|")
         lines.append(f"| Raw scanner candidates | {raw} |")
         lines.append(f"| Hard guardrail blocked | {blocked} |")
         lines.append(f"| Python review rejected | {py_rej} |")
-        lines.append(f"| Gatekeeper rejected | {gk_rej} |")
-        lines.append(f"| Gatekeeper approved | {gk_app} |")
-        lines.append(f"| Orders placed | {placed} |")
+        lines.append(f"| Gemini gatekeeper rejected | {gk_rej} |")
+        lines.append(f"| Gemini gatekeeper approved | {gk_app} |")
+        if spread_built or spread_rej:
+            lines.append(f"| Spread build success | {spread_built} |")
+            lines.append(f"| Spread build rejected | {spread_rej} |")
+        if spread_placed or spread_failed:
+            lines.append(f"| Spread orders placed | {spread_placed} |")
+            lines.append(f"| Spread orders failed | {spread_failed} |")
+        if placed:
+            lines.append(f"| Futures orders placed | {placed} |")
         lines.append("")
     else:
         lines.append("## Signal Gate Audit")
@@ -869,15 +997,24 @@ def main():
     indicator_notes: list[str] = []
     source_note = ""
 
+    closed_spreads: list[dict] = []
+    open_spreads_list: list[dict] = []
+
     if live_state_path.exists():
         print(f"[evaluate_futures_day] Reading live_state.json: {live_state_path}")
+        closed_spreads, open_spreads_list = parse_spreads_from_live_state(live_state_path, review_date)
+        if closed_spreads or open_spreads_list:
+            print(
+                f"  Found {len(closed_spreads)} closed spread(s) and "
+                f"{len(open_spreads_list)} open spread(s) in live_state.json"
+            )
         live_trades = parse_live_state(live_state_path, review_date)
         if live_trades:
             all_executed = live_trades
             source_note = "live_state.json (executed trades with realized P&L)"
-            print(f"  Found {len(all_executed)} futures trades in live_state.json")
+            print(f"  Found {len(all_executed)} legacy futures trades in live_state.json")
         else:
-            print("  No futures trades found in live_state.json for this date")
+            print("  No legacy futures trades found in live_state.json for this date")
     else:
         print(f"[evaluate_futures_day] live_state.json not found: {live_state_path}")
 
@@ -964,6 +1101,8 @@ def main():
         indicator_notes=indicator_notes,
         source_note=source_note,
         candidate_audit=candidate_audit_data,
+        closed_spreads=closed_spreads,
+        open_spreads=open_spreads_list,
     )
 
     # Write output
@@ -981,8 +1120,12 @@ def main():
         review_md += "\n\n_[Output truncated: exceeded 1 MB limit]_\n"
 
     output_path.write_text(review_md, encoding="utf-8")
+    spread_stat = build_spread_stats(closed_spreads)
     print(f"[evaluate_futures_day] Review written: {output_path}")
-    print(f"  Trades executed: {stats['total']}, Rejected: {len(all_rejected)}")
+    print(
+        f"  Spreads: {spread_stat['total']} closed, {len(open_spreads_list)} open | "
+        f"Futures trades: {stats['total']} | Rejected signals: {len(all_rejected)}"
+    )
 
 
 if __name__ == "__main__":

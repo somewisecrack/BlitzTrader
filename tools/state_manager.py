@@ -27,10 +27,12 @@ def _default_state(virtual_capital: float) -> dict:
         "margin_used": 0.0,
         "daily_pnl": 0.0,
         "daily_pnl_pct": 0.0,
-        "positions": [],        # Open positions
+        "positions": [],        # Open futures positions
         "pending_orders": [],   # Unfilled limit orders
-        "trades": [],           # Completed trades (entry + exit)
+        "trades": [],           # Completed futures trades (entry + exit)
         "trade_count": 0,
+        "open_spreads": [],     # Currently open option spreads
+        "spreads_traded": [],   # Closed option spreads with realized P&L
         "emitted_signal_keys": [],
         "notifications_sent": {},
         "is_paused": False,
@@ -191,6 +193,22 @@ class StateManager:
     def get_trades(self) -> list[dict]:
         """Get all trades for today."""
         return self._state.get("trades", [])
+
+    # ──────────────────────────────────────────────────────────
+    #   OPTION SPREAD LEDGER
+    # ──────────────────────────────────────────────────────────
+
+    def add_traded_spread(self, spread_record: dict) -> dict:
+        """Append a closed option spread to the durable spreads_traded ledger."""
+        if "spreads_traded" not in self._state:
+            self._state["spreads_traded"] = []
+        self._state["spreads_traded"].append(spread_record)
+        self._save()
+        return self._state
+
+    def get_traded_spreads(self) -> list[dict]:
+        """Return all closed option spreads for this session."""
+        return self._state.get("spreads_traded", [])
 
     # ──────────────────────────────────────────────────────────
     #   P&L TRACKING

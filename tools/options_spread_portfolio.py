@@ -370,8 +370,10 @@ class SpreadPortfolio:
         )
 
         # ── Update state ───────────────────────────────────────────────────
+        now_ist = datetime.now(IST)
         self._remove_spread_from_state(spread.spread_id)
         self._update_daily_pnl(realized_pnl)
+        self._record_closed_spread(spread, btc_fill, stc_fill, realized_pnl, reason, now_ist)
 
         message = (
             f"Spread {spread.spread_id} closed ({reason}): "
@@ -486,6 +488,48 @@ class SpreadPortfolio:
             logger.exception("_emergency_close_long raised for %s", tsym)
 
     # ── State mutations ───────────────────────────────────────────────────────
+
+    def _record_closed_spread(
+        self,
+        spread: OpenSpread,
+        short_close_price: float,
+        long_close_price: float,
+        realized_pnl: float,
+        close_reason: str,
+        closed_at: datetime,
+    ) -> None:
+        """Append a closed spread to the durable spreads_traded ledger."""
+        try:
+            record = {
+                "spread_id": spread.spread_id,
+                "symbol": spread.symbol,
+                "spread_type": spread.spread_type,
+                "direction": spread.direction,
+                "strategy": spread.strategy,
+                "signal_id": spread.signal_id,
+                "opened_at": spread.opened_at,
+                "closed_at": closed_at.isoformat(),
+                "long_tsym": spread.long_tsym,
+                "long_token": spread.long_token,
+                "long_fill_price": spread.long_fill_price,
+                "long_close_price": long_close_price,
+                "short_tsym": spread.short_tsym,
+                "short_token": spread.short_token,
+                "short_fill_price": spread.short_fill_price,
+                "short_close_price": short_close_price,
+                "realized_pnl": round(realized_pnl, 2),
+                "close_reason": close_reason,
+                "max_profit": spread.max_profit,
+                "max_loss": spread.max_loss,
+                "expiry": spread.expiry,
+                "lot_size": spread.lot_size,
+                "lots": spread.lots,
+                "underlying_at_entry": spread.underlying_at_entry,
+                "quote_source": "shoonya",
+            }
+            self._state.add_traded_spread(record)
+        except Exception:
+            logger.exception("_record_closed_spread failed for %s (non-fatal)", spread.spread_id)
 
     def _remove_spread_from_state(self, spread_id: str) -> None:
         try:

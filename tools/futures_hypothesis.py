@@ -44,12 +44,27 @@ SUPPORTED_FILTER_FIELDS = {
 # Fields that indicate pairs/equity content — auto-reject if present
 PAIRS_FIELDS = {"cointegration", "z_score", "spread", "hedge_ratio", "coint_pvalue"}
 
-# Phrases that indicate LLM live-gatekeeper misuse — auto-reject if found in text
+# Phrases that indicate LLM live-gatekeeper misuse in FILTER CONDITIONS.
+# Evidence/notes may freely mention "Gemini gatekeeper" — Gemini is intentionally
+# back as the live entry gatekeeper, so referencing it in evidence is legitimate.
+# These phrases are only prohibited inside filter.block_when field values.
 PROHIBITED_PHRASES = {
-    "gemini gatekeeper",
     "live approval",
     "live rejection",
     "live gatekeeper",
+}
+
+# Filter fields that would make a hypothesis LLM-dependent at runtime.
+# block_when containing any of these keys is rejected — the filter would depend
+# on a live LLM decision rather than a deterministic Python indicator.
+LLM_FILTER_FIELDS = {
+    "gemini_rejected",
+    "gemini_approved",
+    "gatekeeper_rejected",
+    "gatekeeper_approved",
+    "llm_approved",
+    "llm_rejected",
+    "llm_result",
 }
 
 # IST offset
@@ -203,6 +218,14 @@ def validate_hypothesis(data: dict) -> tuple[bool, str]:
         if block_when is not None:
             if not isinstance(block_when, dict):
                 return False, "filter.block_when must be a mapping"
+            # Check LLM-dependent fields FIRST — clearer error than "unsupported"
+            llm_fields = set(block_when.keys()) & LLM_FILTER_FIELDS
+            if llm_fields:
+                return False, (
+                    f"filter.block_when must not depend on LLM/gatekeeper results. "
+                    f"Found LLM-dependent fields: {sorted(llm_fields)}. "
+                    f"Filters must use only deterministic Python indicator fields."
+                )
             unsupported = set(block_when.keys()) - SUPPORTED_FILTER_FIELDS
             if unsupported:
                 return False, (
@@ -219,12 +242,14 @@ def validate_hypothesis(data: dict) -> tuple[bool, str]:
     if _has_pairs_fields(data):
         return False, "Hypothesis contains pairs/equity fields (cointegration, z_score, spread, hedge_ratio, coint_pvalue) — pairs trading is out of scope"
 
-    # --- LLM live gatekeeper phrase rejection ---
+    # --- Prohibited phrase check: scan whole document ---
+    # PROHIBITED_PHRASES no longer includes "gemini gatekeeper", so evidence/description
+    # freely mentioning "Gemini gatekeeper" as the live entry gatekeeper will pass.
+    # "live approval", "live rejection", "live gatekeeper" remain prohibited everywhere.
     if _scan_for_prohibited(data):
         return False, (
-            "Hypothesis text contains prohibited phrase(s) implying LLM live-gatekeeper use "
-            "(e.g. 'gemini gatekeeper', 'live approval', 'live rejection', 'live gatekeeper'). "
-            "LLM is postmarket research only."
+            f"Hypothesis contains prohibited phrase(s) implying live LLM gate use "
+            f"({sorted(PROHIBITED_PHRASES)}). These phrases are not allowed."
         )
 
     return True, ""
