@@ -89,6 +89,8 @@ from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
 from tools.gemini_gatekeeper import GeminiGatekeeper
 from tools.candidate_audit import CandidateAudit
+from tools.atm_option_recorder import ATMOptionRecorder
+from tools.options_chain import OptionsChain
 from tools.position_serial import (
     build_status_message,
     save_position_index,
@@ -133,6 +135,8 @@ class BlitzTrader:
         self._promoted_futures_filters: list = []
         # Gemini entry gatekeeper (approve/reject every Python-passed signal)
         self._gatekeeper: GeminiGatekeeper | None = None
+        # ATM option OHLCV/depth recorder (intraday, CE+PE for NIFTY+BANKNIFTY)
+        self._atm_recorder: ATMOptionRecorder | None = None
 
     def run(self):
         """Run the full trading session."""
@@ -440,6 +444,18 @@ class BlitzTrader:
         # Candidate audit log — durable JSONL record of every signal at every stage
         self._audit = CandidateAudit(CANDIDATE_AUDIT_DIR)
         logger.info("Candidate audit log: %s", CANDIDATE_AUDIT_DIR)
+
+        # ATM option recorder — logs OHLCV/OI/depth for ATM CE+PE every minute
+        try:
+            _chain = OptionsChain(self._shoonya)
+            self._atm_recorder = ATMOptionRecorder(
+                base_dir=DATA_EXPORTS_DIR,
+                shoonya_client=self._shoonya,
+                options_chain=_chain,
+            )
+            logger.info("✓ ATM option recorder initialized at %s", self._atm_recorder.export_dir)
+        except Exception:
+            logger.warning("ATM option recorder failed to initialize (non-fatal)", exc_info=True)
 
         logger.info("All components initialized successfully")
 
@@ -908,6 +924,20 @@ class BlitzTrader:
                             logger.debug(f"Scanner notes: {scan_result['notes']}")
                     except Exception:
                         logger.exception("Background scanner error (non-fatal)")
+
+                # ── Sample ATM option data (once per minute per contract) ──
+                if self._atm_recorder and self._feed:
+                    for _sym in TRADE_SYMBOLS:
+                        _tok_info = self._active_tokens.get(_sym, {}) if self._active_tokens else {}
+                        _tok = _tok_info.get("token")
+                        if _tok:
+                            _ltp = self._feed.get_ltp(_tok)
+                            if _ltp and _ltp > 0:
+                                self._atm_recorder.update_atm(_sym, _ltp)
+                    try:
+                        self._atm_recorder.sample_due_contracts()
+                    except Exception:
+                        logger.debug("ATM recorder sample error (non-fatal)", exc_info=True)
 
                 # ── Check daily loss limit ──
                 state = self._state.get_state()
@@ -1448,6 +1478,13 @@ class BlitzTrader:
         if self._agent:
             usage = self._agent.get_token_usage()
             logger.info(f"Total token usage: {usage}")
+
+        # Flush ATM option recorder (force-sample all tracked contracts at EOD)
+        if self._atm_recorder:
+            try:
+                self._atm_recorder.flush()
+            except Exception:
+                logger.warning("ATM recorder EOD flush failed (non-fatal)", exc_info=True)
 
         # Stop feed before exporting so CSV files are no longer being appended.
         if self._feed:

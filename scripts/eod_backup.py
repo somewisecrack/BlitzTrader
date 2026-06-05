@@ -160,7 +160,7 @@ def main() -> None:
     parser.add_argument("--date", default=None,
                         help="Date YYYY-MM-DD (default: today IST)")
     parser.add_argument("--runtime-root", default=None,
-                        help="Runtime storage dir (default: RUNTIME_STORAGE_DIR env or /opt/blitztrader/runtime)")
+                        help="Runtime storage dir (default: RUNTIME_STORAGE_DIR env or /opt/blitztrader)")
     parser.add_argument("--remote", default=None,
                         help="rclone remote name (default: RCLONE_REMOTE env or 'gdrive')")
     parser.add_argument("--folder", default=None,
@@ -177,7 +177,7 @@ def main() -> None:
     date_str = run_date.strftime("%Y%m%d")
 
     runtime_dir = Path(
-        args.runtime_root or os.environ.get("RUNTIME_STORAGE_DIR", "/opt/blitztrader/runtime")
+        args.runtime_root or os.environ.get("RUNTIME_STORAGE_DIR", "/opt/blitztrader")
     ).expanduser().resolve()
 
     remote = args.remote or os.environ.get("RCLONE_REMOTE", "gdrive")

@@ -401,3 +401,36 @@ class OptionsChain:
         """Convert a spread width in points to number of strike steps."""
         step = _STRIKE_STEP.get(symbol.upper(), 50)
         return max(1, round(width_points / step))
+
+    # ── ATMOptionRecorder adapter methods ─────────────────────────────────────
+
+    def get_nearest_expiry(self, symbol: str) -> Optional[str]:
+        """Return the nearest upcoming expiry as 'DD-MMM-YYYY' string, or None.
+
+        Used by ATMOptionRecorder.  Includes today's expiry so same-day options
+        can be tracked on expiry day.
+        """
+        expiries = self.get_available_expiries(symbol, after_today=True, exclude_today=False)
+        if not expiries:
+            return None
+        return expiries[0].strftime("%-d-%b-%Y").upper()
+
+    def resolve_option(
+        self,
+        symbol: str,
+        expiry: str,
+        strike: int,
+        option_type: str,
+    ) -> Optional[dict]:
+        """Resolve a single option contract by expiry string.
+
+        expiry: 'DD-MMM-YYYY' string (e.g. '26-JUN-2026')
+        Returns dict with at minimum {"token": ..., "tsym": ...}, or None.
+        Used by ATMOptionRecorder.
+        """
+        try:
+            expiry_date = datetime.strptime(expiry, _EXPIRY_FORMAT).date()
+        except ValueError:
+            logger.error("resolve_option: bad expiry string %r", expiry)
+            return None
+        return self.resolve_option_token(symbol, expiry_date, strike, option_type)
