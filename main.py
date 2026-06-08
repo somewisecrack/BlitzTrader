@@ -1712,6 +1712,17 @@ class BlitzTrader:
             logger.info("Skipping data export upload before 15:15 IST")
             return
         self._data_export_upload_attempted = True
+        if RCLONE_REMOTE and not GOOGLE_DRIVE_UPLOAD_DIR:
+            logger.info(
+                "Data export finalized locally; the 16:00 EOD backup service "
+                "owns the single rclone upload"
+            )
+            if self._telegram:
+                self._telegram.send_telegram(
+                    "📊 Data export saved locally. Google Drive backup is "
+                    "scheduled for 16:00 IST."
+                )
+            return
         try:
             result = self._data_recorder.finalize_and_upload()
             logger.info(f"Data export result: {result}")

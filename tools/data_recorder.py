@@ -15,6 +15,8 @@ from errno import ENOSPC
 from datetime import datetime
 from pathlib import Path
 
+from tools.rclone_utils import run_rclone_with_backoff
+
 import pytz
 
 logger = logging.getLogger("BlitzTrader.DataRecorder")
@@ -255,10 +257,14 @@ class DataRecorder:
             if self._rclone_folder:
                 remote_path += f"{self._rclone_folder}/"
             remote_path += f"data_exports/{self._date}"
-            proc = subprocess.run(
-                ["rclone", "copy", str(self._day_dir), remote_path],
-                capture_output=True,
-                text=True,
+            proc = run_rclone_with_backoff(
+                ["copy", str(self._day_dir), remote_path],
+                on_retry=lambda attempt, delay, _error: logger.warning(
+                    "Google Drive quota limit during export upload; "
+                    "retry %s in %ss",
+                    attempt + 1,
+                    delay,
+                ),
             )
             if proc.returncode != 0:
                 error_text = (proc.stderr or proc.stdout or "").strip()
