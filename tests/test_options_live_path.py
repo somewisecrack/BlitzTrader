@@ -211,10 +211,12 @@ class TestMainPyImportsSpreadComponents(unittest.TestCase):
         self.assertTrue(hasattr(bot, "_spread_exec"))
         self.assertTrue(hasattr(bot, "_spread_portfolio"))
         self.assertTrue(hasattr(bot, "_options_chain"))
+        self.assertTrue(hasattr(bot, "_atm_recorder"))
         # All should be None before _initialize() is called
         self.assertIsNone(bot._spread_builder)
         self.assertIsNone(bot._spread_exec)
         self.assertIsNone(bot._spread_portfolio)
+        self.assertIsNone(bot._atm_recorder)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

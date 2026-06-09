@@ -96,6 +96,7 @@ from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
 from tools.gemini_gatekeeper import GeminiGatekeeper
 from tools.candidate_audit import CandidateAudit
+from tools.atm_option_recorder import ATMOptionRecorder
 from tools.position_serial import (
     build_status_message,
     save_position_index,
@@ -150,6 +151,7 @@ class BlitzTrader:
         self._spread_builder: SpreadBuilder | None = None
         self._spread_exec: SpreadExecutionEngine | None = None
         self._spread_portfolio: SpreadPortfolio | None = None
+        self._atm_recorder: ATMOptionRecorder | None = None
 
     def run(self):
         """Run the full trading session."""
@@ -319,6 +321,10 @@ class BlitzTrader:
             else:
                 logger.warning(f"Futures lookup failed for {sym} — using index token")
 
+        # Keep the NIFTY spot index subscribed separately. Trading signals use
+        # front-month futures, but weekly-option ATM classification uses spot.
+        active_tokens["NIFTY_SPOT"] = dict(NSE_TOKENS["NIFTY"])
+
         # Store resolved tokens so the iteration context can surface them to the agent.
         self._active_tokens = active_tokens
 
@@ -416,6 +422,22 @@ class BlitzTrader:
             virtual=_virtual,
         )
         logger.info("✓ Options spread components initialized")
+
+        try:
+            self._atm_recorder = ATMOptionRecorder(
+                base_dir=DATA_EXPORTS_DIR,
+                shoonya_client=self._shoonya,
+                options_chain=self._options_chain,
+            )
+            logger.info(
+                "✓ NIFTY ATM/ATM±1 recorder initialized at %s",
+                self._atm_recorder.export_dir,
+            )
+        except Exception:
+            logger.warning(
+                "NIFTY ATM ladder recorder failed to initialize (non-fatal)",
+                exc_info=True,
+            )
 
         # 8. Journal (with state_manager for ground-truth injection)
         journal = JournalWriter(JOURNALS_DIR, VIRTUAL_CAPITAL, state_manager=self._state)
@@ -1095,6 +1117,23 @@ class BlitzTrader:
                         except Exception:
                             logger.exception("Spread portfolio monitoring error (non-fatal)")
 
+                # NIFTY weekly-option research recorder. Classification uses the
+                # spot index token; every activated ATM/ATM±1 strike remains
+                # sampled for the rest of the session.
+                if self._atm_recorder and self._feed:
+                    spot_token = self._active_tokens.get("NIFTY_SPOT", {}).get("token")
+                    if spot_token:
+                        spot_ltp = self._feed.get_ltp(spot_token)
+                        if spot_ltp and spot_ltp > 0:
+                            self._atm_recorder.update_atm("NIFTY", spot_ltp)
+                    try:
+                        self._atm_recorder.sample_due_contracts()
+                    except Exception:
+                        logger.warning(
+                            "NIFTY ATM ladder sample failed (non-fatal)",
+                            exc_info=True,
+                        )
+
                 # ── Check daily loss limit ──
                 state = self._state.get_state()
                 if state.get("is_stopped"):
@@ -1686,6 +1725,15 @@ class BlitzTrader:
         if self._agent:
             usage = self._agent.get_token_usage()
             logger.info(f"Total token usage: {usage}")
+
+        if self._atm_recorder:
+            try:
+                self._atm_recorder.flush()
+            except Exception:
+                logger.warning(
+                    "NIFTY ATM ladder EOD flush failed (non-fatal)",
+                    exc_info=True,
+                )
 
         # Stop feed before exporting so CSV files are no longer being appended.
         if self._feed:
