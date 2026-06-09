@@ -47,30 +47,153 @@ _DEFAULT_FILL_TIMEOUT = 300  # seconds
 #   LIVE P&L
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _get_ltp(token: str, exchange: str, shoonya_client, live_feed) -> Optional[float]:
+# ── P&L rounding tolerance ────────────────────────────────────────────────────
+# A small absolute rupee tolerance added to max_profit / max_loss before
+# treating a P&L as outside defined-risk bounds.  This covers tick-size
+# rounding only (NIFTY tick=₹0.05, BANKNIFTY tick=₹0.05).
+# NOT an option-premium cap — this does not limit what price an option may have.
+_PNL_ROUNDING_TOLERANCE_RS = 25.0   # ₹25 absolute — handles tick-size noise
+
+
+def get_verified_option_quote(
+    exchange: str,
+    token: str,
+    expected_tsym: str,
+    shoonya_client,
+    live_feed,
+) -> dict:
     """
-    Fetch last traded price for an option token.
-    Priority: WebSocket LTP → REST quote.
-    Returns None if unavailable.
+    Fetch and identity-verify the current LTP for an NFO option contract.
+
+    Returns a structured result dict:
+      {
+        "ok":       bool,     # True if quote obtained and identity verified
+        "ltp":      float | None,
+        "source":   "websocket" | "rest" | "none",
+        "exchange": exchange,
+        "token":    token,
+        "tsym":     expected_tsym,
+        "raw":      dict | None,   # raw Shoonya response (REST) or cache entry (WS)
+        "reason":   ""             # non-empty on failure
+      }
+
+    Identity verification rules:
+    ──────────────────────────────
+    WebSocket path:
+      - Only accepted if the live_feed was subscribed via subscribe_with_tsym()
+        for this exact (exchange, token, tsym) triple.
+      - If metadata is absent or mismatched, the WebSocket value is skipped and
+        REST is tried.
+
+    REST path:
+      - Calls shoonya_client.get_quotes(exchange, token).
+      - If the response includes a "tsym" field, it must match expected_tsym.
+      - If the response includes a "token"/"tok" field, it must match token.
+      - If the response includes an "exch" field, it must match exchange.
+      - If any present identity field conflicts, the quote is rejected.
+      - If identity fields are absent from the response, the lp value is
+        accepted (no conflicting evidence of mismatch).
+      - lp must be > 0.
+
+    There are no hardcoded price caps.  The only numerical rejection criterion
+    is ltp <= 0.  Implausibly large prices (e.g. underlying index level) are
+    caught downstream by the defined-risk P&L bounds check.
     """
+    # ── WebSocket path (verified) ─────────────────────────────────────────────
     if live_feed:
         try:
-            ltp = live_feed.get_ltp(token)
-            if ltp:
-                return float(ltp)
-        except Exception:
-            pass
-    if shoonya_client:
-        try:
-            q = shoonya_client.get_quotes(exchange, token)
-            if q:
-                for key in ("lp", "ltp"):
-                    val = q.get(key)
-                    if val:
-                        return float(val)
-        except Exception:
-            pass
-    return None
+            entry = live_feed.get_live_quote_verified(token, exchange, expected_tsym)
+            if entry:
+                ltp = float(entry.get("ltp", 0))
+                if ltp > 0:
+                    return {
+                        "ok": True, "ltp": ltp, "source": "websocket",
+                        "exchange": exchange, "token": token, "tsym": expected_tsym,
+                        "raw": entry, "reason": "",
+                    }
+        except Exception as e:
+            logger.debug("get_verified_option_quote[%s]: WebSocket path error: %s", token, e)
+
+    # ── REST path (with identity verification from response fields) ───────────
+    if not shoonya_client:
+        return {
+            "ok": False, "ltp": None, "source": "none",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": None, "reason": "no_quote_source_available",
+        }
+
+    try:
+        resp = shoonya_client.get_quotes(exchange, token)
+    except Exception as e:
+        return {
+            "ok": False, "ltp": None, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": None, "reason": f"rest_exception: {e}",
+        }
+
+    if not resp or resp.get("stat") != "Ok":
+        emsg = (resp or {}).get("emsg", "no response")
+        return {
+            "ok": False, "ltp": None, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": resp, "reason": f"rest_failed: {emsg}",
+        }
+
+    # Extract lp
+    ltp_raw = resp.get("lp") or resp.get("ltp")
+    if ltp_raw is None:
+        return {
+            "ok": False, "ltp": None, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": resp, "reason": "rest_missing_lp_field",
+        }
+    try:
+        ltp = float(ltp_raw)
+    except (TypeError, ValueError):
+        return {
+            "ok": False, "ltp": None, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": resp, "reason": f"rest_lp_not_numeric: {ltp_raw!r}",
+        }
+    if ltp <= 0:
+        return {
+            "ok": False, "ltp": ltp, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": resp, "reason": f"rest_non_positive_ltp: {ltp}",
+        }
+
+    # Identity fields — only reject if present AND conflicting
+    resp_token = str(resp.get("token") or resp.get("tok") or "").strip()
+    resp_tsym  = str(resp.get("tsym") or "").strip()
+    resp_exch  = str(resp.get("exch") or resp.get("exchange") or "").strip().upper()
+
+    if resp_token and resp_token != str(token):
+        return {
+            "ok": False, "ltp": ltp, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": resp,
+            "reason": f"rest_token_mismatch: expected {token!r}, got {resp_token!r}",
+        }
+    if resp_tsym and resp_tsym != expected_tsym:
+        return {
+            "ok": False, "ltp": ltp, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": resp,
+            "reason": f"rest_tsym_mismatch: expected {expected_tsym!r}, got {resp_tsym!r}",
+        }
+    if resp_exch and resp_exch != exchange.upper():
+        return {
+            "ok": False, "ltp": ltp, "source": "rest",
+            "exchange": exchange, "token": token, "tsym": expected_tsym,
+            "raw": resp,
+            "reason": f"rest_exchange_mismatch: expected {exchange!r}, got {resp_exch!r}",
+        }
+
+    return {
+        "ok": True, "ltp": ltp, "source": "rest",
+        "exchange": exchange, "token": token, "tsym": expected_tsym,
+        "raw": resp, "reason": "",
+    }
 
 
 def compute_spread_pnl(
@@ -79,53 +202,99 @@ def compute_spread_pnl(
     live_feed,
 ) -> dict:
     """
-    Compute current P&L for an open spread.
+    Compute current P&L for an open spread with exact quote identity verification.
 
-    For a BOUGHT option (long leg): current value = current LTP
-    For a SOLD option (short leg):  current liability = current LTP
+    P&L formula (uniform for debit and credit):
+      pnl = (long_ltp  - long_fill)  * qty
+          - (short_ltp - short_fill) * qty
 
-    current_value_long  = long_ltp  * lot_size * lots
-    current_liability_short = short_ltp * lot_size * lots
+    Two layers of validation are applied before returning data_ok=True:
+      1. Quote identity: each leg's LTP must come from the exact NFO option contract
+         (verified via Shoonya response fields: token, tsym, exchange).
+         No hardcoded price caps — any positive lp from a verified contract is accepted.
+      2. Defined-risk P&L bounds: computed P&L must lie within
+         [-(max_loss + tolerance), +(max_profit + tolerance)]
+         where tolerance = ₹25 (tick-size rounding only, not a trading limit).
 
-    For DEBIT spreads (net_debit_or_credit >= 0):
-      pnl = (long_ltp - short_ltp) * lot_size * lots - net_debit_or_credit * lot_size * lots
-          = ((long_ltp - short_ltp) - net_debit_or_credit) * lot_size * lots
+    If either check fails: data_ok=False, unrealized_pnl=None, full details logged.
 
-    For CREDIT spreads (net_debit_or_credit < 0, i.e. net_credit = -net_debit_or_credit):
-      pnl = net_credit * lot_size * lots - (short_ltp - long_ltp) * lot_size * lots
-          = (net_credit - (short_ltp - long_ltp)) * lot_size * lots
-
-    Simplified uniformly:
-      pnl = (long_ltp - long_fill) * lot_size * lots
-          - (short_ltp - short_fill) * lot_size * lots
-
-    Returns dict with keys: long_ltp, short_ltp, unrealized_pnl, data_ok
+    Returns dict with keys:
+      long_ltp, short_ltp, unrealized_pnl, data_ok[, reason, source_long, source_short]
     """
-    lot_size = spread.lot_size
-    lots = spread.lots
-    qty = lot_size * lots
+    qty = spread.lot_size * spread.lots
 
-    long_ltp = _get_ltp(spread.long_token, "NFO", shoonya_client, live_feed)
-    short_ltp = _get_ltp(spread.short_token, "NFO", shoonya_client, live_feed)
+    long_q  = get_verified_option_quote("NFO", spread.long_token,  spread.long_tsym,  shoonya_client, live_feed)
+    short_q = get_verified_option_quote("NFO", spread.short_token, spread.short_tsym, shoonya_client, live_feed)
 
-    if long_ltp is None or short_ltp is None:
+    long_ltp    = long_q["ltp"]
+    short_ltp   = short_q["ltp"]
+    source_long  = long_q["source"]
+    source_short = short_q["source"]
+
+    # ── Guard 1: quote identity / availability ────────────────────────────────
+    if not long_q["ok"] or not short_q["ok"]:
+        reasons = []
+        if not long_q["ok"]:
+            reasons.append(f"long({spread.long_tsym}): {long_q['reason']}")
+        if not short_q["ok"]:
+            reasons.append(f"short({spread.short_tsym}): {short_q['reason']}")
+        reason_str = "; ".join(reasons)
+        logger.error(
+            "compute_spread_pnl[%s]: QUOTE VERIFICATION FAILED — %s",
+            spread.spread_id, reason_str,
+        )
         return {
-            "long_ltp": long_ltp,
-            "short_ltp": short_ltp,
-            "unrealized_pnl": None,
-            "data_ok": False,
+            "long_ltp": long_ltp, "short_ltp": short_ltp,
+            "unrealized_pnl": None, "data_ok": False,
+            "reason": f"quote_verification_failed: {reason_str}",
+            "source_long": source_long, "source_short": source_short,
         }
 
-    pnl = (
-        (long_ltp - spread.long_fill_price) * qty
-        - (short_ltp - spread.short_fill_price) * qty
+    # ── Raw P&L ───────────────────────────────────────────────────────────────
+    raw_pnl = (long_ltp - spread.long_fill_price) * qty \
+            - (short_ltp - spread.short_fill_price) * qty
+
+    # ── Guard 2: defined-risk P&L bounds ─────────────────────────────────────
+    # Small rounding tolerance (₹25) for tick-size noise — not a price cap.
+    tol = _PNL_ROUNDING_TOLERANCE_RS
+    if raw_pnl > spread.max_profit + tol or raw_pnl < -(spread.max_loss + tol):
+        reason_str = (
+            f"pnl ₹{raw_pnl:+.2f} outside defined-risk bounds "
+            f"[₹{-(spread.max_loss + tol):.2f}, ₹{spread.max_profit + tol:.2f}] "
+            f"(max_profit=₹{spread.max_profit:.2f}, max_loss=₹{spread.max_loss:.2f}, "
+            f"tolerance=₹{tol:.2f})"
+        )
+        logger.error(
+            "compute_spread_pnl[%s]: P&L OUTSIDE DEFINED RISK — %s "
+            "(long=%s ltp=%.2f src=%s, short=%s ltp=%.2f src=%s)",
+            spread.spread_id, reason_str,
+            spread.long_tsym,  long_ltp,  source_long,
+            spread.short_tsym, short_ltp, source_short,
+        )
+        return {
+            "long_ltp": long_ltp, "short_ltp": short_ltp,
+            "unrealized_pnl": None, "data_ok": False,
+            "reason": f"invalid_pnl_outside_defined_risk: {reason_str}",
+            "source_long": source_long, "source_short": source_short,
+        }
+
+    logger.debug(
+        "compute_spread_pnl[%s]: long=%s ltp=%.2f(%s) fill=%.2f | "
+        "short=%s ltp=%.2f(%s) fill=%.2f | pnl=₹%+.2f | "
+        "max_profit=₹%.2f max_loss=₹%.2f",
+        spread.spread_id,
+        spread.long_tsym,  long_ltp,  source_long,  spread.long_fill_price,
+        spread.short_tsym, short_ltp, source_short, spread.short_fill_price,
+        raw_pnl, spread.max_profit, spread.max_loss,
     )
 
     return {
-        "long_ltp": long_ltp,
-        "short_ltp": short_ltp,
-        "unrealized_pnl": pnl,
-        "data_ok": True,
+        "long_ltp":       long_ltp,
+        "short_ltp":      short_ltp,
+        "unrealized_pnl": raw_pnl,
+        "data_ok":        True,
+        "source_long":    source_long,
+        "source_short":   source_short,
     }
 
 
@@ -199,6 +368,7 @@ class SpreadPortfolio:
         credit_tp_fraction: float = 0.60,
         debit_tp_fraction: float = 0.70,
         fill_timeout_seconds: int = _DEFAULT_FILL_TIMEOUT,
+        virtual: bool = True,
     ):
         self._client = shoonya_client
         self._state = state_manager
@@ -207,6 +377,9 @@ class SpreadPortfolio:
         self._credit_tp_frac = credit_tp_fraction
         self._debit_tp_frac = debit_tp_fraction
         self._fill_timeout = fill_timeout_seconds
+        self._virtual = virtual
+        # Track invalid-quote incidents for EOD reporting
+        self._invalid_quote_count: int = 0
 
     # ── Portfolio accessors ───────────────────────────────────────────────────
 
@@ -229,6 +402,60 @@ class SpreadPortfolio:
     def count_open_spreads(self) -> int:
         return len(self.get_open_spreads())
 
+    def subscribe_spread_legs(self, spread: "OpenSpread") -> None:
+        """
+        Subscribe both option leg tokens to the live WebSocket feed WITH tsym metadata.
+
+        Using subscribe_with_tsym() registers (exchange, token, tsym) triples so that
+        get_live_quote_verified() can confirm any WebSocket tick actually belongs to
+        the intended option contract before using it for P&L.
+        """
+        if not self._feed:
+            return
+        triples = [
+            ("NFO", spread.long_token,  spread.long_tsym),
+            ("NFO", spread.short_token, spread.short_tsym),
+        ]
+        try:
+            self._feed.subscribe_with_tsym(triples)
+            logger.info(
+                "subscribe_spread_legs[%s]: subscribed NFO|%s(%s), NFO|%s(%s)",
+                spread.spread_id,
+                spread.long_token, spread.long_tsym,
+                spread.short_token, spread.short_tsym,
+            )
+        except Exception:
+            logger.exception("subscribe_spread_legs[%s]: failed", spread.spread_id)
+
+    def unsubscribe_spread_legs(self, spread: "OpenSpread") -> None:
+        """
+        Unsubscribe option leg tokens from the live feed after a spread closes,
+        provided no other open spread still needs those tokens.
+        """
+        if not self._feed:
+            return
+        open_spreads = self.get_open_spreads()
+        still_needed = {
+            tok
+            for s in open_spreads
+            if s.spread_id != spread.spread_id
+            for tok in (s.long_token, s.short_token)
+        }
+        to_unsub = [
+            ("NFO", tok)
+            for tok in (spread.long_token, spread.short_token)
+            if tok not in still_needed
+        ]
+        if to_unsub:
+            try:
+                self._feed.unsubscribe(to_unsub)
+                logger.info(
+                    "unsubscribe_spread_legs[%s]: unsubscribed %s",
+                    spread.spread_id, to_unsub,
+                )
+            except Exception:
+                logger.exception("unsubscribe_spread_legs[%s]: failed", spread.spread_id)
+
     # ── Scan tick ─────────────────────────────────────────────────────────────
 
     def check_and_exit_spreads(self, force_close_all: bool = False) -> list[dict]:
@@ -243,6 +470,15 @@ class SpreadPortfolio:
 
         for spread in open_spreads:
             pnl_data = compute_spread_pnl(spread, self._client, self._feed)
+
+            # Track invalid-quote incidents for session reporting
+            if not pnl_data.get("data_ok") and not force_close_all:
+                self._invalid_quote_count += 1
+                logger.warning(
+                    "check_and_exit_spreads[%s]: quote invalid — %s — skip exit check",
+                    spread.spread_id, pnl_data.get("reason", "unknown"),
+                )
+
             do_exit, reason = should_exit(
                 spread, pnl_data,
                 max_loss_exit_fraction=self._max_loss_frac,
@@ -267,17 +503,134 @@ class SpreadPortfolio:
         """
         Close both legs of an open spread.
 
-        Close order: buy-to-close short leg FIRST (reduces naked risk),
-                     then sell-to-close long leg.
+        In virtual mode fills are taken from live quotes (pnl_data) if available,
+        otherwise from entry prices.  No broker API calls are made.
+
+        In live mode close order is: buy-to-close short leg FIRST (reduces naked
+        risk), then sell-to-close long leg.
 
         Returns structured result dict.
         """
         qty = spread.lot_size * spread.lots
         logger.info(
-            "close_spread[%s]: closing %s %s reason=%r qty=%d",
+            "close_spread[%s]: closing %s %s reason=%r qty=%d mode=%s",
             spread.spread_id, spread.symbol, spread.spread_type, reason, qty,
+            "VIRTUAL" if self._virtual else "LIVE",
         )
 
+        if self._virtual and pnl_data is None:
+            pnl_data = compute_spread_pnl(spread, self._client, self._feed)
+
+        if self._virtual:
+            return self._close_spread_virtual(spread, reason, pnl_data, qty)
+        return self._close_spread_live(spread, reason, pnl_data, qty)
+
+    def _close_spread_virtual(
+        self,
+        spread: OpenSpread,
+        reason: str,
+        pnl_data: Optional[dict],
+        qty: int,
+    ) -> dict:
+        """
+        Simulate spread close without broker API calls.
+
+        Close prices are taken from pnl_data LTPs ONLY if pnl_data passed full
+        quote identity verification AND defined-risk P&L bounds (data_ok=True).
+
+        There is NO fallback to entry prices for any type of close — not for
+        automatic exits, not for manual exits, not for EOD forced close.
+        Using invented prices would corrupt realized P&L and daily_pnl.
+
+        If pnl_data is invalid/unavailable:
+          - For threshold exits and manual exits: refuse, spread stays open.
+          - For EOD forced close: mark spread close_failed_quote_unavailable
+            WITHOUT updating daily_pnl or removing the spread from state. This
+            keeps the failure visible instead of erasing a position with
+            invented prices.
+        """
+        data_valid = pnl_data and pnl_data.get("data_ok")
+
+        if not data_valid:
+            reason_detail = (pnl_data or {}).get("reason", "no_pnl_data")
+            is_eod = "eod" in reason.lower() or "force" in reason.lower()
+
+            if is_eod:
+                logger.error(
+                    "close_spread[%s]: EOD close — quote unavailable/invalid: %s. "
+                    "Spread left open and marked close_failed, daily_pnl NOT updated.",
+                    spread.spread_id, reason_detail,
+                )
+                self._mark_spread_close_failed(
+                    spread.spread_id,
+                    reason=f"eod_close_failed_quote_unavailable: {reason_detail}",
+                )
+                return {
+                    "ok": False,
+                    "spread_id": spread.spread_id,
+                    "eod_close_failed": True,
+                    "error": f"EOD close failed: quote unavailable ({reason_detail})",
+                    "emergency": False,
+                }
+            else:
+                # Any other close with invalid data: refuse, spread stays open
+                logger.error(
+                    "close_spread[%s]: REFUSED — quote invalid/unavailable: %s. "
+                    "Spread remains open, daily_pnl unchanged.",
+                    spread.spread_id, reason_detail,
+                )
+                return {
+                    "ok": False,
+                    "spread_id": spread.spread_id,
+                    "error": f"close refused: invalid quote data ({reason_detail})",
+                    "emergency": False,
+                }
+
+        btc_fill = pnl_data["short_ltp"]
+        stc_fill = pnl_data["long_ltp"]
+
+        realized_pnl = (
+            (stc_fill - spread.long_fill_price) * qty
+            - (btc_fill - spread.short_fill_price) * qty
+        )
+
+        # realized_pnl already within defined-risk bounds (guaranteed by compute_spread_pnl
+        # which is the only source of data_ok=True pnl_data that reaches here).
+        self._remove_spread_from_state(spread.spread_id, realized_pnl=realized_pnl, reason=reason)
+        self._update_daily_pnl(realized_pnl)
+        self.unsubscribe_spread_legs(spread)
+
+        message = (
+            f"[VIRTUAL] Spread {spread.spread_id} closed ({reason}): "
+            f"{spread.symbol} {spread.spread_type}\n"
+            f"  Short closed: {spread.short_tsym} @ ₹{btc_fill:.2f}\n"
+            f"  Long  closed: {spread.long_tsym} @ ₹{stc_fill:.2f}\n"
+            f"  Realized P&L: ₹{realized_pnl:+.2f}"
+        )
+        logger.info("close_spread[%s]: %s", spread.spread_id, message)
+
+        return {
+            "ok": True,
+            "spread_id": spread.spread_id,
+            "symbol": spread.symbol,
+            "spread_type": spread.spread_type,
+            "reason": reason,
+            "realized_pnl": realized_pnl,
+            "short_close_price": btc_fill,
+            "long_close_price": stc_fill,
+            "message": message,
+        }
+
+    def _close_spread_live(
+        self,
+        spread: OpenSpread,
+        reason: str,
+        pnl_data: Optional[dict],
+        qty: int,
+    ) -> dict:
+        """
+        Live broker path: buy-to-close short leg first, then sell-to-close long leg.
+        """
         # ── Step 1: Buy-to-close short leg ────────────────────────────────
         btc_order_id, err = self._place_close_order(
             tsym=spread.short_tsym,
@@ -287,8 +640,7 @@ class SpreadPortfolio:
         )
         if btc_order_id is None:
             logger.error(
-                "close_spread[%s]: short leg close failed — %s; "
-                "leaving spread open",
+                "close_spread[%s]: short leg close failed — %s; leaving spread open",
                 spread.spread_id, err,
             )
             return {
@@ -331,7 +683,6 @@ class SpreadPortfolio:
                 spread.spread_id, spread.long_tsym,
             )
             self._emergency_close_long(spread.long_tsym, qty)
-            # Still remove from state so we don't retry
             self._remove_spread_from_state(spread.spread_id)
             return {
                 "ok": False,
@@ -362,18 +713,13 @@ class SpreadPortfolio:
             spread.spread_id, spread.long_tsym, stc_fill,
         )
 
-        # ── Compute realized P&L ───────────────────────────────────────────
-        qty_full = qty
         realized_pnl = (
-            (stc_fill - spread.long_fill_price) * qty_full
-            - (btc_fill - spread.short_fill_price) * qty_full
+            (stc_fill - spread.long_fill_price) * qty
+            - (btc_fill - spread.short_fill_price) * qty
         )
 
-        # ── Update state ───────────────────────────────────────────────────
-        now_ist = datetime.now(IST)
-        self._remove_spread_from_state(spread.spread_id)
+        self._remove_spread_from_state(spread.spread_id, realized_pnl=realized_pnl, reason=reason)
         self._update_daily_pnl(realized_pnl)
-        self._record_closed_spread(spread, btc_fill, stc_fill, realized_pnl, reason, now_ist)
 
         message = (
             f"Spread {spread.spread_id} closed ({reason}): "
@@ -410,9 +756,11 @@ class SpreadPortfolio:
             return None, "no Shoonya client (paper mode)"
         price_type = "LMT" if ref_price and ref_price > 0 else "MKT"
         price = ref_price if price_type == "LMT" else 0
+        # Shoonya API: buy_or_sell uses 'B' / 'S' (not full words)
+        shoonya_side = "B" if action == "BUY" else "S"
         try:
             resp = self._client.place_order(
-                buy_or_sell=action,
+                buy_or_sell=shoonya_side,
                 product_type="M",
                 exchange="NFO",
                 tradingsymbol=tsym,
@@ -468,7 +816,7 @@ class SpreadPortfolio:
             return
         try:
             resp = self._client.place_order(
-                buy_or_sell="SELL",
+                buy_or_sell="S",           # Shoonya API: 'S' not 'SELL'
                 product_type="M",
                 exchange="NFO",
                 tradingsymbol=tsym,
@@ -489,66 +837,107 @@ class SpreadPortfolio:
 
     # ── State mutations ───────────────────────────────────────────────────────
 
-    def _record_closed_spread(
-        self,
-        spread: OpenSpread,
-        short_close_price: float,
-        long_close_price: float,
-        realized_pnl: float,
-        close_reason: str,
-        closed_at: datetime,
+    def _remove_spread_from_state(
+        self, spread_id: str, realized_pnl: Optional[float] = None, reason: str = ""
     ) -> None:
-        """Append a closed spread to the durable spreads_traded ledger."""
-        try:
-            record = {
-                "spread_id": spread.spread_id,
-                "symbol": spread.symbol,
-                "spread_type": spread.spread_type,
-                "direction": spread.direction,
-                "strategy": spread.strategy,
-                "signal_id": spread.signal_id,
-                "opened_at": spread.opened_at,
-                "closed_at": closed_at.isoformat(),
-                "long_tsym": spread.long_tsym,
-                "long_token": spread.long_token,
-                "long_fill_price": spread.long_fill_price,
-                "long_close_price": long_close_price,
-                "short_tsym": spread.short_tsym,
-                "short_token": spread.short_token,
-                "short_fill_price": spread.short_fill_price,
-                "short_close_price": short_close_price,
-                "realized_pnl": round(realized_pnl, 2),
-                "close_reason": close_reason,
-                "max_profit": spread.max_profit,
-                "max_loss": spread.max_loss,
-                "expiry": spread.expiry,
-                "lot_size": spread.lot_size,
-                "lots": spread.lots,
-                "underlying_at_entry": spread.underlying_at_entry,
-                "quote_source": "shoonya",
-            }
-            self._state.add_traded_spread(record)
-        except Exception:
-            logger.exception("_record_closed_spread failed for %s (non-fatal)", spread.spread_id)
-
-    def _remove_spread_from_state(self, spread_id: str) -> None:
         try:
             state = self._state.get_state()
             open_spreads = [
                 s for s in (state.get("open_spreads", []) or [])
                 if s.get("spread_id") != spread_id
             ]
-            self._state.update_state(open_spreads=open_spreads)
+            # Mark closed in spreads_traded ledger
+            spreads_traded = list(state.get("spreads_traded", []) or [])
+            for t in spreads_traded:
+                if t.get("spread_id") == spread_id:
+                    t["closed"] = True
+                    if realized_pnl is not None:
+                        t["realized_pnl"] = realized_pnl
+                    if reason:
+                        t["close_reason"] = reason
+                    break
+            self._state.update_state(
+                open_spreads=open_spreads,
+                spreads_traded=spreads_traded,
+            )
         except Exception:
             logger.exception("_remove_spread_from_state failed for %s (non-fatal)", spread_id)
 
-    def _update_daily_pnl(self, realized_pnl: float) -> None:
+    def _mark_spread_close_failed(self, spread_id: str, reason: str) -> None:
+        """Record a failed close attempt without removing the spread or mutating P&L."""
         try:
             state = self._state.get_state()
+            open_spreads = list(state.get("open_spreads", []) or [])
+            for spread in open_spreads:
+                if spread.get("spread_id") == spread_id:
+                    spread["close_failed"] = True
+                    spread["close_failed_reason"] = reason
+                    spread["close_failed_at"] = datetime.now(IST).isoformat()
+                    break
+
+            spreads_traded = list(state.get("spreads_traded", []) or [])
+            for traded in spreads_traded:
+                if traded.get("spread_id") == spread_id:
+                    traded["close_failed"] = True
+                    traded["close_failed_reason"] = reason
+                    traded["close_failed_at"] = datetime.now(IST).isoformat()
+                    break
+
+            self._state.update_state(
+                open_spreads=open_spreads,
+                spreads_traded=spreads_traded,
+            )
+        except Exception:
+            logger.exception("_mark_spread_close_failed failed for %s (non-fatal)", spread_id)
+
+    def _update_daily_pnl(self, realized_pnl: float) -> None:
+        """Update daily P&L in state. Guards against NaN/inf corruption."""
+        try:
+            import math
+            if not math.isfinite(realized_pnl):
+                logger.error(
+                    "_update_daily_pnl: non-finite P&L ₹%s rejected", realized_pnl
+                )
+                return
+            state = self._state.get_state()
             current = float(state.get("daily_pnl", 0) or 0)
-            self._state.update_state(daily_pnl=current + realized_pnl)
+            new_pnl = current + realized_pnl
+            virtual_capital = float(state.get("virtual_capital", 1_000_000) or 1_000_000)
+            new_pct = (new_pnl / virtual_capital * 100) if virtual_capital else 0.0
+            self._state.update_state(
+                daily_pnl=new_pnl,
+                daily_pnl_pct=round(new_pct, 4),
+            )
         except Exception:
             logger.exception("_update_daily_pnl failed (non-fatal)")
+
+    def get_session_stats(self) -> dict:
+        """
+        Return structured session statistics for EOD reporting.
+        Reads spread trade history from state (spreads_traded list).
+        """
+        try:
+            state = self._state.get_state()
+            spreads_traded = state.get("spreads_traded", []) or []
+            realized = sum(t.get("realized_pnl", 0) for t in spreads_traded if isinstance(t.get("realized_pnl"), (int, float)))
+            open_spreads = self.get_open_spreads()
+            unrealized = 0.0
+            for sp in open_spreads:
+                pnl_data = compute_spread_pnl(sp, self._client, self._feed)
+                if pnl_data.get("data_ok") and pnl_data["unrealized_pnl"] is not None:
+                    unrealized += pnl_data["unrealized_pnl"]
+            return {
+                "spreads_opened":   len(spreads_traded),
+                "spreads_closed":   len([t for t in spreads_traded if t.get("closed")]),
+                "spreads_open_now": len(open_spreads),
+                "realized_pnl":     realized,
+                "unrealized_pnl":   unrealized,
+                "invalid_quote_incidents": self._invalid_quote_count,
+                "daily_pnl":        float(state.get("daily_pnl", 0) or 0),
+            }
+        except Exception:
+            logger.exception("get_session_stats failed")
+            return {}
 
     # ── Status summary ────────────────────────────────────────────────────────
 

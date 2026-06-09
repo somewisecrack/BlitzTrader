@@ -61,7 +61,8 @@ def _make_quote(ltp=50.0, bid=49.0, ask=51.0) -> dict:
 def _make_token_info(symbol="NIFTY", strike=24500, otype="CE",
                      expiry=None, lot_size=75) -> dict:
     expiry = expiry or date(2026, 5, 28)
-    tsym = f"{symbol}{expiry.strftime('%d%b%y').upper()}{strike}{otype}"
+    shoonya_otype = {"CE": "C", "PE": "P"}[otype]
+    tsym = f"{symbol}{expiry.strftime('%d%b%y').upper()}{shoonya_otype}{strike}"
     return {
         "token": f"T{strike}",
         "tsym": tsym,
@@ -84,8 +85,8 @@ def _make_open_spread(
     short_fill=20.0,
     long_token="T1",
     short_token="T2",
-    long_tsym="NIFTY28MAY2624500CE",
-    short_tsym="NIFTY28MAY2624600CE",
+    long_tsym="NIFTY28MAY26C24500",
+    short_tsym="NIFTY28MAY26C24600",
     lot_size=75,
     max_loss=2250.0,
     max_profit=5250.0,
@@ -235,6 +236,29 @@ class TestSpreadTypeSelection(unittest.TestCase):
     def test_bearish_mean_reversion_is_bear_call(self):
         """Test 8: SELL + VP-15 (mean-reversion) → BEAR_CALL credit spread."""
         self.assertEqual(_select_spread_type("BEARISH", "VP-15"), "BEAR_CALL")
+
+
+class TestExpiryConfigWiring(unittest.TestCase):
+    """Ensure expiry-selection config is actually passed to OptionsChain."""
+
+    @patch("config.MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD", 3)
+    @patch("config.ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS", True)
+    def test_builder_passes_expiry_config_to_chain(self):
+        chain = _mock_options_chain()
+        builder = SpreadBuilder(chain, max_risk_rupees=10000)
+
+        result = builder.build(
+            {"symbol": "NIFTY", "direction": "SELL", "strategy": "VP-15"},
+            underlying_price=24500,
+        )
+
+        self.assertIsNotNone(result)
+        chain.select_expiry.assert_called_once_with(
+            "NIFTY",
+            "BEAR_CALL",
+            allow_same_day=True,
+            min_days_credit=3,
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -409,8 +433,8 @@ class TestExecutionGuardrails(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY",
             spread_type="BULL_CALL",
@@ -437,12 +461,37 @@ class TestExecutionGuardrails(unittest.TestCase):
 
     def test_after_time_blocks_entry(self):
         """Test 17: Engine returns error after no-entry time."""
+        from unittest.mock import patch
+        from datetime import datetime as _real_dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+        # Simulate 15:30 IST — well past no_entry_after="09:00"
+        _late = _real_dt(2026, 5, 26, 15, 30, 0, tzinfo=_IST)
+
         sm = _mock_state_manager()
-        # Use "00:00" — always past midnight so guardrail fires regardless of wall-clock time
-        engine = SpreadExecutionEngine(None, sm, no_entry_after="00:00")
-        result = engine.place_spread(self._make_candidate())
+        engine = SpreadExecutionEngine(None, sm, no_entry_after="09:00")
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = _late
+            result = engine.place_spread(self._make_candidate())
         self.assertFalse(result["ok"])
-        self.assertIn("00:00", result["error"])
+        self.assertIn("09:00", result["error"])
+
+    def test_open_same_underlying_spread_blocks_entry(self):
+        """Execution guardrail also enforces no-pyramiding at the final boundary."""
+        sm = _mock_state_manager(open_spreads=[{"symbol": "NIFTY", "spread_id": "SPR-OPEN"}])
+        engine = SpreadExecutionEngine(None, sm, no_entry_after="15:05")
+
+        from datetime import datetime as _real_dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+        _market_open = _real_dt(2026, 5, 26, 10, 30, 0, tzinfo=_IST)
+
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = _market_open
+            result = engine.place_spread(self._make_candidate())
+
+        self.assertFalse(result["ok"])
+        self.assertIn("no pyramiding", result["error"].lower())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -454,8 +503,8 @@ class TestShortAfterLongFill(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY",
             spread_type="BULL_CALL",
@@ -499,7 +548,8 @@ class TestShortAfterLongFill(unittest.TestCase):
 
         mock_client.get_order_book.side_effect = fake_order_book
 
-        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05")
+        # virtual=False so broker placement calls are actually made
+        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05", virtual=False)
 
         from datetime import datetime as _real_dt
         import pytz as _pytz
@@ -515,8 +565,9 @@ class TestShortAfterLongFill(unittest.TestCase):
         # Verify call order: first call must be BUY, second must be SELL
         calls = mock_client.place_order.call_args_list
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].kwargs["buy_or_sell"], "BUY")
-        self.assertEqual(calls[1].kwargs["buy_or_sell"], "SELL")
+        # Shoonya API uses 'B'/'S', not full words
+        self.assertEqual(calls[0].kwargs["buy_or_sell"], "B")
+        self.assertEqual(calls[1].kwargs["buy_or_sell"], "S")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -528,8 +579,8 @@ class TestEmergencyClose(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY", spread_type="BULL_CALL", direction="BULLISH",
             expiry=expiry, expiry_str="28-MAY-2026",
@@ -555,7 +606,8 @@ class TestEmergencyClose(unittest.TestCase):
             {"norenordno": long_order_id, "status": "COMPLETE", "avgprc": "51.0"}
         ]
 
-        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05")
+        # virtual=False so broker placement calls are actually made
+        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05", virtual=False)
 
         from datetime import datetime as _real_dt
         import pytz as _pytz
@@ -572,9 +624,9 @@ class TestEmergencyClose(unittest.TestCase):
         # Verify emergency market sell was placed for long leg
         all_calls = mock_client.place_order.call_args_list
         emergency_call = all_calls[-1]
-        self.assertEqual(emergency_call.kwargs["buy_or_sell"], "SELL")
+        self.assertEqual(emergency_call.kwargs["buy_or_sell"], "S")  # Shoonya: 'S' not 'SELL'
         self.assertEqual(emergency_call.kwargs["price_type"], "MKT")
-        self.assertEqual(emergency_call.kwargs["tradingsymbol"], "NIFTY28MAY2624500CE")
+        self.assertEqual(emergency_call.kwargs["tradingsymbol"], "NIFTY28MAY26C24500")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -586,8 +638,8 @@ class TestFullSuccessReturnsOpenSpread(unittest.TestCase):
 
     def _make_candidate(self) -> SpreadCandidate:
         expiry = date(2026, 5, 28)
-        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY2624500CE", "NFO", 75, {}, 51.0)
-        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY2624600CE", "NFO", 75, {}, 20.0)
+        long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+        short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
         return SpreadCandidate(
             symbol="NIFTY", spread_type="BULL_CALL", direction="BULLISH",
             expiry=expiry, expiry_str="28-MAY-2026",
@@ -608,7 +660,8 @@ class TestFullSuccessReturnsOpenSpread(unittest.TestCase):
             [{"norenordno": "ORD-LONG-001", "status": "COMPLETE", "avgprc": "51.5"}],
             [{"norenordno": "ORD-SHORT-002", "status": "COMPLETE", "avgprc": "19.5"}],
         ]
-        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05")
+        # virtual=False so broker placement calls are actually made
+        engine = SpreadExecutionEngine(mock_client, sm, no_entry_after="15:05", virtual=False)
 
         from datetime import datetime as _real_dt
         import pytz as _pytz
@@ -715,6 +768,80 @@ class TestQuoteValidation(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestOptionsChainTokenResolution(unittest.TestCase):
+    """Shoonya option symbols are SYMBOL + DDMMMYY + C/P + STRIKE."""
+
+    def test_resolves_shoonya_call_symbol(self):
+        client = MagicMock()
+        client.search_scrip.return_value = [
+            {
+                "instname": "OPTIDX",
+                "tsym": "NIFTY02JUN26C24100",
+                "token": "11111",
+                "exd": "02-JUN-2026",
+                "ls": "65",
+                "strprc": "24100",
+                "optt": "CE",
+            }
+        ]
+        chain = OptionsChain(client)
+
+        result = chain.resolve_option_token("NIFTY", date(2026, 6, 2), 24100, "CE")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["tsym"], "NIFTY02JUN26C24100")
+        self.assertEqual(result["token"], "11111")
+        self.assertEqual(result["lot_size"], 65)
+
+    def test_rejects_old_strike_then_ce_shape_when_real_shape_present(self):
+        client = MagicMock()
+        client.search_scrip.return_value = [
+            {
+                "instname": "OPTIDX",
+                "tsym": "NIFTY02JUN26C24100",
+                "token": "11111",
+                "exd": "02-JUN-2026",
+                "ls": "65",
+            }
+        ]
+        chain = OptionsChain(client)
+
+        result = chain.resolve_option_token("NIFTY", date(2026, 6, 2), 24100, "PE")
+
+        self.assertIsNone(result)
+
+    def test_searches_exact_contract_only(self):
+        client = MagicMock()
+        client.search_scrip.return_value = [
+            {
+                "instname": "OPTIDX",
+                "tsym": "NIFTY02JUN26C24100",
+                "token": "11111",
+                "exd": "02-JUN-2026",
+                "ls": "65",
+                "strprc": "24100.00",
+                "optt": "CE",
+            }
+        ]
+        chain = OptionsChain(client)
+
+        result = chain.resolve_option_token("NIFTY", date(2026, 6, 2), 24100, "CE")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["tsym"], "NIFTY02JUN26C24100")
+        client.search_scrip.assert_called_once_with("NFO", "NIFTY02JUN26C24100")
+
+    def test_does_not_fallback_when_exact_contract_search_misses(self):
+        client = MagicMock()
+        client.search_scrip.return_value = []
+        chain = OptionsChain(client)
+
+        result = chain.resolve_option_token("NIFTY", date(2026, 6, 2), 23900, "PE")
+
+        self.assertIsNone(result)
+        client.search_scrip.assert_called_once_with("NFO", "NIFTY02JUN26P23900")
+
+
 class TestBuildStrikes(unittest.TestCase):
     """Verify _build_strikes returns correct (long, short) pairs."""
 
@@ -737,6 +864,697 @@ class TestBuildStrikes(unittest.TestCase):
         long_s, short_s = _build_strikes("BEAR_CALL", 24500, "NIFTY", 2)
         self.assertEqual(long_s, 24600)   # OTM CE (higher, protective)
         self.assertEqual(short_s, 24500)  # ATM CE (lower) — the sold leg
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   VIRTUAL MODE TESTS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_candidate_nifty() -> SpreadCandidate:
+    expiry = date(2026, 5, 28)
+    long_leg  = SpreadLeg("BUY",  "CE", 24500, expiry, "T1", "NIFTY28MAY26C24500", "NFO", 75, {}, 51.0)
+    short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY28MAY26C24600", "NFO", 75, {}, 20.0)
+    return SpreadCandidate(
+        symbol="NIFTY", spread_type="BULL_CALL", direction="BULLISH",
+        expiry=expiry, expiry_str="28-MAY-2026",
+        legs=[long_leg, short_leg], lot_size=75, lots=1,
+        net_debit_or_credit=31.0, max_profit=5175.0, max_loss=2325.0,
+        breakeven=24531.0, risk_reward=2.2,
+    )
+
+
+class TestVirtualPlaceSpread(unittest.TestCase):
+    """Virtual execution engine: approved spread is simulated without broker calls."""
+
+    def setUp(self):
+        from datetime import datetime as _real_dt
+        import pytz as _pytz
+        _IST = _pytz.timezone("Asia/Kolkata")
+        self._market_open = _real_dt(2026, 5, 26, 10, 30, 0, tzinfo=_IST)
+
+    def _engine(self):
+        # virtual=True is the default; pass it explicitly for clarity
+        return SpreadExecutionEngine(None, _mock_state_manager(), no_entry_after="15:05", virtual=True)
+
+    def test_virtual_returns_ok_true(self):
+        """Virtual mode: place_spread returns ok=True."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        self.assertTrue(result["ok"], result)
+
+    def test_virtual_returns_open_spread(self):
+        """Virtual mode: result contains a fully populated OpenSpread."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        spread = result["spread"]
+        self.assertIsInstance(spread, OpenSpread)
+        self.assertTrue(spread.spread_id.startswith("SPR-"))
+        self.assertEqual(spread.symbol, "NIFTY")
+        self.assertEqual(spread.long_fill_price, 51.0)
+        self.assertEqual(spread.short_fill_price, 20.0)
+
+    def test_virtual_fill_prices_from_candidate(self):
+        """Virtual fill prices come from candidate leg fill_price, not broker."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        spread = result["spread"]
+        self.assertEqual(spread.long_fill_price, 51.0)
+        self.assertEqual(spread.short_fill_price, 20.0)
+
+    def test_virtual_does_not_call_place_order(self):
+        """Virtual mode: Shoonya place_order is never called."""
+        mock_client = MagicMock()
+        engine = SpreadExecutionEngine(
+            mock_client, _mock_state_manager(), no_entry_after="15:05", virtual=True
+        )
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            engine.place_spread(_make_candidate_nifty())
+        mock_client.place_order.assert_not_called()
+
+    def test_virtual_persists_spread_to_state(self):
+        """Virtual mode: open spread is written to state_manager."""
+        sm = _mock_state_manager()
+        engine = SpreadExecutionEngine(mock_client := MagicMock(), sm, no_entry_after="15:05", virtual=True)
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = engine.place_spread(_make_candidate_nifty())
+        self.assertTrue(result["ok"])
+        sm.update_state.assert_called()  # state was persisted
+
+    def test_virtual_order_id_is_virtual_marker(self):
+        """Virtual mode: order IDs are clearly marked as virtual, not real broker IDs."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        spread = result["spread"]
+        self.assertIn("VIRTUAL", spread.long_order_id)
+        self.assertIn("VIRTUAL", spread.short_order_id)
+
+    def test_virtual_message_contains_virtual_label(self):
+        """Virtual mode: result message is clearly labelled [VIRTUAL]."""
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = self._engine().place_spread(_make_candidate_nifty())
+        self.assertIn("[VIRTUAL]", result["message"])
+
+    def test_virtual_guardrails_still_enforced(self):
+        """Virtual mode: hard guardrails (paused, time cutoff) still block entry."""
+        sm = _mock_state_manager(paused=True)
+        engine = SpreadExecutionEngine(None, sm, virtual=True)
+        with patch("tools.options_spread_execution.datetime") as mock_dt:
+            mock_dt.now.return_value = self._market_open
+            result = engine.place_spread(_make_candidate_nifty())
+        self.assertFalse(result["ok"])
+        self.assertIn("paused", result["error"].lower())
+
+
+class TestVirtualCloseSpread(unittest.TestCase):
+    """Virtual portfolio: close_spread simulates exit without broker calls."""
+
+    def _make_spread(self) -> OpenSpread:
+        return _make_open_spread(
+            max_loss=2325.0, max_profit=5175.0, net_dc=31.0,
+            long_fill=51.0, short_fill=20.0,
+        )
+
+    def _portfolio(self):
+        from tools.options_spread_portfolio import SpreadPortfolio
+        return SpreadPortfolio(None, _mock_state_manager(), virtual=True)
+
+    def test_virtual_close_returns_ok(self):
+        """Virtual close returns ok=True when pnl_data is valid."""
+        result = self._portfolio().close_spread(
+            self._make_spread(), reason="EOD",
+            pnl_data={"long_ltp": 55.0, "short_ltp": 18.0, "data_ok": True}
+        )
+        self.assertTrue(result["ok"], result)
+
+    def test_virtual_close_uses_ltp_for_pnl(self):
+        """Virtual close uses pnl_data LTPs as close prices when available."""
+        spread = self._make_spread()
+        result = self._portfolio().close_spread(
+            spread, reason="take-profit",
+            pnl_data={"long_ltp": 60.0, "short_ltp": 15.0, "data_ok": True},
+        )
+        qty = spread.lot_size * spread.lots  # 75
+        expected_pnl = (60.0 - 51.0) * qty - (15.0 - 20.0) * qty  # +675 + 375 = +1050
+        self.assertAlmostEqual(result["realized_pnl"], expected_pnl, places=1)
+        self.assertEqual(result["long_close_price"], 60.0)
+        self.assertEqual(result["short_close_price"], 15.0)
+
+    def test_virtual_close_refused_without_valid_data(self):
+        """Virtual close refuses when pnl_data is None (no price fallback)."""
+        spread = self._make_spread()
+        result = self._portfolio().close_spread(spread, reason="manual", pnl_data=None)
+        # No entry-price fallback — close must be refused
+        self.assertFalse(result["ok"])
+
+    def test_virtual_close_does_not_call_place_order(self):
+        """Virtual close never calls Shoonya place_order."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        mock_client = MagicMock()
+        portfolio = SpreadPortfolio(mock_client, _mock_state_manager(), virtual=True)
+        portfolio.close_spread(
+            self._make_spread(), reason="test",
+            pnl_data={"long_ltp": 55.0, "short_ltp": 18.0, "data_ok": True},
+        )
+        mock_client.place_order.assert_not_called()
+
+    def test_virtual_close_message_contains_virtual_label(self):
+        """Virtual close result message is labelled [VIRTUAL]."""
+        result = self._portfolio().close_spread(
+            self._make_spread(), reason="EOD",
+            pnl_data={"long_ltp": 55.0, "short_ltp": 18.0, "data_ok": True},
+        )
+        self.assertIn("[VIRTUAL]", result["message"])
+
+    def test_virtual_close_removes_spread_from_state(self):
+        """Virtual close removes the spread from state_manager."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        sm = _mock_state_manager()
+        portfolio = SpreadPortfolio(None, sm, virtual=True)
+        result = portfolio.close_spread(
+            self._make_spread(),
+            reason="EOD",
+            pnl_data={"long_ltp": 55.0, "short_ltp": 18.0, "data_ok": True},
+        )
+        self.assertTrue(result["ok"])
+        sm.update_state.assert_called()
+
+
+class TestVirtualModeDefaultConfig(unittest.TestCase):
+    """LIVE_ORDER_EXECUTION env var defaults to False → virtual mode is on by default."""
+
+    def test_live_order_execution_default_is_false(self):
+        """LIVE_ORDER_EXECUTION must default to False when env var is absent."""
+        import os
+        import importlib
+        saved = os.environ.pop("LIVE_ORDER_EXECUTION", None)
+        try:
+            import config as cfg
+            importlib.reload(cfg)
+            self.assertFalse(cfg.LIVE_ORDER_EXECUTION)
+        finally:
+            if saved is not None:
+                os.environ["LIVE_ORDER_EXECUTION"] = saved
+            importlib.reload(cfg)
+
+    def test_live_order_execution_true_when_env_set(self):
+        """LIVE_ORDER_EXECUTION=true activates live broker mode."""
+        import os
+        import importlib
+        os.environ["LIVE_ORDER_EXECUTION"] = "true"
+        try:
+            import config as cfg
+            importlib.reload(cfg)
+            self.assertTrue(cfg.LIVE_ORDER_EXECUTION)
+        finally:
+            del os.environ["LIVE_ORDER_EXECUTION"]
+            importlib.reload(cfg)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   REGRESSION TESTS: impossible option P&L / quote contamination (2026-06-03)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+#  Root cause: Shoonya's GetQuotes API returned the underlying index level (e.g.
+#  BANKNIFTY ~53,309 or NIFTY ~23,228) as the option LTP in edge cases, causing
+#  virtual spread P&L to reach ±₹1.5M instead of the defined-risk max of ±₹5k.
+#
+#  Fix: quote identity verification (token/tsym/exchange from REST response) +
+#       defined-risk P&L bounds (only ₹25 rounding tolerance, no price caps).
+#
+#  These tests assert:
+#  - No hardcoded option-price caps exist.
+#  - Quote identity is verified from Shoonya response fields.
+#  - P&L outside defined-risk bounds is rejected.
+#  - Invalid quotes do not trigger exits or mutate state.
+
+from tools.options_spread_portfolio import (
+    compute_spread_pnl,
+    get_verified_option_quote,
+    _PNL_ROUNDING_TOLERANCE_RS,
+)
+
+
+def _make_banknifty_bear_call(
+    long_fill: float = 960.65,
+    short_fill: float = 1107.55,
+    max_profit: float = 4407.0,
+    max_loss: float = 4407.0,
+) -> OpenSpread:
+    """BANKNIFTY BEAR_CALL as traded on 2026-06-03 09:17."""
+    return OpenSpread(
+        spread_id="SPR-REGR-BANKNIFTY",
+        symbol="BANKNIFTY",
+        spread_type="BEAR_CALL",
+        direction="BEARISH",
+        expiry="30-JUN-2026",
+        lot_size=15,
+        lots=2,
+        long_tsym="BANKNIFTY30JUN26C53900",
+        long_token="75580",
+        long_action="BUY",
+        long_strike=53900,
+        long_option_type="CE",
+        long_fill_price=long_fill,
+        long_order_id="VIRTUAL-LONG",
+        short_tsym="BANKNIFTY30JUN26C53600",
+        short_token="75571",
+        short_action="SELL",
+        short_strike=53600,
+        short_option_type="CE",
+        short_fill_price=short_fill,
+        short_order_id="VIRTUAL-SHORT",
+        net_debit_or_credit=-(short_fill - long_fill),  # credit spread
+        max_profit=max_profit,
+        max_loss=max_loss,
+        breakeven=53600 + (short_fill - long_fill),
+        opened_at="2026-06-03T09:17:00+05:30",
+    )
+
+
+def _make_nifty_bear_call(
+    long_fill: float = 151.45,
+    short_fill: float = 197.00,
+    max_profit: float = 2956.0,
+    max_loss: float = 3569.0,
+) -> OpenSpread:
+    """NIFTY BEAR_CALL as traded on 2026-06-03 10:02."""
+    return OpenSpread(
+        spread_id="SPR-REGR-NIFTY",
+        symbol="NIFTY",
+        spread_type="BEAR_CALL",
+        direction="BEARISH",
+        expiry="09-JUN-2026",
+        lot_size=65,
+        lots=1,
+        long_tsym="NIFTY09JUN26C23400",
+        long_token="66100",
+        long_action="BUY",
+        long_strike=23400,
+        long_option_type="CE",
+        long_fill_price=long_fill,
+        long_order_id="VIRTUAL-LONG",
+        short_tsym="NIFTY09JUN26C23300",
+        short_token="66095",
+        short_action="SELL",
+        short_strike=23300,
+        short_option_type="CE",
+        short_fill_price=short_fill,
+        short_order_id="VIRTUAL-SHORT",
+        net_debit_or_credit=-(short_fill - long_fill),  # credit spread
+        max_profit=max_profit,
+        max_loss=max_loss,
+        breakeven=23300 + (short_fill - long_fill),
+        opened_at="2026-06-03T10:02:00+05:30",
+    )
+
+
+class TestQuoteContaminationRejection(unittest.TestCase):
+    """
+    Regression suite: impossible option P&L must be rejected via exact quote
+    identity verification + defined-risk P&L bounds.
+
+    There are NO hardcoded option price caps.  The two defences are:
+      1. Quote identity: token/tsym/exchange fields in the Shoonya REST response
+         must match the expected option contract.
+      2. Defined-risk P&L bounds: computed P&L must lie within
+         [-(max_loss + tolerance), max_profit + tolerance] where tolerance = ₹25.
+    """
+
+    # ── Confirm no hardcoded price caps ───────────────────────────────────────
+
+    def test_no_hardcoded_option_price_cap(self):
+        """There must be no _MAX_OPTION_LTP or _MAX_LTP_FILL_MULTIPLE in portfolio module."""
+        import tools.options_spread_portfolio as mod
+        self.assertFalse(
+            hasattr(mod, "_MAX_OPTION_LTP"),
+            "_MAX_OPTION_LTP must NOT exist — price cap is forbidden",
+        )
+        self.assertFalse(
+            hasattr(mod, "_MAX_LTP_FILL_MULTIPLE"),
+            "_MAX_LTP_FILL_MULTIPLE must NOT exist — fill-multiple cap is forbidden",
+        )
+
+    def test_no_hardcoded_validate_option_ltp(self):
+        """_validate_option_ltp (price-cap-based) must not exist in portfolio module."""
+        import tools.options_spread_portfolio as mod
+        self.assertFalse(
+            hasattr(mod, "_validate_option_ltp"),
+            "_validate_option_ltp must NOT exist — was replaced by identity verification",
+        )
+
+    # ── get_verified_option_quote: identity verification ─────────────────────
+
+    def test_verified_quote_accepted_when_no_conflicting_identity_fields(self):
+        """REST quote without token/tsym fields is accepted (no conflicting evidence)."""
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {"stat": "Ok", "lp": "960.65"}
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", mock_client, None
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ltp"], 960.65)
+        self.assertEqual(result["source"], "rest")
+
+    def test_verified_quote_accepted_when_identity_fields_match(self):
+        """REST quote with matching token/tsym/exch is accepted."""
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {
+            "stat": "Ok", "lp": "960.65",
+            "token": "75580", "tsym": "BANKNIFTY30JUN26C53900", "exch": "NFO",
+        }
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", mock_client, None
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ltp"], 960.65)
+
+    def test_verified_quote_rejected_on_token_mismatch(self):
+        """REST response with mismatched token is rejected."""
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {
+            "stat": "Ok", "lp": "53309.15",
+            "token": "26009",           # BANKNIFTY index token — wrong!
+            "tsym": "BANKNIFTY30JUN26C53900",
+        }
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", mock_client, None
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("token_mismatch", result["reason"])
+
+    def test_verified_quote_rejected_on_tsym_mismatch(self):
+        """REST response with mismatched tsym is rejected."""
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {
+            "stat": "Ok", "lp": "53309.15",
+            "tsym": "BANKNIFTY-SPOT",   # wrong — not an option contract
+        }
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", mock_client, None
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("tsym_mismatch", result["reason"])
+
+    def test_verified_quote_rejected_on_exchange_mismatch(self):
+        """REST response with mismatched exchange is rejected."""
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {
+            "stat": "Ok", "lp": "23228.45",
+            "exch": "NSE",              # NSE index exchange — wrong for NFO option
+        }
+        result = get_verified_option_quote(
+            "NFO", "66095", "NIFTY09JUN26C23300", mock_client, None
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("exchange_mismatch", result["reason"])
+
+    def test_verified_quote_rejected_on_non_positive_ltp(self):
+        """REST response with lp=0 is rejected."""
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {"stat": "Ok", "lp": "0"}
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", mock_client, None
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("non_positive_ltp", result["reason"])
+
+    def test_verified_quote_rejected_on_api_failure(self):
+        """REST failure (stat=Not_Ok) returns ok=False."""
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {"stat": "Not_Ok", "emsg": "No data"}
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", mock_client, None
+        )
+        self.assertFalse(result["ok"])
+
+    def test_verified_quote_no_source_available(self):
+        """Returns ok=False when no client and no live_feed."""
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", None, None
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "no_quote_source_available")
+
+    def test_verified_quote_high_ltp_accepted_if_identity_matches(self):
+        """A legitimately high option premium is accepted without price cap."""
+        # Deep ITM option could have premium near strike/underlying — no cap should block it.
+        mock_client = MagicMock()
+        mock_client.get_quotes.return_value = {
+            "stat": "Ok", "lp": "5000.00",  # high but valid for deep ITM option
+            "token": "75580", "tsym": "BANKNIFTY30JUN26C53900", "exch": "NFO",
+        }
+        result = get_verified_option_quote(
+            "NFO", "75580", "BANKNIFTY30JUN26C53900", mock_client, None
+        )
+        # No price cap — should be accepted if identity matches
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ltp"], 5000.0)
+
+    # ── WebSocket verified quote ──────────────────────────────────────────────
+
+    def test_websocket_quote_requires_subscribe_with_tsym(self):
+        """WebSocket cache without tsym metadata is NOT used for option P&L."""
+        from broker.live_feed import LiveFeedManager
+        feed = LiveFeedManager(None)
+        # Manually pollute cache with index-level value for the option token
+        import time
+        with feed._lock:
+            feed._cache["75580"] = {"ltp": 53309.15, "timestamp": time.time()}
+        # No metadata registered → get_live_quote_verified returns None
+        result = feed.get_live_quote_verified("75580", "NFO", "BANKNIFTY30JUN26C53900")
+        self.assertIsNone(result, "Cache without metadata must not be used for option P&L")
+
+    def test_websocket_quote_used_after_subscribe_with_tsym(self):
+        """WebSocket cache IS used after subscribe_with_tsym registers metadata."""
+        from broker.live_feed import LiveFeedManager
+        feed = LiveFeedManager(None)
+        # Register metadata
+        with feed._lock:
+            feed._token_metadata["75580"] = {"exchange": "NFO", "tsym": "BANKNIFTY30JUN26C53900"}
+        import time
+        with feed._lock:
+            feed._cache["75580"] = {"ltp": 980.0, "timestamp": time.time()}
+        result = feed.get_live_quote_verified("75580", "NFO", "BANKNIFTY30JUN26C53900")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["ltp"], 980.0)
+
+    def test_websocket_metadata_mismatch_blocks_use(self):
+        """WebSocket cache entry with wrong tsym in metadata is not used."""
+        from broker.live_feed import LiveFeedManager
+        feed = LiveFeedManager(None)
+        with feed._lock:
+            feed._token_metadata["75580"] = {"exchange": "NSE", "tsym": "NIFTY"}  # wrong
+            import time
+            feed._cache["75580"] = {"ltp": 53309.0, "timestamp": time.time()}
+        result = feed.get_live_quote_verified("75580", "NFO", "BANKNIFTY30JUN26C53900")
+        self.assertIsNone(result)
+
+    # ── compute_spread_pnl integration tests ─────────────────────────────────
+
+    def test_compute_pnl_banknifty_index_price_rejected_via_pnl_bounds(self):
+        """BANKNIFTY underlying price (₹53,309) as option LTP → rejected via P&L bounds."""
+        spread = _make_banknifty_bear_call()
+        mock_client = MagicMock()
+        # Simulate Shoonya returning BANKNIFTY index level for the long option token
+        # No identity fields in response → accepted by identity check
+        # But P&L = (53309.15 - 960.65)*30 - (1111 - 1107.55)*30 = +1,570,351 → rejected by bounds
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "53309.15"}
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "1111.00"}
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+        self.assertIsNone(result["unrealized_pnl"])
+        self.assertIn("defined_risk", result.get("reason", ""))
+
+    def test_compute_pnl_nifty_index_price_rejected_via_pnl_bounds(self):
+        """NIFTY underlying price (₹23,228) as option LTP → rejected via P&L bounds."""
+        spread = _make_nifty_bear_call()
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "23228.45"}
+            if token == spread.short_token
+            else {"stat": "Ok", "lp": "140.00"}
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+        self.assertIsNone(result["unrealized_pnl"])
+
+    def test_compute_pnl_rejected_by_token_mismatch(self):
+        """compute_spread_pnl rejects if Shoonya returns mismatched token in response."""
+        spread = _make_banknifty_bear_call()
+        mock_client = MagicMock()
+        # Simulate index-level LTP with mismatched token (26009 = BANKNIFTY index token)
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "53309.15", "token": "26009"}
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "1111.00"}
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+        self.assertIn("verification_failed", result.get("reason", ""))
+
+    def test_compute_pnl_valid_within_bounds(self):
+        """Normal P&L within spread bounds is accepted."""
+        spread = _make_banknifty_bear_call()
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "1010.65"}    # long: gained ₹50
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "1077.55"}   # short: fallen ₹30
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertTrue(result["data_ok"])
+        self.assertIsNotNone(result["unrealized_pnl"])
+        self.assertLessEqual(result["unrealized_pnl"], spread.max_profit + _PNL_ROUNDING_TOLERANCE_RS)
+        self.assertGreaterEqual(result["unrealized_pnl"], -(spread.max_loss + _PNL_ROUNDING_TOLERANCE_RS))
+
+    def test_compute_pnl_rejects_pnl_above_max_profit(self):
+        """P&L above max_profit + tolerance is rejected even with identity-verified quotes."""
+        spread = _make_banknifty_bear_call(max_profit=4407.0, max_loss=4407.0)
+        qty = spread.lot_size * spread.lots  # 30
+        # LTPs that give pnl ≈ +2× max_profit: impossible for defined-risk spread
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "1401.95"}    # long: +441.30/lot → +13,239 > 4407
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "960.65"}
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+        self.assertIn("defined_risk", result.get("reason", ""))
+
+    def test_compute_pnl_rejects_pnl_below_neg_max_loss(self):
+        """P&L below -max_loss - tolerance is rejected."""
+        spread = _make_nifty_bear_call(max_profit=2956.0, max_loss=3569.0)
+        mock_client = MagicMock()
+        # short_ltp very high relative to entry → huge loss exceeds max_loss
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "100.00"}
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "360.00"}   # short surged → big loss
+        )
+        result = compute_spread_pnl(spread, mock_client, None)
+        self.assertFalse(result["data_ok"])
+
+    # ── should_exit blocked by invalid data ───────────────────────────────────
+
+    def test_should_exit_blocks_on_invalid_data(self):
+        """should_exit returns (False, '') when pnl_data has data_ok=False."""
+        from tools.options_spread_portfolio import should_exit
+        spread = _make_banknifty_bear_call()
+        bad_data = {
+            "data_ok": False,
+            "unrealized_pnl": None,
+            "reason": "quote_verification_failed",
+        }
+        do_exit, reason = should_exit(spread, bad_data)
+        self.assertFalse(do_exit)
+        self.assertEqual(reason, "")
+
+    # ── _close_spread_virtual guards ──────────────────────────────────────────
+
+    def test_virtual_close_refuses_automatic_exit_with_invalid_data(self):
+        """Automatic threshold exit refuses to close when pnl_data is invalid."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        portfolio = SpreadPortfolio(None, _mock_state_manager(), virtual=True)
+        spread = _make_banknifty_bear_call()
+        bad_data = {"data_ok": False, "reason": "quote_verification_failed"}
+        result = portfolio.close_spread(spread, reason="take-profit triggered", pnl_data=bad_data)
+        self.assertFalse(result["ok"])
+        self.assertIn("refused", result["error"].lower())
+
+    def test_virtual_close_refuses_manual_exit_without_data(self):
+        """Manual exit also refuses without valid verified quote (no entry-price fallback)."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        portfolio = SpreadPortfolio(None, _mock_state_manager(), virtual=True)
+        spread = _make_banknifty_bear_call()
+        result = portfolio.close_spread(spread, reason="manual Telegram exit", pnl_data=None)
+        self.assertFalse(result["ok"])
+
+    def test_virtual_manual_exit_fetches_exact_quotes_when_no_pnl_data_supplied(self):
+        """Manual virtual exit fetches exact Shoonya option quotes, still without real orders."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        spread = _make_banknifty_bear_call()
+        mock_client = MagicMock()
+        mock_client.get_quotes.side_effect = lambda exch, token: (
+            {"stat": "Ok", "lp": "1000.65", "token": spread.long_token, "tsym": spread.long_tsym, "exch": "NFO"}
+            if token == spread.long_token
+            else {"stat": "Ok", "lp": "1080.55", "token": spread.short_token, "tsym": spread.short_tsym, "exch": "NFO"}
+        )
+        portfolio = SpreadPortfolio(mock_client, _mock_state_manager(), virtual=True)
+
+        result = portfolio.close_spread(spread, reason="manual Telegram exit", pnl_data=None)
+
+        self.assertTrue(result["ok"], result)
+        mock_client.place_order.assert_not_called()
+        mock_client.cancel_order.assert_not_called()
+        mock_client.get_order_book.assert_not_called()
+
+    def test_virtual_eod_close_marks_failed_without_removing_or_pnl_update(self):
+        """EOD close with invalid data marks failure but leaves spread visible and P&L untouched."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        spread = _make_banknifty_bear_call()
+        state_spread = {
+            "spread_id": spread.spread_id,
+            "symbol": spread.symbol,
+            "spread_type": spread.spread_type,
+        }
+        sm = _mock_state_manager(open_spreads=[state_spread])
+        sm.get_state.return_value["spreads_traded"] = [{"spread_id": spread.spread_id, "closed": False}]
+        portfolio = SpreadPortfolio(None, sm, virtual=True)
+        result = portfolio.close_spread(spread, reason="EOD forced close", pnl_data=None)
+        # EOD with no data: spread is marked failed, P&L NOT updated, and no invented close occurs.
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("eod_close_failed"))
+        updates = [call.kwargs for call in sm.update_state.call_args_list]
+        self.assertTrue(any(
+            update.get("open_spreads", [{}])[0].get("close_failed") is True
+            for update in updates
+            if update.get("open_spreads")
+        ))
+        # Check no daily_pnl mutation
+        for call in sm.update_state.call_args_list:
+            kwargs = call.kwargs if call.kwargs else (call.args[0] if call.args else {})
+            self.assertNotIn("daily_pnl", kwargs,
+                msg="daily_pnl must not be updated on failed EOD close")
+
+    def test_daily_pnl_not_updated_after_refused_close(self):
+        """State daily_pnl must not change when a close is refused due to bad data."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        sm = _mock_state_manager()
+        portfolio = SpreadPortfolio(None, sm, virtual=True)
+        spread = _make_banknifty_bear_call()
+        bad_data = {"data_ok": False, "reason": "quote_verification_failed"}
+        portfolio.close_spread(spread, reason="take-profit triggered", pnl_data=bad_data)
+        for call in sm.update_state.call_args_list:
+            kwargs = call.kwargs if call.kwargs else (call.args[0] if call.args else {})
+            self.assertNotIn("daily_pnl", kwargs,
+                msg="daily_pnl must not be updated after a refused close")
+
+    def test_virtual_mode_does_not_call_place_order_on_close(self):
+        """Virtual close never calls Shoonya place_order, cancel_order, or get_order_book."""
+        from tools.options_spread_portfolio import SpreadPortfolio
+        mock_client = MagicMock()
+        portfolio = SpreadPortfolio(mock_client, _mock_state_manager(), virtual=True)
+        spread = _make_banknifty_bear_call()
+        valid_pnl = {
+            "data_ok": True, "long_ltp": 1000.0, "short_ltp": 1080.0,
+            "unrealized_pnl": 1155.0, "source_long": "rest", "source_short": "rest",
+        }
+        portfolio.close_spread(spread, reason="take-profit triggered", pnl_data=valid_pnl)
+        mock_client.place_order.assert_not_called()
+        mock_client.cancel_order.assert_not_called()
+        if hasattr(mock_client, "get_order_book"):
+            mock_client.get_order_book.assert_not_called()
 
 
 if __name__ == "__main__":

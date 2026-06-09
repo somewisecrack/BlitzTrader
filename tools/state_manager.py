@@ -27,16 +27,17 @@ def _default_state(virtual_capital: float) -> dict:
         "margin_used": 0.0,
         "daily_pnl": 0.0,
         "daily_pnl_pct": 0.0,
-        "positions": [],        # Open futures positions
+        "positions": [],        # Open positions (futures legacy)
         "pending_orders": [],   # Unfilled limit orders
-        "trades": [],           # Completed futures trades (entry + exit)
+        "trades": [],           # Completed trades (futures legacy)
         "trade_count": 0,
-        "open_spreads": [],     # Currently open option spreads
-        "spreads_traded": [],   # Closed option spreads with realized P&L
         "emitted_signal_keys": [],
         "notifications_sent": {},
         "is_paused": False,
         "is_stopped": False,
+        # Options spread tracking
+        "open_spreads": [],     # Currently open spreads
+        "spreads_traded": [],   # All spreads that were opened this session
     }
 
 
@@ -199,10 +200,8 @@ class StateManager:
     # ──────────────────────────────────────────────────────────
 
     def add_traded_spread(self, spread_record: dict) -> dict:
-        """Append a closed option spread to the durable spreads_traded ledger."""
-        if "spreads_traded" not in self._state:
-            self._state["spreads_traded"] = []
-        self._state["spreads_traded"].append(spread_record)
+        """Append a closed option spread to the durable spread ledger."""
+        self._state.setdefault("spreads_traded", []).append(spread_record)
         self._save()
         return self._state
 

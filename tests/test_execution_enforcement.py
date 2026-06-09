@@ -720,7 +720,13 @@ class TestExecutionEnforcement(unittest.TestCase):
         self.assertNotIn("get_option_chain", live_names)
 
     def test_registry_suppresses_fake_enter_after_rejected_order(self):
-        """ENTER logs must not be written if the order tool just rejected the trade."""
+        """ENTER logs must not be written if the order tool just rejected the trade.
+
+        place_virtual_order is now a LEGACY tool (not exposed to the live LLM).
+        We call _place_virtual_order_tracked() directly to seed _pending_entry_log
+        — the same way the legacy/backtest path would — and then verify that a
+        subsequent log_decision(ENTER_SHORT) is silently converted to REJECT.
+        """
         from tools.registry import ToolRegistry
 
         order_exec = MagicMock()
@@ -742,13 +748,15 @@ class TestExecutionEnforcement(unittest.TestCase):
             goal_manager=MagicMock(),
         )
 
-        place = registry.execute("place_virtual_order", {
-            "symbol": "NIFTY28APR26F",
-            "direction": "SELL",
-            "quantity": 25,
-            "stop_loss": 24300.0,
-            "target": 24100.0,
-        })
+        # place_virtual_order is legacy-only; call the internal tracked wrapper
+        # directly to seed _pending_entry_log (live LLM never reaches this).
+        place = registry._place_virtual_order_tracked(
+            symbol="NIFTY28APR26F",
+            direction="SELL",
+            quantity=25,
+            stop_loss=24300.0,
+            target=24100.0,
+        )
         self.assertEqual(place["status"], "REJECTED")
 
         registry.execute("log_decision", {

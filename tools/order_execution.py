@@ -186,7 +186,7 @@ class OrderExecutionTools:
                     f"BLOCKED: bare logical name '{symbol}' not accepted. "
                     f"Use the resolved futures tsym "
                     f"(e.g. NIFTY28APR26F, BANKNIFTY28APR26F). "
-                    f"Check the ACTIVE FUTURES INSTRUMENTS section in context for the correct tsym."
+                    f"Check the active instrument diagnostics in context for the correct tsym."
                 ),
                 "status": "REJECTED",
             }

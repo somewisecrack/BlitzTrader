@@ -179,6 +179,13 @@ MIN_OPTION_LTP = float(_optional_env("MIN_OPTION_LTP", "2.0"))
 # unless ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS=true
 MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD = _optional_int_env("MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD", 1)
 
+# ── Live vs virtual execution ──────────────────────────────────────────────────
+# LIVE_ORDER_EXECUTION=false (default): spread fills are simulated using
+# SpreadCandidate fill_price estimates — no Shoonya place_order calls are made.
+# LIVE_ORDER_EXECUTION=true: real broker orders are placed.  Only enable when
+# the live order path has been fully tested and broker connectivity is confirmed.
+LIVE_ORDER_EXECUTION = _optional_env("LIVE_ORDER_EXECUTION", "false").lower() == "true"
+
 # ──────────────────────────────────────────────────────────────
 #   DISK GUARD
 # ──────────────────────────────────────────────────────────────

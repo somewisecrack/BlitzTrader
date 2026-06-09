@@ -503,6 +503,83 @@ class ShoonyaClient:
         return None
 
     # ──────────────────────────────────────────────────────────
+    #   ORDERS
+    # ──────────────────────────────────────────────────────────
+
+    def place_order(
+        self,
+        buy_or_sell: str,
+        product_type: str,
+        exchange: str,
+        tradingsymbol: str,
+        quantity: int,
+        discloseqty: int = 0,
+        price_type: str = "LMT",
+        price: float = 0.0,
+        trigger_price: Optional[float] = None,
+        retention: str = "DAY",
+        amo: str = "NO",
+        remarks: Optional[str] = None,
+    ) -> Optional[dict]:
+        """
+        Place an order via Shoonya's PlaceOrder endpoint.
+
+        Mirrors the documented NorenRestApiPy place_order() signature while
+        using the OAuth-aware raw REST path already used by this client.
+        """
+        side = str(buy_or_sell or "").upper().strip()
+        if side in {"BUY", "B"}:
+            trantype = "B"
+        elif side in {"SELL", "S"}:
+            trantype = "S"
+        else:
+            return {"stat": "Not_Ok", "emsg": f"invalid buy_or_sell: {buy_or_sell!r}"}
+
+        prctyp = str(price_type or "LMT").upper().strip()
+        payload = {
+            "uid": self._user_id,
+            "actid": getattr(self, "_account_id", self._user_id),
+            "exch": exchange,
+            "tsym": tradingsymbol,
+            "qty": str(int(quantity)),
+            "dscqty": str(int(discloseqty or 0)),
+            "prd": product_type,
+            "trantype": trantype,
+            "prctyp": prctyp,
+            "prc": str(round(float(price or 0), 2)),
+            "ret": retention,
+            "amo": amo,
+            "ordersource": "API",
+        }
+        if trigger_price is not None:
+            payload["trgprc"] = str(round(float(trigger_price), 2))
+        if remarks:
+            payload["remarks"] = str(remarks)
+        return self._post_private("PlaceOrder", payload)
+
+    def get_order_book(self) -> Optional[list[dict]]:
+        """Return today's Shoonya order book as a list, or [] when empty."""
+        resp = self._post_private("OrderBook", {"uid": self._user_id})
+        if isinstance(resp, list):
+            return resp
+        if isinstance(resp, dict):
+            if resp.get("stat") == "Ok":
+                values = resp.get("values")
+                return values if isinstance(values, list) else []
+            emsg = str(resp.get("emsg", ""))
+            if "no data" in emsg.lower() or "no orders" in emsg.lower():
+                return []
+        return None
+
+    def cancel_order(self, order_id: str) -> Optional[dict]:
+        """Cancel an open order by Shoonya order number."""
+        payload = {
+            "uid": self._user_id,
+            "norenordno": str(order_id),
+        }
+        return self._post_private("CancelOrder", payload)
+
+    # ──────────────────────────────────────────────────────────
     #   REST QUOTES
     # ──────────────────────────────────────────────────────────
 

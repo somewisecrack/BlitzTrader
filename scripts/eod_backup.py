@@ -39,6 +39,7 @@ _REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.market_calendar import is_nse_trading_day, get_market_holiday_name  # noqa: E402
+from tools.rclone_utils import run_rclone_with_backoff  # noqa: E402
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -58,13 +59,24 @@ def _now_ist() -> str:
 
 
 def _run_rclone(args: list[str], dry_run: bool = False) -> subprocess.CompletedProcess:
-    """Run an rclone command with the blitztrader config."""
-    cmd = ["rclone", "--config", str(_RCLONE_CONF)] + args
+    """Run rclone with throttling and bounded quota-aware retry."""
     if dry_run:
-        print(f"  [dry-run] {' '.join(cmd)}")
-        result = subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-        return result
-    result = subprocess.run(cmd, capture_output=True, text=True)
+        print(f"  [dry-run] rclone {' '.join(args)}")
+
+    def _report_retry(attempt: int, delay: int, error: str) -> None:
+        tail = error.splitlines()[-1] if error else "Drive quota error"
+        print(
+            f"    Temporary Drive quota limit: {tail}. "
+            f"Retrying in {delay}s (attempt {attempt + 1}/4).",
+            file=sys.stderr,
+        )
+
+    result = run_rclone_with_backoff(
+        args,
+        config_path=_RCLONE_CONF,
+        dry_run=dry_run,
+        on_retry=_report_retry,
+    )
     if result.stdout.strip():
         for line in result.stdout.strip().splitlines():
             print(f"    {line}")

@@ -407,7 +407,7 @@ class MarketDataTools:
         """
         Get LTP, best bid, best ask for a specific symbol.
 
-        :param symbol: Trading symbol (e.g., 'NIFTY27MAR24500CE')
+        :param symbol: Trading symbol (e.g., 'NIFTY27MAR24C24500')
         :returns: {symbol, ltp, best_bid, best_ask, bid_qty, ask_qty}
         """
         # First, we need the token — search for it

@@ -48,9 +48,16 @@ from config import (
     MASTER_STRATEGY_FILE,
     MAX_DAILY_LOSS_AMOUNT,
     MAX_POSITIONS,
+    MAX_OPEN_OPTION_SPREADS,
+    OPTION_SPREAD_MAX_RISK_RUPEES,
+    SPREAD_MAX_LOSS_EXIT_FRACTION,
+    SPREAD_CREDIT_TP_FRACTION,
+    SPREAD_DEBIT_TP_FRACTION,
     MAX_RISK_PCT,
     MEMORY_FILE,
     NO_NEW_ENTRY_AFTER,
+    LIMIT_ORDER_TIMEOUT_SECONDS,
+    LIVE_ORDER_EXECUTION,
     NSE_TOKENS,
     RCLONE_FOLDER,
     RCLONE_REMOTE,
@@ -89,19 +96,22 @@ from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
 from tools.gemini_gatekeeper import GeminiGatekeeper
 from tools.candidate_audit import CandidateAudit
-from tools.atm_option_recorder import ATMOptionRecorder
-from tools.options_chain import OptionsChain
 from tools.position_serial import (
     build_status_message,
     save_position_index,
     load_position_index,
     invalidate_position_index,
 )
+from tools.options_chain import OptionsChain
+from tools.options_spread_builder import SpreadBuilder
+from tools.options_spread_execution import SpreadExecutionEngine
+from tools.options_spread_portfolio import SpreadPortfolio
 from context_builder import (
     SYSTEM_PROMPT,
     build_chat_context,
     build_eod_context,
     build_gatekeeper_context,
+    build_spread_gatekeeper_context,
 )
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -135,8 +145,11 @@ class BlitzTrader:
         self._promoted_futures_filters: list = []
         # Gemini entry gatekeeper (approve/reject every Python-passed signal)
         self._gatekeeper: GeminiGatekeeper | None = None
-        # ATM option OHLCV/depth recorder (intraday, CE+PE for NIFTY+BANKNIFTY)
-        self._atm_recorder: ATMOptionRecorder | None = None
+        # Options spread components
+        self._options_chain: OptionsChain | None = None
+        self._spread_builder: SpreadBuilder | None = None
+        self._spread_exec: SpreadExecutionEngine | None = None
+        self._spread_portfolio: SpreadPortfolio | None = None
 
     def run(self):
         """Run the full trading session."""
@@ -281,7 +294,7 @@ class BlitzTrader:
         )
         self._feed.start()
 
-        # Resolve front-month futures for traded instruments so we get real
+        # Resolve underlying market-data tokens for traded instruments so we get real
         # volume data.  Fall back to index tokens only where we have a known
         # index token (NIFTY, BANKNIFTY).
         active_tokens = dict(NSE_TOKENS)  # starts with VIX index token
@@ -373,7 +386,38 @@ class BlitzTrader:
             active_tokens=active_tokens,
         )
 
-        # 7. Journal (with state_manager for ground-truth injection)
+        # 7. Options spread components
+        self._options_chain = OptionsChain(self._shoonya)
+        self._spread_builder = SpreadBuilder(
+            self._options_chain,
+            max_risk_rupees=OPTION_SPREAD_MAX_RISK_RUPEES,
+        )
+        _virtual = not LIVE_ORDER_EXECUTION
+        logger.info(
+            "Execution mode: %s (LIVE_ORDER_EXECUTION=%s)",
+            "VIRTUAL/SIMULATED" if _virtual else "LIVE BROKER",
+            LIVE_ORDER_EXECUTION,
+        )
+        self._spread_exec = SpreadExecutionEngine(
+            self._shoonya,
+            self._state,
+            max_open_spreads=MAX_OPEN_OPTION_SPREADS,
+            no_entry_after=NO_NEW_ENTRY_AFTER,
+            fill_timeout_seconds=LIMIT_ORDER_TIMEOUT_SECONDS,
+            virtual=_virtual,
+        )
+        self._spread_portfolio = SpreadPortfolio(
+            self._shoonya,
+            self._state,
+            live_feed=self._feed,
+            max_loss_exit_fraction=SPREAD_MAX_LOSS_EXIT_FRACTION,
+            credit_tp_fraction=SPREAD_CREDIT_TP_FRACTION,
+            debit_tp_fraction=SPREAD_DEBIT_TP_FRACTION,
+            virtual=_virtual,
+        )
+        logger.info("✓ Options spread components initialized")
+
+        # 8. Journal (with state_manager for ground-truth injection)
         journal = JournalWriter(JOURNALS_DIR, VIRTUAL_CAPITAL, state_manager=self._state)
         self._journal = journal
 
@@ -390,7 +434,7 @@ class BlitzTrader:
         # 10. Strategy reader
         strategy = StrategyReader(MASTER_STRATEGY_FILE, STRATEGIES_DIR)
 
-        # 11. Tool registry
+        # 12. Tool registry
         registry = ToolRegistry(
             market_data=market_data,
             order_execution=self._order_exec,
@@ -402,9 +446,10 @@ class BlitzTrader:
             live_feed=self._feed,
             shoonya_client=self._shoonya,
             active_tokens=self._active_tokens,
+            spread_portfolio=self._spread_portfolio,
         )
 
-        # 12. Agent loop
+        # 13. Agent loop
         self._agent = AgentLoop(
             api_key=GEMINI_API_KEY,
             model=GEMINI_DECISION_MODEL,
@@ -445,24 +490,14 @@ class BlitzTrader:
         self._audit = CandidateAudit(CANDIDATE_AUDIT_DIR)
         logger.info("Candidate audit log: %s", CANDIDATE_AUDIT_DIR)
 
-        # ATM option recorder — logs OHLCV/OI/depth for ATM CE+PE every minute
-        try:
-            _chain = OptionsChain(self._shoonya)
-            self._atm_recorder = ATMOptionRecorder(
-                base_dir=DATA_EXPORTS_DIR,
-                shoonya_client=self._shoonya,
-                options_chain=_chain,
-            )
-            logger.info("✓ ATM option recorder initialized at %s", self._atm_recorder.export_dir)
-        except Exception:
-            logger.warning("ATM option recorder failed to initialize (non-fatal)", exc_info=True)
-
         logger.info("All components initialized successfully")
 
         # Log startup configuration for verification
         logger.info(
             "STARTUP CONFIG: "
-            f"Futures capital ₹{VIRTUAL_CAPITAL:,.0f} | "
+            f"Option spreads capital ₹{VIRTUAL_CAPITAL:,.0f} | "
+            f"Max spreads: {MAX_OPEN_OPTION_SPREADS} | "
+            f"Max risk/spread: ₹{OPTION_SPREAD_MAX_RISK_RUPEES:,} | "
             f"State file: {STATE_FILE}"
         )
 
@@ -547,10 +582,10 @@ class BlitzTrader:
             return False
         text = " ".join((m.get("text") or "").lower() for m in chat_messages)
 
-        # ── Exit-by-serial: "exit 2", "close position 2", "square off #3", "close serial 2" ──
+        # ── Exit-by-serial: "exit 2", "close spread 2", "square off #3", "close serial 2" ──
         exit_patterns = [
             r'\bexit\s+#?(\d+)\b',
-            r'\bclose\s+(?:position\s+|serial\s+)?#?(\d+)\b',
+            r'\bclose\s+(?:position\s+|spread\s+|serial\s+)?#?(\d+)\b',
             r'\bsquare\s+off\s+#?(\d+)\b',
         ]
         for pattern in exit_patterns:
@@ -558,21 +593,7 @@ class BlitzTrader:
             if m:
                 serial = int(m.group(1))
                 logger.info("Exit-by-serial command detected: serial=%d", serial)
-                from tools.position_serial import exit_position_by_serial as _exit_serial
-                result = _exit_serial(
-                    serial=serial,
-                    state_manager=self._state,
-                    pairs_portfolio=None,
-                    order_execution=self._order_exec,
-                    shoonya_client=self._shoonya,
-                    telegram_handler=self._telegram,
-                    active_tokens=self._active_tokens,
-                    live_feed=self._feed,
-                )
-                if not result.get("success"):
-                    self._telegram.send_telegram(
-                        f"Cannot exit serial #{serial}: {result.get('error', 'Unknown error')}"
-                    )
+                self._manual_spread_exit_by_serial(serial)
                 return True
 
         wants_capital = any(
@@ -593,65 +614,153 @@ class BlitzTrader:
         if not wants_status and not wants_capital:
             return False
 
-        # Use serial-numbered status format for status/positions requests
-        if wants_status and self._order_exec:
+        # Use spread-aware status for status/positions requests
+        if wants_status and self._spread_portfolio:
             try:
-                msg, index_payload = build_status_message(
-                    state_manager=self._state,
-                    pairs_portfolio=None,
-                    live_feed=self._feed,
-                    shoonya_client=self._shoonya,
-                    active_tokens=self._active_tokens,
-                )
+                status_lines = self._spread_portfolio.build_status_lines()
+                open_spreads = self._spread_portfolio.get_open_spreads()
+                # Persist serial index so exit_spread_by_serial can work
+                index_payload = {
+                    "positions": [
+                        {"serial": i + 1, "spread_id": s.spread_id}
+                        for i, s in enumerate(open_spreads)
+                    ],
+                    "generated_at": datetime.now(IST).isoformat(),
+                    "ttl_seconds": 1800,
+                    "type": "spreads",
+                }
+                save_position_index(index_payload)
+
+                state = self._state.get_state()
+                pnl = float(state.get("daily_pnl", 0) or 0)
+                pnl_pct = float(state.get("daily_pnl_pct", 0) or 0)
+                lines = []
                 if wants_capital:
-                    # Prepend capital info
-                    state = self._state.get_state()
                     capital = float(state.get("virtual_capital", 0) or 0)
                     available_balance = float(state.get("available_balance", 0) or 0)
-                    margin_used = float(state.get("margin_used", 0) or 0)
-                    cap_lines = [
-                        f"Futures capital: ₹{capital:,.2f}",
+                    lines.extend([
+                        f"Option spreads capital: ₹{capital:,.2f}",
                         f"Available balance: ₹{available_balance:,.2f}",
-                        f"Margin used: ₹{margin_used:,.2f}",
                         "",
-                    ]
-                    msg = "\n".join(cap_lines) + msg
-                save_position_index(index_payload)
-                self._telegram.send_telegram(msg)
-                logger.info("Answered Telegram status with serial-numbered positions")
+                    ])
+                lines.append(f"Session P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)")
+                lines.extend(status_lines)
+                self._telegram.send_telegram("\n".join(lines))
+                logger.info("Answered Telegram status with spread-aware serial index")
                 return True
             except Exception:
-                logger.exception("Serial status build failed — falling back to simple status")
+                logger.exception("Spread status build failed — falling back to simple status")
 
-        # Fallback: capital-only request or serial build failed
+        # Fallback: capital-only or spread portfolio not initialized
         state = self._state.get_state()
         pnl = float(state.get("daily_pnl", 0) or 0)
         pnl_pct = float(state.get("daily_pnl_pct", 0) or 0)
         capital = float(state.get("virtual_capital", 0) or 0)
         available_balance = float(state.get("available_balance", 0) or 0)
-        margin_used = float(state.get("margin_used", 0) or 0)
-        positions = self._order_exec.get_open_positions() if self._order_exec else {"positions": []}
         lines = []
         if wants_capital:
             lines.extend([
-                f"Futures capital: ₹{capital:,.2f}",
+                f"Option spreads capital: ₹{capital:,.2f}",
                 f"Available balance: ₹{available_balance:,.2f}",
-                f"Margin used: ₹{margin_used:,.2f}",
             ])
         if wants_status or not wants_capital:
-            lines.extend([
-                f"Futures P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)",
-                f"Open futures positions: {positions.get('count', 0)}",
-            ])
-        for pos in positions.get("positions", []):
-            lines.append(
-                f"- {pos.get('direction')} {pos.get('symbol')} "
-                f"qty {pos.get('quantity')} | entry ₹{pos.get('entry_price')} | "
-                f"LTP ₹{pos.get('current_price')} | uPnL ₹{pos.get('unrealized_pnl'):+,.2f}"
+            lines.append(f"Session P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)")
+            open_count = (
+                self._spread_portfolio.count_open_spreads()
+                if self._spread_portfolio else 0
             )
+            lines.append(f"Open spreads: {open_count}")
         self._telegram.send_telegram("\n".join(lines))
         logger.info("Answered simple Telegram status/P&L chat without Gemini")
         return True
+
+    def _manual_spread_exit_by_serial(self, serial: int) -> None:
+        """
+        Handle a manual Telegram serial-exit command for option spreads.
+        Validates the serial index, finds the spread, closes both legs,
+        and sends Telegram confirmation.  NEVER opens a new position.
+        """
+        if self._spread_portfolio is None:
+            self._telegram.send_telegram("⚠️ Spread portfolio not initialised — cannot exit.")
+            return
+
+        index = load_position_index()
+        if not index:
+            self._telegram.send_telegram(
+                "⚠️ No position index found. "
+                "Send 'status' or 'positions' first to generate the index."
+            )
+            return
+
+        if index.get("type") != "spreads":
+            self._telegram.send_telegram(
+                "⚠️ Position index is for legacy futures positions. "
+                "Send 'status' to refresh."
+            )
+            return
+
+        # Freshness check (30 min TTL)
+        try:
+            gen = datetime.fromisoformat(index["generated_at"].rstrip("Z")).replace(tzinfo=IST)
+            age = (datetime.now(IST) - gen).total_seconds()
+            if age > 1800:
+                self._telegram.send_telegram(
+                    f"⚠️ Position index is stale ({int(age//60)}m old). "
+                    "Send 'status' to refresh."
+                )
+                return
+        except Exception:
+            pass  # If we can't parse, proceed
+
+        # Resolve serial → spread_id
+        spread_id = None
+        for p in index.get("positions", []):
+            if p.get("serial") == serial:
+                spread_id = p.get("spread_id")
+                break
+        if spread_id is None:
+            valid = [p["serial"] for p in index.get("positions", [])]
+            self._telegram.send_telegram(
+                f"⚠️ Serial #{serial} not found. Valid serials: {valid}"
+            )
+            return
+
+        # Find live spread
+        open_spreads = self._spread_portfolio.get_open_spreads()
+        target_spread = next((s for s in open_spreads if s.spread_id == spread_id), None)
+        if target_spread is None:
+            self._telegram.send_telegram(
+                f"⚠️ Spread {spread_id} (serial #{serial}) is no longer open — "
+                "may have already been closed."
+            )
+            return
+
+        # Close it
+        result = self._spread_portfolio.close_spread(
+            spread=target_spread,
+            reason=f"manual Telegram exit serial #{serial}",
+        )
+        if result.get("ok"):
+            pnl_val = result.get("realized_pnl", 0)
+            invalidate_position_index()
+            self._telegram.send_telegram(
+                f"✅ Spread #{serial} [{spread_id}] closed manually.\n"
+                f"{target_spread.symbol} {target_spread.spread_type} expiry {target_spread.expiry}\n"
+                f"Realized P&L: ₹{pnl_val:+,.2f}"
+            )
+            self._audit.record(
+                signal_id=spread_id,
+                stage="SPREAD_EXITED",
+                signal={"symbol": target_spread.symbol, "strategy": target_spread.strategy, "direction": target_spread.direction},
+                reason=f"manual Telegram exit serial #{serial}",
+                details={"realized_pnl": pnl_val},
+            )
+        else:
+            err = result.get("error", "unknown error")
+            self._telegram.send_telegram(
+                f"⚠️ Failed to close spread #{serial}: {err}"
+            )
+            logger.error("Manual spread exit serial #%d failed: %s", serial, err)
 
     # ──────────────────────────────────────────────────────────
     #   STARTUP PHASE (9:00 - 9:15 AM)
@@ -667,9 +776,9 @@ class BlitzTrader:
         logger.info("=== STARTUP PHASE ===")
         if self._goals and not self._goals.has_goals():
             self._goals.set_session_goals([
-                "Trade only deterministic scanner-confirmed futures setups",
-                "Respect one-lot, no-pyramiding, and daily-loss guardrails",
-                "Let Python-managed SL/target/trailing logic handle risk",
+                "Trade only deterministic scanner-confirmed option vertical spread setups",
+                "Max 2 simultaneous open spreads; no pyramiding per instrument",
+                "Let Python-managed spread exit thresholds handle risk (60%/60%/70%)",
             ])
             logger.info("✓ Deterministic startup goals set")
 
@@ -715,9 +824,32 @@ class BlitzTrader:
                 eod_time = now.replace(hour=15, minute=15, second=0, microsecond=0)
                 if now >= eod_time:
                     logger.info("=== EOD SEQUENCE ===")
-                    # Close futures positions
-                    close_result = self._order_exec.close_all_positions() if self._order_exec else {}
-                    logger.info("Deterministic futures EOD close result: %s", close_result)
+                    # Close all option spreads first (deterministic Python, before Gemini EOD)
+                    if self._spread_portfolio:
+                        try:
+                            eod_exits = self._spread_portfolio.check_and_exit_spreads(force_close_all=True)
+                            for exit_result in eod_exits:
+                                spread_id = exit_result.get("spread_id", "?")
+                                pnl_val = exit_result.get("realized_pnl", 0)
+                                if exit_result.get("ok"):
+                                    self._telegram.send_telegram(
+                                        f"🔒 EOD close [{spread_id}] ₹{pnl_val:+,.2f}"
+                                    )
+                                    self._audit.record(
+                                        signal_id=spread_id,
+                                        stage="SPREAD_EXITED",
+                                        signal={"symbol": exit_result.get("symbol", ""), "strategy": "", "direction": ""},
+                                        reason="EOD forced close",
+                                        details={"realized_pnl": pnl_val},
+                                    )
+                                else:
+                                    logger.error("EOD spread exit failed [%s]: %s", spread_id, exit_result.get("error"))
+                                    self._telegram.send_telegram(
+                                        f"⚠️ EOD spread exit failed [{spread_id}]: {exit_result.get('error')}"
+                                    )
+                            logger.info("EOD spread close complete: %d spreads processed", len(eod_exits))
+                        except Exception:
+                            logger.exception("EOD spread close error")
 
                     eod_context = build_eod_context()
                     self._run_agent_iteration(
@@ -764,16 +896,19 @@ class BlitzTrader:
                 # ── Handle abort (highest priority, any time) ──
                 if abort_cmds:
                     logger.warning("ABORT received!")
-                    if self._order_exec:
-                        close_result = self._order_exec.close_all_positions()
-                        logger.info("Abort deterministic close result: %s", close_result)
+                    if self._spread_portfolio:
+                        try:
+                            abort_exits = self._spread_portfolio.check_and_exit_spreads(force_close_all=True)
+                            logger.info("Abort spread close: %d spread(s) processed", len(abort_exits))
+                        except Exception:
+                            logger.exception("Abort spread close error")
                     if self._journal:
                         self._journal.log_decision(
                             action="ABORT",
-                            reason="User abort command received. Deterministic close_all_positions executed.",
+                            reason="User abort command received. Deterministic spread close executed.",
                         )
                     if self._telegram:
-                        self._telegram.send_telegram("🛑 Abort received. All open positions closed. Session stopping.")
+                        self._telegram.send_telegram("🛑 Abort received. All open spreads closed. Session stopping.")
                     self._remove_trading_pid()
                     self._running = False
                     return
@@ -925,19 +1060,40 @@ class BlitzTrader:
                     except Exception:
                         logger.exception("Background scanner error (non-fatal)")
 
-                # ── Sample ATM option data (once per minute per contract) ──
-                if self._atm_recorder and self._feed:
-                    for _sym in TRADE_SYMBOLS:
-                        _tok_info = self._active_tokens.get(_sym, {}) if self._active_tokens else {}
-                        _tok = _tok_info.get("token")
-                        if _tok:
-                            _ltp = self._feed.get_ltp(_tok)
-                            if _ltp and _ltp > 0:
-                                self._atm_recorder.update_atm(_sym, _ltp)
-                    try:
-                        self._atm_recorder.sample_due_contracts()
-                    except Exception:
-                        logger.debug("ATM recorder sample error (non-fatal)", exc_info=True)
+                    # ── Spread portfolio: check for P&L exit conditions ──
+                    if self._spread_portfolio:
+                        try:
+                            exits = self._spread_portfolio.check_and_exit_spreads(force_close_all=False)
+                            for exit_result in exits:
+                                spread_id = exit_result.get("spread_id", "?")
+                                if exit_result.get("ok"):
+                                    reason_str = exit_result.get("reason", "exit triggered")
+                                    pnl_val = exit_result.get("realized_pnl", 0)
+                                    self._telegram.send_telegram(
+                                        f"📉 SPREAD EXIT [{spread_id}]\n"
+                                        f"Reason: {reason_str}\n"
+                                        f"Realized P&L: ₹{pnl_val:+,.2f}"
+                                    )
+                                    self._audit.record(
+                                        signal_id=spread_id,
+                                        stage="SPREAD_EXITED",
+                                        signal={"symbol": exit_result.get("symbol", ""), "strategy": "", "direction": ""},
+                                        reason=reason_str,
+                                        details={"realized_pnl": pnl_val},
+                                    )
+                                else:
+                                    err_str = exit_result.get("error", "unknown error")
+                                    self._telegram.send_telegram(
+                                        f"⚠️ Spread exit failed [{spread_id}]: {err_str}"
+                                    )
+                                    self._audit.record(
+                                        signal_id=spread_id,
+                                        stage="SPREAD_EXIT_FAILED",
+                                        signal={"symbol": exit_result.get("symbol", ""), "strategy": "", "direction": ""},
+                                        reason=err_str,
+                                    )
+                        except Exception:
+                            logger.exception("Spread portfolio monitoring error (non-fatal)")
 
                 # ── Check daily loss limit ──
                 state = self._state.get_state()
@@ -974,6 +1130,13 @@ class BlitzTrader:
         positions = state.get("positions", []) or []
         pending_orders = state.get("pending_orders", []) or []
 
+        # Use spread portfolio count for max-positions check (options path)
+        open_spread_count = (
+            self._spread_portfolio.count_open_spreads()
+            if self._spread_portfolio is not None
+            else len(positions)
+        )
+
         blocked_reason = None
         if state.get("is_paused"):
             blocked_reason = "Trading paused by user command"
@@ -981,8 +1144,8 @@ class BlitzTrader:
             blocked_reason = "Trading stopped by daily-loss guardrail"
         elif float(state.get("daily_pnl", 0) or 0) <= -MAX_DAILY_LOSS_AMOUNT:
             blocked_reason = "Daily loss limit reached"
-        elif len(positions) >= MAX_POSITIONS:
-            blocked_reason = f"Maximum open positions reached ({len(positions)}/{MAX_POSITIONS})"
+        elif open_spread_count >= MAX_POSITIONS:
+            blocked_reason = f"Maximum open spreads reached ({open_spread_count}/{MAX_POSITIONS})"
         else:
             cutoff_h, cutoff_m = map(int, NO_NEW_ENTRY_AFTER.split(":"))
             cutoff = now.replace(hour=cutoff_h, minute=cutoff_m, second=0, microsecond=0)
@@ -1009,6 +1172,14 @@ class BlitzTrader:
             self._logical_instrument(sig.get("symbol", ""))
             for sig in (existing_pending or [])
         )
+        if self._spread_portfolio is not None:
+            try:
+                occupied.update(
+                    self._logical_instrument(spread.symbol)
+                    for spread in self._spread_portfolio.get_open_spreads()
+                )
+            except Exception:
+                logger.exception("Could not read open spreads for no-pyramiding guardrail")
         occupied.discard(None)
 
         trading_date_str = now.strftime("%Y-%m-%d")
@@ -1041,11 +1212,6 @@ class BlitzTrader:
                 sig_copy["blocked_reason"] = "Unknown signal instrument"
                 blocked.append(sig_copy)
                 continue
-            token_info = (self._active_tokens or {}).get(instrument, {})
-            if not token_info.get("tsym"):
-                sig_copy["blocked_reason"] = f"No resolved futures tsym for {instrument}"
-                blocked.append(sig_copy)
-                continue
             if instrument in occupied:
                 sig_copy["blocked_reason"] = f"No pyramiding: {instrument} already open or pending"
                 blocked.append(sig_copy)
@@ -1055,8 +1221,6 @@ class BlitzTrader:
                 blocked.append(sig_copy)
                 continue
 
-            sig_copy["execution_symbol"] = token_info["tsym"]
-            sig_copy["lot_size"] = token_info.get("lot_size")
             tradeable.append(sig_copy)
             queued_instruments.add(instrument)
 
@@ -1074,9 +1238,8 @@ class BlitzTrader:
         Exits (SL/trailing/target/EOD/manual) are always deterministic Python-only.
         """
         for signal in signals:
-            execution_symbol = signal.get("execution_symbol") or signal.get("symbol", "")
-            strategy = signal.get("strategy", "")
             symbol = signal.get("symbol", "")
+            strategy = signal.get("strategy", "")
             direction = signal.get("direction", "")
             signal_id = signal.get("_signal_id") or (
                 f"{datetime.now(IST).strftime('%Y%m%d_%H%M%S%f')[:20]}_"
@@ -1095,21 +1258,58 @@ class BlitzTrader:
                     )
                     self._journal.log_decision(
                         action="REJECT",
-                        symbol=execution_symbol,
+                        symbol=symbol,
                         strategy_applied=strategy,
                         market_context_summary=context_summary,
                         reason=python_reason,
                     )
                     continue
 
-                # ── Build indicator context (richer than scan-loop submit) ──
+                # ── Stage 2a: Build spread candidate ─────────────────────────
+                underlying_price = None
+                try:
+                    price_data = self._market_data.get_spot_price(symbol)
+                    if isinstance(price_data, dict):
+                        underlying_price = float(price_data.get("spot_price") or price_data.get("ltp") or 0) or None
+                except Exception:
+                    logger.warning("Could not get spot price for %s — SpreadBuilder will use None", symbol)
+
+                candidate = self._spread_builder.build(signal, underlying_price)
+                if candidate is None:
+                    self._audit.record(
+                        signal_id=signal_id,
+                        stage="SPREAD_BUILD_REJECTED",
+                        signal=signal,
+                        reason="SpreadBuilder returned None (no valid spread candidate)",
+                    )
+                    self._journal.log_decision(
+                        action="REJECT",
+                        symbol=symbol,
+                        strategy_applied=strategy,
+                        market_context_summary=context_summary,
+                        reason="Spread build failed (SpreadBuilder returned None)",
+                    )
+                    continue
+
+                self._audit.record(
+                    signal_id=signal_id,
+                    stage="SPREAD_BUILT",
+                    signal=signal,
+                    details={
+                        "spread_type": candidate.spread_type,
+                        "expiry": str(candidate.expiry),
+                        "net_debit_or_credit": candidate.net_debit_or_credit,
+                        "max_profit": candidate.max_profit,
+                        "max_loss": candidate.max_loss,
+                    },
+                )
+
+                # ── Build spread-aware indicator context ──────────────────────
                 indicators = self._market_data.get_indicators(
                     symbol=symbol,
                     interval=str(signal.get("interval", "")),
                 )
-                gk_context = build_gatekeeper_context(
-                    signal, indicators if isinstance(indicators, dict) else {}
-                )
+                indicators_dict = indicators if isinstance(indicators, dict) else {}
 
                 self._audit.record(
                     signal_id=signal_id,
@@ -1118,9 +1318,8 @@ class BlitzTrader:
                     reason=python_reason,
                 )
 
-                # ── Stage 2: Gemini gatekeeper (APPROVE / REJECT, 5-second SLA) ──
+                # ── Stage 2b: Gemini gatekeeper (APPROVE/REJECT, 5-second SLA) ──
                 if not self._gatekeeper:
-                    # No API key configured — reject all signals
                     self._audit.record(
                         signal_id=signal_id,
                         stage="GATEKEEPER_REJECTED",
@@ -1129,19 +1328,19 @@ class BlitzTrader:
                     )
                     self._journal.log_decision(
                         action="REJECT",
-                        symbol=execution_symbol,
+                        symbol=symbol,
                         strategy_applied=strategy,
                         market_context_summary=context_summary,
                         reason="Gemini gatekeeper not configured (missing API key) — auto-REJECT",
                     )
                     continue
 
+                gk_context = build_spread_gatekeeper_context(candidate, indicators_dict)
                 gate_result = self._gatekeeper.evaluate(signal, gk_context)
                 gate_reason = gate_result.get("reason", "")
                 gate_error = gate_result.get("gatekeeper_error")
                 gate_confidence = gate_result.get("confidence", 0.0)
                 gate_conditions = gate_result.get("conditions_checked", [])
-                gate_risk_notes = gate_result.get("risk_notes", "")
 
                 if not gate_result.get("approved"):
                     reject_reason = (
@@ -1158,7 +1357,7 @@ class BlitzTrader:
                     )
                     self._journal.log_decision(
                         action="REJECT",
-                        symbol=execution_symbol,
+                        symbol=symbol,
                         strategy_applied=strategy,
                         market_context_summary=context_summary,
                         reason=reject_reason,
@@ -1180,67 +1379,69 @@ class BlitzTrader:
                     },
                 )
 
-                # ── Place order (Python-controlled) ──────────────────────────
-                quantity = signal.get("lot_size") or self._active_tokens.get(
-                    self._logical_instrument(symbol),
-                    {},
-                ).get("lot_size")
-                result = self._order_exec.place_virtual_order(
-                    symbol=execution_symbol,
-                    direction=direction.upper(),
-                    quantity=quantity,
-                    order_type="MARKET",
-                    stop_loss=signal.get("stop_loss"),
-                    target=signal.get("target"),
-                    strategy=strategy,
-                )
-                status = str(result.get("status", "")).upper()
-                if status in {"FILLED", "PENDING"}:
-                    action = "ENTER_LONG" if direction.upper() == "BUY" else "ENTER_SHORT"
-                    fill_price = result.get("fill_price")
-                    fill_note = (
-                        f"Python+Gemini approved {strategy} {direction} on {symbol}. "
-                        f"Gatekeeper: {gate_reason} (confidence {gate_confidence:.0%}). "
-                        f"Python: {python_reason}."
-                    )
-                    if fill_price is not None:
-                        fill_note += f" Fill ₹{fill_price:.2f}."
+                # ── Stage 3: Place spread (Python-controlled, long leg first) ──
+                result = self._spread_exec.place_spread(candidate)
+                if result.get("ok"):
+                    open_spread = result["spread"]
                     self._audit.record(
                         signal_id=signal_id,
-                        stage="ORDER_PLACED",
+                        stage="SPREAD_ORDER_PLACED",
                         signal=signal,
-                        details={"fill_price": fill_price, "status": status},
+                        details={
+                            "spread_id": open_spread.spread_id,
+                            "long_tsym": open_spread.long_tsym,
+                            "short_tsym": open_spread.short_tsym,
+                            "long_fill": open_spread.long_fill_price,
+                            "short_fill": open_spread.short_fill_price,
+                        },
                     )
+                    action = "ENTER_LONG" if direction.upper() in ("BUY", "BULLISH") else "ENTER_SHORT"
                     self._journal.log_decision(
                         action=action,
-                        symbol=execution_symbol,
+                        symbol=symbol,
                         strategy_applied=strategy,
                         market_context_summary=context_summary,
-                        reason=fill_note,
+                        reason=(
+                            f"Spread placed: {open_spread.spread_type} {direction} on {symbol}. "
+                            f"Long {open_spread.long_tsym}@{open_spread.long_fill_price:.2f}, "
+                            f"Short {open_spread.short_tsym}@{open_spread.short_fill_price:.2f}. "
+                            f"Gatekeeper: {gate_reason} ({gate_confidence:.0%})."
+                        ),
                     )
-                    # Send enriched Telegram notification
-                    self._notify_entry(
+                    # Subscribe option leg tokens for accurate WebSocket P&L feed
+                    if self._spread_portfolio:
+                        self._spread_portfolio.subscribe_spread_legs(open_spread)
+                    self._notify_spread_entry(
                         signal=signal,
-                        fill_price=fill_price,
+                        candidate=candidate,
+                        open_spread=open_spread,
                         gate_result=gate_result,
-                        python_reason=python_reason,
                         signal_id=signal_id,
                     )
                 else:
-                    order_error = result.get("error") or result.get("message") or "Order rejected by execution layer."
+                    spread_error = result.get("error") or "Spread execution layer rejected"
                     self._audit.record(
                         signal_id=signal_id,
-                        stage="ORDER_REJECTED",
+                        stage="SPREAD_ORDER_REJECTED",
                         signal=signal,
-                        reason=order_error,
+                        reason=spread_error,
                     )
                     self._journal.log_decision(
                         action="REJECT",
-                        symbol=execution_symbol,
+                        symbol=symbol,
                         strategy_applied=strategy,
                         market_context_summary=context_summary,
-                        reason=order_error,
+                        reason=spread_error,
                     )
+                    if result.get("emergency"):
+                        logger.error(
+                            "EMERGENCY CLOSE triggered for %s %s: %s",
+                            symbol, strategy, spread_error,
+                        )
+                        self._telegram.send_telegram(
+                            f"🚨 EMERGENCY CLOSE: {symbol} spread short leg failed. "
+                            f"Long leg closed to avoid naked exposure.\n{spread_error}"
+                        )
             except Exception as exc:
                 logger.exception(
                     "Python execution failed for signal %s %s %s",
@@ -1250,47 +1451,56 @@ class BlitzTrader:
                 )
                 self._journal.log_decision(
                     action="REJECT",
-                    symbol=execution_symbol,
+                    symbol=symbol,
                     strategy_applied=strategy,
                     reason=f"Python execution error: {exc}",
                 )
 
-    def _notify_entry(
+    def _notify_spread_entry(
         self,
         signal: dict,
-        fill_price,
+        candidate,
+        open_spread,
         gate_result: dict,
-        python_reason: str,
         signal_id: str,
     ) -> None:
         """
-        Send an enriched Telegram entry notification that includes Gemini approval context.
+        Send an enriched Telegram entry notification for a filled option vertical spread.
+        NO SL/Target fields — spread has max_profit/max_loss/breakeven instead.
         """
-        symbol = signal.get("symbol", "?")
-        strategy = signal.get("strategy", "?")
-        direction = signal.get("direction", "?")
-        stop_loss = signal.get("stop_loss")
-        target = signal.get("target")
+        from tools.options_spread_execution import OpenSpread as _OpenSpread
+        from tools.options_spread_builder import SpreadCandidate as _SpreadCandidate
+        from config import SPREAD_MAX_LOSS_EXIT_FRACTION, SPREAD_DEBIT_TP_FRACTION, SPREAD_CREDIT_TP_FRACTION
+
+        is_debit = candidate.spread_type in ("BULL_CALL", "BEAR_PUT")
+        tp_frac = SPREAD_DEBIT_TP_FRACTION if is_debit else SPREAD_CREDIT_TP_FRACTION
+        max_loss_exit = candidate.max_loss * SPREAD_MAX_LOSS_EXIT_FRACTION
+        tp_exit = candidate.max_profit * tp_frac
+        dc_label = "Net debit" if is_debit else "Net credit"
 
         gate_confidence = gate_result.get("confidence", 0.0)
         gate_reason = gate_result.get("reason", "")
-        gate_conditions = gate_result.get("conditions_checked", [])
         gate_risk_notes = gate_result.get("risk_notes", "")
 
-        price_str = f"₹{fill_price:.2f}" if fill_price is not None else "MARKET"
-        sl_str = f"₹{stop_loss:.2f}" if stop_loss is not None else "—"
-        tgt_str = f"₹{target:.2f}" if target is not None else "—"
-
-        conditions_str = ""
-        if gate_conditions:
-            conditions_str = "\n✔ " + "\n✔ ".join(gate_conditions[:4])
+        spread_id = open_spread.spread_id if open_spread else signal_id
 
         msg = (
-            f"🚀 **ENTRY** {direction} {symbol} @ {price_str}\n"
-            f"Strategy: {strategy}\n"
-            f"SL: {sl_str}  |  Target: {tgt_str}\n"
-            f"\n🛡 **Gemini** ({gate_confidence:.0%}): {gate_reason}"
-            f"{conditions_str}"
+            f"📊 **SPREAD ENTRY**\n"
+            f"[{spread_id}] {open_spread.symbol} {open_spread.spread_type} ({open_spread.direction})\n"
+            f"Expiry: {open_spread.expiry}\n"
+            f"\n"
+            f"Long:  {open_spread.long_tsym} @ ₹{open_spread.long_fill_price:.2f}\n"
+            f"Short: {open_spread.short_tsym} @ ₹{open_spread.short_fill_price:.2f}\n"
+            f"\n"
+            f"{dc_label}: ₹{candidate.net_debit_or_credit:.2f}/lot | Lot size: {candidate.lot_size}\n"
+            f"Max profit: ₹{candidate.max_profit:,.2f} | Max loss: ₹{candidate.max_loss:,.2f}\n"
+            f"Breakeven: {candidate.breakeven:,.2f}\n"
+            f"\n"
+            f"Take-profit at: {tp_frac:.0%} = ₹{tp_exit:,.2f} profit\n"
+            f"Max-loss exit at: {SPREAD_MAX_LOSS_EXIT_FRACTION:.0%} = ₹{max_loss_exit:,.2f} loss\n"
+            f"\n"
+            f"🛡 Gemini: APPROVED ({gate_confidence:.0%})\n"
+            f"Reason: {gate_reason}"
         )
         if gate_risk_notes:
             msg += f"\n⚠ Risk note: {gate_risk_notes}"
@@ -1298,7 +1508,7 @@ class BlitzTrader:
         try:
             self._telegram.send_telegram(msg)
         except Exception:
-            logger.exception("Failed to send entry Telegram notification")
+            logger.exception("Failed to send spread entry Telegram notification")
 
     def _review_signal_python(self, signal: dict) -> tuple[bool, str, str]:
         """
@@ -1354,14 +1564,9 @@ class BlitzTrader:
                     f"is below avg_volume_20 {avg_volume_20:.0f}."
                 )
 
-        stop_loss = signal.get("stop_loss")
-        target = signal.get("target")
-        if stop_loss is None or target is None:
-            return False, context_summary, "Rejected by Python: signal is missing stop-loss or target."
-
         reason = (
             f"Python approved {strategy} {direction} on {symbol} {interval}m. "
-            f"Scanner conditions valid; stop ₹{stop_loss:.2f}, target ₹{target:.2f}."
+            f"Scanner conditions valid; spread will be built by SpreadBuilder."
         )
         return True, context_summary, reason
 
@@ -1448,15 +1653,18 @@ class BlitzTrader:
         """Clean shutdown of all components."""
         logger.info("=== SHUTTING DOWN ===")
 
-        # Force close any remaining positions
+        # Force close any remaining option spreads
         try:
-            if self._order_exec:
-                remaining = self._state.get_open_positions()
-                if remaining:
-                    logger.warning(f"Force closing {len(remaining)} remaining positions")
-                    self._order_exec.close_all_positions()
+            if self._spread_portfolio:
+                open_spreads = self._spread_portfolio.get_open_spreads()
+                if open_spreads:
+                    logger.warning("Force closing %d remaining spread(s) during shutdown", len(open_spreads))
+                    exits = self._spread_portfolio.check_and_exit_spreads(force_close_all=True)
+                    for er in exits:
+                        if not er.get("ok"):
+                            logger.error("Shutdown spread close failed [%s]: %s", er.get("spread_id"), er.get("error"))
         except Exception:
-            logger.exception("Error closing positions during shutdown")
+            logger.exception("Error closing spreads during shutdown")
 
         # Log final state and update journal summary
         if self._state:
@@ -1478,13 +1686,6 @@ class BlitzTrader:
         if self._agent:
             usage = self._agent.get_token_usage()
             logger.info(f"Total token usage: {usage}")
-
-        # Flush ATM option recorder (force-sample all tracked contracts at EOD)
-        if self._atm_recorder:
-            try:
-                self._atm_recorder.flush()
-            except Exception:
-                logger.warning("ATM recorder EOD flush failed (non-fatal)", exc_info=True)
 
         # Stop feed before exporting so CSV files are no longer being appended.
         if self._feed:
@@ -1511,6 +1712,17 @@ class BlitzTrader:
             logger.info("Skipping data export upload before 15:15 IST")
             return
         self._data_export_upload_attempted = True
+        if RCLONE_REMOTE and not GOOGLE_DRIVE_UPLOAD_DIR:
+            logger.info(
+                "Data export finalized locally; the 16:00 EOD backup service "
+                "owns the single rclone upload"
+            )
+            if self._telegram:
+                self._telegram.send_telegram(
+                    "📊 Data export saved locally. Google Drive backup is "
+                    "scheduled for 16:00 IST."
+                )
+            return
         try:
             result = self._data_recorder.finalize_and_upload()
             logger.info(f"Data export result: {result}")

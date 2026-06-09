@@ -312,7 +312,16 @@ class SpreadBuilder:
         spread_type = _select_spread_type(direction, strategy_code)
 
         # ── 3. Select expiry ───────────────────────────────────────────────
-        expiry = self._chain.select_expiry(symbol, spread_type)
+        from config import (
+            ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS,
+            MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD,
+        )
+        expiry = self._chain.select_expiry(
+            symbol,
+            spread_type,
+            allow_same_day=ALLOW_SAME_DAY_EXPIRY_CREDIT_SPREADS,
+            min_days_credit=MIN_DAYS_TO_EXPIRY_CREDIT_SPREAD,
+        )
         if expiry is None:
             logger.warning(
                 "SpreadBuilder: no suitable expiry for %s %s", symbol, spread_type

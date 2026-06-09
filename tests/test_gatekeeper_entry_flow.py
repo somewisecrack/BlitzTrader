@@ -1,28 +1,32 @@
 """
 tests/test_gatekeeper_entry_flow.py
 -------------------------------------
-Integration-style tests for the two-stage entry gate:
+Integration-style tests for the two-stage spread entry gate:
   1. Python hard review  (deterministic)
-  2. Gemini gatekeeper   (5s timeout, APPROVE/REJECT)
+  2. SpreadBuilder       (build spread candidate)
+  3. Gemini gatekeeper   (5s timeout, APPROVE/REJECT)
+  4. SpreadExecutionEngine.place_spread()
 
-These tests exercise _process_tradeable_signals_python() with a mocked
-gatekeeper instance to verify invariants without making real API calls.
+These tests exercise _process_tradeable_signals_python() with mocked
+spread components and gatekeeper to verify invariants without making
+real API calls or live orders.
 
 Invariants tested:
-  - Python-rejected signal never reaches gatekeeper
-  - Gatekeeper REJECT prevents order placement
-  - Gatekeeper APPROVE + Python approved → order placed
-  - Gatekeeper timeout/error → order NOT placed
-  - Gatekeeper failure is logged but does not raise
+  - Python-rejected signal never reaches SpreadBuilder or gatekeeper
+  - SpreadBuilder returning None → gatekeeper NOT called, spread NOT placed
+  - Gatekeeper REJECT → spread NOT placed
+  - Gatekeeper APPROVE + Python approved → place_spread called exactly once
+  - Gatekeeper timeout/error → spread NOT placed
   - No API key → all signals auto-rejected (gatekeeper=None)
-  - Exit logic (SL/EOD) never calls gatekeeper
+  - Entry Telegram message contains both leg tsyms, max profit, max loss
+  - Entry Telegram message does NOT contain "SL" or "Target"
 """
 import os
 import sys
 import types as module_types
 import unittest
-from datetime import datetime
-from unittest.mock import MagicMock, patch, call
+from datetime import date, datetime
+from unittest.mock import MagicMock, patch
 
 import pytz
 
@@ -44,8 +48,71 @@ if "google.genai" not in sys.modules:
 
 from main import BlitzTrader
 from tools.gemini_gatekeeper import GeminiGatekeeper
+from tools.options_spread_builder import SpreadBuilder, SpreadCandidate, SpreadLeg
+from tools.options_spread_execution import SpreadExecutionEngine, OpenSpread
+from tools.options_spread_portfolio import SpreadPortfolio
 
 IST = pytz.timezone("Asia/Kolkata")
+
+
+# ── Test fixtures ──────────────────────────────────────────────────────────────
+
+def _fake_candidate() -> SpreadCandidate:
+    expiry = date(2026, 5, 29)
+    long_leg = SpreadLeg("BUY", "CE", 24500, expiry, "T1", "NIFTY29MAY26C24500", "NFO", 75, {}, 51.0)
+    short_leg = SpreadLeg("SELL", "CE", 24600, expiry, "T2", "NIFTY29MAY26C24600", "NFO", 75, {}, 20.0)
+    return SpreadCandidate(
+        symbol="NIFTY",
+        spread_type="BULL_CALL",
+        direction="BULLISH",
+        expiry=expiry,
+        expiry_str="29-MAY-2026",
+        legs=[long_leg, short_leg],
+        lot_size=75,
+        lots=1,
+        net_debit_or_credit=31.0,
+        max_profit=5175.0,
+        max_loss=2325.0,
+        breakeven=24531.0,
+        risk_reward=2.2,
+        signal_id="",
+        strategy="VP-05 3EMA Trend",
+        underlying_price=24000.0,
+    )
+
+
+def _fake_open_spread() -> OpenSpread:
+    return OpenSpread(
+        spread_id="SPR-20260529-123456-ABCDEF",
+        symbol="NIFTY",
+        spread_type="BULL_CALL",
+        direction="BULLISH",
+        expiry="29-MAY-2026",
+        lot_size=75,
+        lots=1,
+        long_tsym="NIFTY29MAY26C24500",
+        long_token="T1",
+        long_action="BUY",
+        long_strike=24500,
+        long_option_type="CE",
+        long_fill_price=51.0,
+        long_order_id="ORD001",
+        short_tsym="NIFTY29MAY26C24600",
+        short_token="T2",
+        short_action="SELL",
+        short_strike=24600,
+        short_option_type="CE",
+        short_fill_price=20.0,
+        short_order_id="ORD002",
+        net_debit_or_credit=31.0,
+        max_profit=5175.0,
+        max_loss=2325.0,
+        breakeven=24531.0,
+        opened_at="2026-05-29T09:30:00+05:30",
+        signal_id="sig_001",
+        strategy="VP-05 3EMA Trend",
+        underlying_at_entry=24000.0,
+    )
 
 
 def _bot_with_state(state: dict) -> BlitzTrader:
@@ -56,13 +123,13 @@ def _bot_with_state(state: dict) -> BlitzTrader:
         "NIFTY": {
             "exchange": "NFO",
             "token": "66691",
-            "tsym": "NIFTY28APR26F",
-            "lot_size": 25,
+            "tsym": "NIFTY29MAY26F",
+            "lot_size": 75,
         },
         "BANKNIFTY": {
             "exchange": "NFO",
             "token": "66688",
-            "tsym": "BANKNIFTY28APR26F",
+            "tsym": "BANKNIFTY29MAY26F",
             "lot_size": 15,
         },
     }
@@ -80,8 +147,21 @@ def _bot_with_state(state: dict) -> BlitzTrader:
         "ema_stacked_bear": False,
     }
     bot._market_data.get_candles.return_value = {"candles": []}
+    bot._market_data.get_spot_price.return_value = {"spot_price": 24000.0}
     bot._promoted_futures_filters = []
     bot._audit = MagicMock()
+
+    # Options spread components
+    bot._spread_builder = MagicMock(spec=SpreadBuilder)
+    bot._spread_builder.build.return_value = _fake_candidate()
+
+    bot._spread_exec = MagicMock(spec=SpreadExecutionEngine)
+    bot._spread_exec.place_spread.return_value = {"ok": True, "spread": _fake_open_spread()}
+
+    bot._spread_portfolio = MagicMock(spec=SpreadPortfolio)
+    bot._spread_portfolio.count_open_spreads.return_value = 0
+    bot._spread_portfolio.get_open_spreads.return_value = []
+
     return bot
 
 
@@ -99,6 +179,7 @@ def _state(**overrides):
 
 
 def _tradeable_signal(symbol="NIFTY", direction="BUY"):
+    """Signal as passed by _filter_tradeable_signals — no execution_symbol or lot_size."""
     return {
         "symbol": symbol,
         "strategy": "VP-05 3EMA Trend",
@@ -107,8 +188,6 @@ def _tradeable_signal(symbol="NIFTY", direction="BUY"):
         "entry_reference": 24000.0,
         "stop_loss": 23900.0,
         "target": 24200.0,
-        "execution_symbol": "NIFTY28APR26F",
-        "lot_size": 25,
     }
 
 
@@ -139,21 +218,23 @@ def _gate_reject(reason="Conflicting signals", error=None):
     }
 
 
+# ── Tests ──────────────────────────────────────────────────────────────────────
+
 class TestGatekeeperApproveFlow(unittest.TestCase):
-    """Happy path: Python approves, Gemini approves → order placed."""
+    """Happy path: Python approves, SpreadBuilder succeeds, Gemini approves → spread placed."""
 
     def setUp(self):
         self.bot = _bot_with_state(_state())
         self.bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
         self.bot._gatekeeper.evaluate.return_value = _gate_approve()
-        self.bot._order_exec.place_virtual_order.return_value = {
-            "status": "FILLED",
-            "fill_price": 24000.0,
-        }
 
-    def test_order_is_placed_on_double_approval(self):
+    def test_place_spread_called_on_double_approval(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
-        self.bot._order_exec.place_virtual_order.assert_called_once()
+        self.bot._spread_exec.place_spread.assert_called_once()
+
+    def test_place_virtual_order_never_called(self):
+        self.bot._process_tradeable_signals_python([_tradeable_signal()])
+        self.bot._order_exec.place_virtual_order.assert_not_called()
 
     def test_journal_logs_entry_action(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -164,14 +245,33 @@ class TestGatekeeperApproveFlow(unittest.TestCase):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
         self.bot._telegram.send_telegram.assert_called_once()
 
+    def test_telegram_message_includes_both_legs(self):
+        self.bot._process_tradeable_signals_python([_tradeable_signal()])
+        msg = self.bot._telegram.send_telegram.call_args[0][0]
+        self.assertIn("NIFTY29MAY26C24500", msg)
+        self.assertIn("NIFTY29MAY26C24600", msg)
+
+    def test_telegram_message_includes_max_profit_and_max_loss(self):
+        self.bot._process_tradeable_signals_python([_tradeable_signal()])
+        msg = self.bot._telegram.send_telegram.call_args[0][0]
+        self.assertIn("Max profit", msg)
+        self.assertIn("Max loss", msg)
+
+    def test_telegram_message_has_no_sl_or_target(self):
+        self.bot._process_tradeable_signals_python([_tradeable_signal()])
+        msg = self.bot._telegram.send_telegram.call_args[0][0]
+        self.assertNotIn("SL:", msg)
+        self.assertNotIn("Target:", msg)
+        self.assertNotIn("stop_loss", msg.lower())
+        self.assertNotIn("trailing", msg.lower())
+
     def test_telegram_message_includes_gemini_reason(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
         msg = self.bot._telegram.send_telegram.call_args[0][0]
         self.assertIn("EMA stacked bullish", msg)
-        self.assertIn("85%", msg)  # confidence formatted
+        self.assertIn("85%", msg)
 
     def test_telegram_message_has_no_gemma_reference(self):
-        """Entry alert must not mention Gemma/local observer."""
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
         msg = self.bot._telegram.send_telegram.call_args[0][0]
         self.assertNotIn("Gemma", msg)
@@ -179,24 +279,46 @@ class TestGatekeeperApproveFlow(unittest.TestCase):
         self.assertNotIn("observer", msg)
         self.assertNotIn("Ollama", msg)
 
-    def test_journal_entry_includes_gemini_and_python_reason(self):
+    def test_journal_entry_includes_gatekeeper_reason(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
         reason = self.bot._journal.log_decision.call_args.kwargs.get("reason", "")
-        self.assertIn("Gemini", reason)
-        self.assertIn("Python", reason)
+        self.assertIn("Gatekeeper", reason)
+        self.assertIn("EMA stacked bullish", reason)
+
+
+class TestSpreadBuilderNoneRejectsEntry(unittest.TestCase):
+    """SpreadBuilder returning None → gatekeeper NOT called, spread NOT placed."""
+
+    def setUp(self):
+        self.bot = _bot_with_state(_state())
+        self.bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
+        self.bot._spread_builder.build.return_value = None  # SpreadBuilder failed
+
+    def test_gatekeeper_not_called_when_spread_build_fails(self):
+        self.bot._process_tradeable_signals_python([_tradeable_signal()])
+        self.bot._gatekeeper.evaluate.assert_not_called()
+
+    def test_place_spread_not_called_when_build_fails(self):
+        self.bot._process_tradeable_signals_python([_tradeable_signal()])
+        self.bot._spread_exec.place_spread.assert_not_called()
+
+    def test_journal_logs_spread_build_reject(self):
+        self.bot._process_tradeable_signals_python([_tradeable_signal()])
+        reason = self.bot._journal.log_decision.call_args.kwargs.get("reason", "")
+        self.assertIn("Spread build failed", reason)
 
 
 class TestGatekeeperRejectFlow(unittest.TestCase):
-    """Gemini rejects → no order placed."""
+    """Gemini rejects → spread NOT placed."""
 
     def setUp(self):
         self.bot = _bot_with_state(_state())
         self.bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
         self.bot._gatekeeper.evaluate.return_value = _gate_reject("Conflicting EMA signals")
 
-    def test_order_not_placed_on_gatekeeper_reject(self):
+    def test_place_spread_not_called_on_gatekeeper_reject(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
-        self.bot._order_exec.place_virtual_order.assert_not_called()
+        self.bot._spread_exec.place_spread.assert_not_called()
 
     def test_journal_logs_reject_with_reason(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -210,7 +332,7 @@ class TestGatekeeperRejectFlow(unittest.TestCase):
 
 
 class TestGatekeeperTimeoutFlow(unittest.TestCase):
-    """Gatekeeper timeout → auto-reject, no order placed."""
+    """Gatekeeper timeout → auto-reject, spread NOT placed."""
 
     def setUp(self):
         self.bot = _bot_with_state(_state())
@@ -219,9 +341,9 @@ class TestGatekeeperTimeoutFlow(unittest.TestCase):
             error="Gatekeeper timed out after 5s"
         )
 
-    def test_order_not_placed_on_timeout(self):
+    def test_place_spread_not_called_on_timeout(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
-        self.bot._order_exec.place_virtual_order.assert_not_called()
+        self.bot._spread_exec.place_spread.assert_not_called()
 
     def test_journal_logs_timeout_reason(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -229,32 +351,37 @@ class TestGatekeeperTimeoutFlow(unittest.TestCase):
         self.assertIn("timed out", reason.lower())
 
 
-class TestPythonRejectSkipsGatekeeper(unittest.TestCase):
-    """Python hard review rejects signal → gatekeeper never called."""
+class TestPythonRejectSkipsGatekeeperAndSpreadBuilder(unittest.TestCase):
+    """Python hard review rejects signal → SpreadBuilder and gatekeeper never called."""
 
     def setUp(self):
         self.bot = _bot_with_state(_state())
         self.bot._gatekeeper = MagicMock(spec=GeminiGatekeeper)
-        # Make Python review reject: signal has ema_stacked_bull=True but direction=SELL
+        # ema_stacked_bull=True but direction=SELL → Python rejects
         self.bot._market_data.get_indicators.return_value = {
             "current_price": 24000.0,
             "ema20": 24050.0,
             "adx14": 28.0,
             "rsi14": 45.0,
             "avg_volume_20": 50000.0,
-            "ema_stacked_bull": True,   # bull stack → SELL is rejected
+            "ema_stacked_bull": True,
             "ema_stacked_bear": False,
         }
 
     def test_gatekeeper_not_called_on_python_reject(self):
-        sig = _tradeable_signal(direction="SELL")  # will be rejected by ema_bull check
+        sig = _tradeable_signal(direction="SELL")
         self.bot._process_tradeable_signals_python([sig])
         self.bot._gatekeeper.evaluate.assert_not_called()
 
-    def test_order_not_placed_on_python_reject(self):
+    def test_spread_builder_not_called_on_python_reject(self):
         sig = _tradeable_signal(direction="SELL")
         self.bot._process_tradeable_signals_python([sig])
-        self.bot._order_exec.place_virtual_order.assert_not_called()
+        self.bot._spread_builder.build.assert_not_called()
+
+    def test_place_spread_not_called_on_python_reject(self):
+        sig = _tradeable_signal(direction="SELL")
+        self.bot._process_tradeable_signals_python([sig])
+        self.bot._spread_exec.place_spread.assert_not_called()
 
 
 class TestNoGatekeeperConfigured(unittest.TestCase):
@@ -266,7 +393,7 @@ class TestNoGatekeeperConfigured(unittest.TestCase):
 
     def test_no_gatekeeper_rejects_all_signals(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
-        self.bot._order_exec.place_virtual_order.assert_not_called()
+        self.bot._spread_exec.place_spread.assert_not_called()
 
     def test_no_gatekeeper_logs_reject_reason(self):
         self.bot._process_tradeable_signals_python([_tradeable_signal()])
@@ -275,7 +402,7 @@ class TestNoGatekeeperConfigured(unittest.TestCase):
 
 
 class TestGatekeeperContextBuilding(unittest.TestCase):
-    """build_gatekeeper_context must produce correct indicator strings."""
+    """build_gatekeeper_context and build_spread_gatekeeper_context produce correct output."""
 
     def test_context_includes_indicators(self):
         from context_builder import build_gatekeeper_context
@@ -319,9 +446,33 @@ class TestGatekeeperContextBuilding(unittest.TestCase):
     def test_context_handles_missing_indicators_gracefully(self):
         from context_builder import build_gatekeeper_context
         sig = {"symbol": "NIFTY", "interval": "3", "direction": "BUY"}
-        # Should not raise even with minimal indicator dict
         ctx = build_gatekeeper_context(sig, {})
         self.assertIn("NIFTY", ctx)
+
+    def test_spread_gatekeeper_context_includes_both_legs(self):
+        from context_builder import build_spread_gatekeeper_context
+        candidate = _fake_candidate()
+        indicators = {
+            "current_price": 24000.0,
+            "ema20": 24050.0,
+            "adx14": 28.0,
+            "rsi14": 55.0,
+            "ema_stacked_bull": True,
+            "ema_stacked_bear": False,
+        }
+        ctx = build_spread_gatekeeper_context(candidate, indicators)
+        self.assertIn("NIFTY29MAY26C24500", ctx)
+        self.assertIn("NIFTY29MAY26C24600", ctx)
+        self.assertIn("BULL_CALL", ctx)
+        self.assertIn("APPROVE or REJECT", ctx)
+
+    def test_spread_gatekeeper_context_has_no_sl_target(self):
+        from context_builder import build_spread_gatekeeper_context
+        candidate = _fake_candidate()
+        ctx = build_spread_gatekeeper_context(candidate, {})
+        self.assertNotIn("stop_loss", ctx.lower())
+        self.assertNotIn("target", ctx.lower())
+        self.assertIn("Max-loss exit", ctx)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,11 @@ class LiveFeedManager:
         self._cache: dict[str, dict] = {}
         self._lock = threading.Lock()
 
+        # Token metadata for exact identity verification:
+        # {token: {exchange: "NFO", tsym: "BANKNIFTY30JUN26C53900"}}
+        # Populated by subscribe_with_tsym(); used by get_live_quote_verified().
+        self._token_metadata: dict[str, dict] = {}
+
         # Live candle aggregator: {(token, interval_mins): deque of completed candles}
         # Each candle: {time, open, high, low, close, volume}
         # Current (in-progress) candle: {(token, interval_mins): dict}
@@ -131,6 +136,25 @@ class LiveFeedManager:
         else:
             self._pending_subs.extend(new_pairs)
 
+    def subscribe_with_tsym(
+        self,
+        exchange_token_tsym_triples: list[tuple[str, str, str]],
+    ) -> None:
+        """
+        Subscribe AND register token metadata for exact identity verification.
+
+        :param exchange_token_tsym_triples: list of (exchange, token, tsym)
+          e.g. [("NFO", "75580", "BANKNIFTY30JUN26C53900")]
+
+        Metadata is stored so get_live_quote_verified() can confirm that a
+        WebSocket tick for this token actually belongs to the expected contract.
+        """
+        with self._lock:
+            for exch, tok, tsym in exchange_token_tsym_triples:
+                self._token_metadata[tok] = {"exchange": exch, "tsym": tsym}
+        pairs = [(exch, tok) for exch, tok, tsym in exchange_token_tsym_triples]
+        self.subscribe(pairs)
+
     def unsubscribe(self, exchange_token_pairs: list[tuple[str, str]]):
         """Unsubscribe from given tokens."""
         if self._connected:
@@ -141,10 +165,11 @@ class LiveFeedManager:
         self._pending_subs = [
             p for p in self._pending_subs if p not in exchange_token_pairs
         ]
-        # Clean cache
+        # Clean cache and metadata
         with self._lock:
             for _, token in exchange_token_pairs:
                 self._cache.pop(token, None)
+                self._token_metadata.pop(token, None)
 
     # ──────────────────────────────────────────────────────────
     #   CACHE READS (Thread-Safe)
@@ -191,6 +216,47 @@ class LiveFeedManager:
                 if age <= self.STALE_THRESHOLD:
                     return entry.get("ltp")
         return None
+
+    def get_live_quote_verified(
+        self,
+        token: str,
+        expected_exchange: str,
+        expected_tsym: str,
+    ) -> Optional[dict]:
+        """
+        Return a cached quote ONLY if it was subscribed with matching metadata.
+
+        Requires that subscribe_with_tsym() was previously called for this token
+        with the same exchange and tsym.  If metadata is absent or mismatched,
+        returns None so the caller falls back to REST identity verification.
+
+        This prevents WebSocket ticks from an unrelated instrument (subscribed
+        under the same numeric token) from contaminating option P&L.
+
+        Returns the full cache entry dict if valid and fresh, None otherwise.
+        """
+        with self._lock:
+            meta = self._token_metadata.get(token)
+            if not meta:
+                return None  # token not subscribed with metadata
+            if meta.get("exchange") != expected_exchange or meta.get("tsym") != expected_tsym:
+                logger.warning(
+                    "get_live_quote_verified: metadata mismatch for token %s "
+                    "(expected exchange=%s tsym=%s, stored exchange=%s tsym=%s)",
+                    token, expected_exchange, expected_tsym,
+                    meta.get("exchange"), meta.get("tsym"),
+                )
+                return None
+            entry = self._cache.get(token)
+            if not entry:
+                return None
+            age = time.time() - entry.get("timestamp", 0)
+            if age > self.STALE_THRESHOLD:
+                return None  # stale
+            ltp = entry.get("ltp")
+            if not ltp or float(ltp) <= 0:
+                return None
+            return dict(entry)
 
     def get_all_quotes(self) -> dict[str, dict]:
         """Get a snapshot of all cached quotes."""

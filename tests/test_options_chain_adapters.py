@@ -8,6 +8,7 @@ Tests for the OptionsChain adapter methods used by ATMOptionRecorder:
 Also covers eod_backup runtime_dir default path consistency.
 """
 from datetime import date
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -23,7 +24,8 @@ def _shoonya_search_result(symbol, expiry_date, strike, option_type):
     """Build a minimal Shoonya search_scrip result row."""
     exd = expiry_date.strftime("%-d-%b-%Y")     # "26-Jun-2026" → stored as-is
     exp_suffix = expiry_date.strftime("%d%b%y").upper()  # "26JUN26"
-    tsym = f"{symbol}{exp_suffix}{strike}{option_type}"
+    option_code = {"CE": "C", "PE": "P"}[option_type]
+    tsym = f"{symbol}{exp_suffix}{option_code}{strike}"
     return {
         "instname": "OPTIDX",
         "token": f"TOK{strike}{option_type}",
@@ -144,10 +146,11 @@ class TestEodBackupRuntimeDirDefault:
         """eod_backup default runtime_dir must match config.py default (both /opt/blitztrader)."""
         import subprocess, sys
         # Extract default from eod_backup.py argparse help text
+        repo_root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
             [sys.executable, "scripts/eod_backup.py", "--help"],
             capture_output=True, text=True,
-            cwd="/home/user/BlitzTrader",
+            cwd=repo_root,
         )
         assert "/opt/blitztrader/runtime" not in result.stdout, (
             "eod_backup default runtime dir must not be /opt/blitztrader/runtime "
@@ -160,10 +163,11 @@ class TestEodBackupRuntimeDirDefault:
         import os
         env = {k: v for k, v in os.environ.items() if k != "RCLONE_REMOTE"}
         import subprocess, sys
+        repo_root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
             [sys.executable, "scripts/eod_backup.py", "--help"],
             capture_output=True, text=True,
-            cwd="/home/user/BlitzTrader",
-            env={**env, "PYTHONPATH": "/home/user/BlitzTrader"},
+            cwd=repo_root,
+            env={**env, "PYTHONPATH": str(repo_root)},
         )
         assert "gdrive" in result.stdout
