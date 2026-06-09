@@ -50,7 +50,10 @@ _SAMPLE_INTERVAL_SECONDS = 60
 def round_to_strike(price: float, symbol: str) -> int:
     if symbol.upper() != "NIFTY":
         raise ValueError("ATMOptionRecorder supports NIFTY only")
-    return int(round(price / _NIFTY_STRIKE_STEP) * _NIFTY_STRIKE_STEP)
+    return int(
+        ((float(price) + _NIFTY_STRIKE_STEP / 2) // _NIFTY_STRIKE_STEP)
+        * _NIFTY_STRIKE_STEP
+    )
 
 
 def _role_for_offset(offset_steps: int) -> str:

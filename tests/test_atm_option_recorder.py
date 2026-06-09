@@ -143,6 +143,10 @@ class TestATMDetection:
         with recorder._lock:
             assert len(recorder._tracked) == 0
 
+    def test_midpoint_rounds_up_to_next_nifty_strike(self):
+        from tools.atm_option_recorder import round_to_strike
+        assert round_to_strike(25025.0, "NIFTY") == 25050
+
 
 # ── Tests: Record writing ─────────────────────────────────────────────────────
 
