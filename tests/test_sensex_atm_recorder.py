@@ -83,19 +83,34 @@ def _good_quote(**overrides):
     return defaults
 
 
-def _sensex_bfo_row(strike: int, expiry: str = "11-JUN-2026", opt_type: str = "C") -> dict:
-    """A Shoonya SearchScrip row for a SENSEX BFO option."""
-    from datetime import datetime
-    exp_date = datetime.strptime(expiry, "%d-%b-%Y")
-    exp_suffix = exp_date.strftime("%d%b%y").upper()
-    tsym = f"SENSEX{exp_suffix}{opt_type}{strike}"
+_MONTH_WEEKLY_CODE = {
+    1: "1", 2: "2", 3: "3", 4: "4", 5: "5",
+    6: "6", 7: "7", 8: "8", 9: "9",
+    10: "O", 11: "N", 12: "D",
+}
+
+
+def _sensex_bfo_row(strike: int, expiry: str = "11-JUN-2026", opt_type: str = "CE") -> dict:
+    """A Shoonya SearchScrip row for a SENSEX BFO option.
+
+    Uses the actual Shoonya BFO weekly tsym format:
+      SENSEX{YY}{M}{DD}{strike}{CE/PE}  e.g. SENSEX2661174000CE
+    opt_type should be 'CE' or 'PE' (Shoonya BFO uses full form, not C/P).
+    """
+    from datetime import datetime as _dt
+    exp_date = _dt.strptime(expiry, "%d-%b-%Y")
+    yy = str(exp_date.year % 100).zfill(2)
+    m_code = _MONTH_WEEKLY_CODE[exp_date.month]
+    dd = str(exp_date.day).zfill(2)
+    ot = opt_type.upper()
+    tsym = f"SENSEX{yy}{m_code}{dd}{strike}{ot}"
     return {
         "token": f"9{strike}",
         "tsym": tsym,
         "exd": expiry,
         "instname": "OPTIDX",
-        "strprc": str(strike),
-        "optt": opt_type,
+        "optt": ot,
+        # Note: strprc is NOT present in actual BFO responses (intentionally absent)
     }
 
 
@@ -120,9 +135,9 @@ def _setup_chain(recorder, expiry="11-JUN-2026", strike_step=100):
 class TestExpiryResolution:
     def test_nearest_expiry_from_bfo_search(self, tmp_path):
         rows = [
-            _sensex_bfo_row(81000, "11-JUN-2026", "C"),
-            _sensex_bfo_row(81100, "11-JUN-2026", "P"),
-            _sensex_bfo_row(81000, "26-JUN-2026", "C"),
+            _sensex_bfo_row(81000, "11-JUN-2026", "CE"),
+            _sensex_bfo_row(81100, "11-JUN-2026", "PE"),
+            _sensex_bfo_row(81000, "26-JUN-2026", "CE"),
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -145,7 +160,7 @@ class TestExpiryResolution:
         assert expiry is None
 
     def test_expiry_uses_bfo_exchange(self, tmp_path):
-        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "C")]
+        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "CE")]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
         with patch("tools.sensex_atm_recorder.date") as mock_date:
@@ -163,7 +178,7 @@ class TestExpiryResolution:
 
 class TestBFOExchangeHandling:
     def test_resolve_option_uses_bfo_exchange(self, tmp_path):
-        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "C")]
+        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "CE")]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
         result = rec._chain.resolve_option("11-JUN-2026", 81000, "CE")
@@ -172,7 +187,7 @@ class TestBFOExchangeHandling:
         assert result["symbol"] == "SENSEX"
 
     def test_get_quotes_uses_bfo_exchange(self, tmp_path):
-        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "C")]
+        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "CE")]
         client = _make_shoonya_client(search_results=rows)
         client.get_quotes.return_value = _good_quote(token="981000")
         rec = _make_recorder(tmp_path, client=client)
@@ -182,7 +197,7 @@ class TestBFOExchangeHandling:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -212,7 +227,7 @@ class TestBFOExchangeHandling:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -245,9 +260,9 @@ class TestATMRounding:
 
     def test_strike_step_discovery_from_contracts(self, tmp_path):
         rows = [
-            _sensex_bfo_row(81000, "11-JUN-2026", "C"),
-            _sensex_bfo_row(81100, "11-JUN-2026", "C"),
-            _sensex_bfo_row(81200, "11-JUN-2026", "C"),
+            _sensex_bfo_row(81000, "11-JUN-2026", "CE"),
+            _sensex_bfo_row(81100, "11-JUN-2026", "CE"),
+            _sensex_bfo_row(81200, "11-JUN-2026", "CE"),
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -263,7 +278,7 @@ class TestInitialATMTracking:
         rows = [
             _sensex_bfo_row(s, "11-JUN-2026", ot)
             for s in (80900, 81000, 81100)
-            for ot in ("C", "P")
+            for ot in ("CE", "PE")
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -290,7 +305,7 @@ class TestCumulativeTracking:
         all_rows = [
             self._make_row(s, ot)
             for s in (80900, 81000, 81100, 81200, 81300)
-            for ot in ("C", "P")
+            for ot in ("CE", "PE")
         ]
         client = _make_shoonya_client(search_results=all_rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -318,7 +333,7 @@ class TestCumulativeTracking:
         rows = [
             self._make_row(s, ot)
             for s in (80900, 81000, 81100, 81200)
-            for ot in ("C", "P")
+            for ot in ("CE", "PE")
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -349,7 +364,7 @@ class TestCEPECoverage:
         rows = [
             _sensex_bfo_row(s, "11-JUN-2026", ot)
             for s in (80900, 81000, 81100)
-            for ot in ("C", "P")
+            for ot in ("CE", "PE")
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -371,7 +386,7 @@ class TestFirstSeenRoles:
         rows = [
             _sensex_bfo_row(s, "11-JUN-2026", ot)
             for s in (80900, 81000, 81100, 81200)
-            for ot in ("C", "P")
+            for ot in ("CE", "PE")
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -393,7 +408,7 @@ class TestFirstSeenRoles:
         rows = [
             _sensex_bfo_row(s, "11-JUN-2026", ot)
             for s in (80900, 81000, 81100, 81200, 81300)
-            for ot in ("C", "P")
+            for ot in ("CE", "PE")
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -427,7 +442,7 @@ class TestOICalculations:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -452,7 +467,7 @@ class TestOICalculations:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -478,7 +493,7 @@ class TestBidAskSerialization:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -512,7 +527,7 @@ class TestBidAskSerialization:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -538,7 +553,7 @@ class TestMissingQuoteBehavior:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -563,7 +578,7 @@ class TestMissingQuoteBehavior:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -593,7 +608,7 @@ class TestUnderlyingLTPIsolation:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -617,7 +632,7 @@ class TestUnderlyingLTPIsolation:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -644,7 +659,7 @@ class TestUnderlyingLTPIsolation:
         contract = _TrackedContract(
             symbol="SENSEX", exchange="BFO", expiry="11-JUN-2026",
             strike=81000, option_type="CE", token="981000",
-            tsym="SENSEX11JUN26C81000",
+            tsym="SENSEX2661181000CE",
             first_seen_at="2026-06-10T10:00:00",
             first_seen_role="ATM",
         )
@@ -665,7 +680,7 @@ class TestRestartBehavior:
         rows = [
             _sensex_bfo_row(s, "11-JUN-2026", ot)
             for s in (80900, 81000, 81100)
-            for ot in ("C", "P")
+            for ot in ("CE", "PE")
         ]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
@@ -678,7 +693,7 @@ class TestRestartBehavior:
         assert len(rec._tracked) == count_after_first
 
     def test_initialise_is_idempotent(self, tmp_path):
-        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "C")]
+        rows = [_sensex_bfo_row(81000, "11-JUN-2026", "CE")]
         client = _make_shoonya_client(search_results=rows)
         rec = _make_recorder(tmp_path, client=client)
         with patch("tools.sensex_atm_recorder.date") as mock_date:

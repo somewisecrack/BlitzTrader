@@ -14,9 +14,9 @@ Only main.py may instantiate SensexATMOptionRecorder for data collection.
 Key behaviours:
 - ATM strike is detected from the SENSEX spot index LTP supplied by main.py.
 - Exchange is BFO (BSE Futures & Options) — verified at runtime against Shoonya.
-- Strike step is discovered dynamically from live Shoonya contract data.
-  A hardcoded fallback of 100 points is used ONLY if Shoonya returns zero
-  contracts and a warning is emitted.
+- Strike step is discovered dynamically from live Shoonya BFO contract data.
+  A fallback of 100 points is used ONLY if Shoonya returns zero contracts,
+  and a warning is emitted so the operator knows to investigate.
 - Every ATM transition adds ATM-1, ATM and ATM+1 for both CE and PE.
 - Previously activated strikes continue logging after ATM changes.
 - Sampling rate: once per minute per tracked contract.
@@ -25,6 +25,15 @@ Key behaviours:
 - Missing fields result in null values, never guessed values.
 - Option LTP and underlying LTP have distinct code paths and fields.
   Underlying LTP is NEVER substituted for option LTP.
+
+Shoonya SENSEX option tsym formats on BFO:
+  Weekly:  SENSEX + YY + M (1-9, O, N, D) + DD + strike + CE/PE
+           e.g. SENSEX2661174000CE  = SENSEX 11-JUN-2026 74000 CE
+  Monthly: SENSEX + YY + MMM + strike + CE/PE
+           e.g. SENSEX26JUN74000CE  = SENSEX JUN-2026    74000 CE
+
+  symname for option search: BSXOPT
+  exchange: BFO
 
 Record schema (JSONL) — identical to NIFTY:
   timestamp_ist, symbol, expiry, exchange, strike, option_type, token, tsym,
@@ -38,6 +47,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -53,7 +63,7 @@ logger = logging.getLogger("BlitzTrader.SensexATMOptionRecorder")
 IST = pytz.timezone("Asia/Kolkata")
 
 _SYMBOL = "SENSEX"
-_EXCHANGE = "BFO"           # BSE Futures & Options — verified at runtime
+_EXCHANGE = "BFO"           # BSE Futures & Options
 _INSTNAME = "OPTIDX"        # Shoonya instrument class for index options
 
 # Minimum seconds between samples for each tracked contract
@@ -63,23 +73,30 @@ _SAMPLE_INTERVAL_SECONDS = 60
 # Emits a warning log so the operator knows to investigate.
 _FALLBACK_STRIKE_STEP = 100
 
-# Format used in Shoonya expiry strings: "11-JUN-2026"
+# Format used in Shoonya expiry strings returned by SearchScrip: "11-JUN-2026"
 _EXPIRY_FORMAT = "%d-%b-%Y"
 
-# Shoonya option tsym regex for SENSEX on BFO.
-# Pattern: SENSEX + DDMMMYY + C/P + StrikePrice
-# e.g.  SENSEX11JUN26C81000
-_SENSEX_TSYM_RE = re.compile(r"^SENSEX\d{2}[A-Z]{3}\d{2}[CP]\d+$")
+# Shoonya option tsym regexes for SENSEX on BFO.
+# Weekly:  SENSEX + YY + M(1-9/O/N/D) + DD + strike + CE/PE
+# Monthly: SENSEX + YY + MMM + strike + CE/PE
+_SENSEX_WEEKLY_RE  = re.compile(r"^SENSEX(\d{2})([0-9OND])(\d{2})(\d+)(CE|PE)$")
+_SENSEX_MONTHLY_RE = re.compile(r"^SENSEX(\d{2})([A-Z]{3})(\d+)(CE|PE)$")
 
-# Option code mapping (CE→C, PE→P in Shoonya tsym)
-_OPTION_CODE = {"CE": "C", "PE": "P"}
+# Shoonya symname for SENSEX option contracts — use as search term
+_BSXOPT_SYMNAME = "BSXOPT"
+
+# Single-digit month code used in weekly SENSEX option tsym
+_MONTH_WEEKLY_CODE = {
+    1: "1", 2: "2", 3: "3", 4: "4", 5: "5",
+    6: "6", 7: "7", 8: "8", 9: "9",
+    10: "O", 11: "N", 12: "D",
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   SAFETY NOTE
 # ──────────────────────────────────────────────────────────────────────────────
 # SensexATMOptionRecorder is for DATA COLLECTION ONLY.
-# It must only be imported and instantiated from main.py.
 # The trading-isolation guarantee is enforced by:
 #   1. options_chain._ALLOWED_UNDERLYINGS does NOT include SENSEX.
 #   2. SpreadExecutionEngine._check_guardrails rejects any symbol not in
@@ -104,24 +121,43 @@ def round_to_sensex_strike(price: float, step: int) -> int:
     return int(((float(price) + step / 2) // step) * step)
 
 
-def _clean_tsym(tsym: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", str(tsym or "").upper())
+def _build_sensex_tsym(expiry_date: date, strike: int, option_type: str) -> list[str]:
+    """
+    Build candidate Shoonya tsyms for a SENSEX option.
+
+    Returns a list of possible tsyms to try (weekly format first, then monthly),
+    because we cannot always know which format Shoonya used at instrument creation.
+    """
+    ot = option_type.upper()   # "CE" or "PE"
+    yy = str(expiry_date.year % 100).zfill(2)
+    m_code = _MONTH_WEEKLY_CODE[expiry_date.month]
+    dd = str(expiry_date.day).zfill(2)
+    mmm = expiry_date.strftime("%b").upper()   # "JUN"
+
+    weekly  = f"SENSEX{yy}{m_code}{dd}{strike}{ot}"
+    monthly = f"SENSEX{yy}{mmm}{strike}{ot}"
+    return [weekly, monthly]
 
 
-def _option_type_matches(raw: object, expected: str) -> bool:
-    if raw in (None, ""):
-        return False
-    value = str(raw).upper().strip()
-    return value in {expected, _OPTION_CODE[expected]}
+def _parse_strike_from_sensex_tsym(tsym: str) -> Optional[int]:
+    """Extract strike price from a SENSEX BFO tsym."""
+    m = _SENSEX_WEEKLY_RE.match(tsym)
+    if m:
+        try:
+            return int(m.group(4))
+        except (ValueError, IndexError):
+            return None
+    m = _SENSEX_MONTHLY_RE.match(tsym)
+    if m:
+        try:
+            return int(m.group(3))
+        except (ValueError, IndexError):
+            return None
+    return None
 
 
-def _strike_matches(raw: object, expected: int) -> bool:
-    if raw in (None, ""):
-        return False
-    try:
-        return int(float(raw)) == int(expected)
-    except (TypeError, ValueError):
-        return False
+def _is_sensex_optidx_tsym(tsym: str) -> bool:
+    return bool(_SENSEX_WEEKLY_RE.match(tsym) or _SENSEX_MONTHLY_RE.match(tsym))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -153,6 +189,10 @@ class SensexOptionChain:
 
     Completely separate from OptionsChain (which is for NIFTY/BANKNIFTY on NFO).
     Never used by trading code.
+
+    Shoonya SENSEX option tsym formats (verified from live BFO data):
+      Weekly:  SENSEX{YY}{M}{DD}{strike}{CE/PE}  e.g. SENSEX2661174000CE
+      Monthly: SENSEX{YY}{MMM}{strike}{CE/PE}    e.g. SENSEX26JUN74000CE
     """
 
     def __init__(self, shoonya_client) -> None:
@@ -165,8 +205,8 @@ class SensexOptionChain:
         """
         Discover the SENSEX strike interval by examining live BFO contracts.
 
-        Fetches a small sample of SENSEX option symbols, reads their strike prices,
-        and infers the GCD of the non-zero gap between consecutive strikes.
+        Searches BFO for 'BSXOPT' (the Shoonya symname for SENSEX options),
+        extracts strike prices from tsyms, and computes the GCD of gaps.
         Falls back to _FALLBACK_STRIKE_STEP with a warning if nothing found.
         """
         if self._strike_step is not None:
@@ -180,48 +220,40 @@ class SensexOptionChain:
             self._strike_step = _FALLBACK_STRIKE_STEP
             return self._strike_step
 
-        results = self._client.search_scrip(_EXCHANGE, _SYMBOL) or []
+        # Search using the Shoonya symname for SENSEX options
+        results = self._client.search_scrip(_EXCHANGE, _BSXOPT_SYMNAME) or []
         strikes: list[int] = []
         for r in results:
-            instname = r.get("instname", "")
-            if instname and instname != _INSTNAME:
+            if r.get("instname") != _INSTNAME:
                 continue
-            tsym = _clean_tsym(r.get("tsym", ""))
-            if not _SENSEX_TSYM_RE.match(tsym):
-                continue
-            raw_strike = r.get("strprc") or r.get("strike")
-            if raw_strike is None:
-                # Parse from tsym: SENSEX11JUN26C81000 → 81000
-                m = re.search(r"[CP](\d+)$", tsym)
-                if m:
-                    raw_strike = m.group(1)
-            try:
-                strikes.append(int(float(raw_strike)))
-            except (TypeError, ValueError):
-                continue
+            tsym = str(r.get("tsym", "")).upper()
+            strike = _parse_strike_from_sensex_tsym(tsym)
+            if strike and strike > 0:
+                strikes.append(strike)
 
         if len(strikes) >= 2:
             strikes_sorted = sorted(set(strikes))
             gaps = [
                 strikes_sorted[i + 1] - strikes_sorted[i]
                 for i in range(len(strikes_sorted) - 1)
+                if strikes_sorted[i + 1] > strikes_sorted[i]
             ]
-            # GCD of all positive gaps
-            import math
-            step = gaps[0]
-            for g in gaps[1:]:
-                step = math.gcd(step, g)
-            if step > 0:
-                logger.info(
-                    "SensexOptionChain: discovered SENSEX strike step = %d from %d contracts",
-                    step, len(strikes),
-                )
-                self._strike_step = step
-                return self._strike_step
+            if gaps:
+                step = gaps[0]
+                for g in gaps[1:]:
+                    step = math.gcd(step, g)
+                if step > 0:
+                    logger.info(
+                        "SensexOptionChain: discovered SENSEX strike step = %d "
+                        "from %d contracts",
+                        step, len(strikes),
+                    )
+                    self._strike_step = step
+                    return self._strike_step
 
         logger.warning(
             "SensexOptionChain: could not determine strike step from %d results; "
-            "using fallback %d — verify BFO contract data is available",
+            "using fallback %d — verify BFO BSXOPT contract data is available",
             len(results), _FALLBACK_STRIKE_STEP,
         )
         self._strike_step = _FALLBACK_STRIKE_STEP
@@ -229,8 +261,9 @@ class SensexOptionChain:
 
     def get_nearest_expiry(self) -> Optional[str]:
         """
-        Return the nearest upcoming SENSEX weekly expiry as 'D-MMM-YYYY' string.
-        Includes today so same-day options are tracked on expiry day.
+        Return the nearest upcoming SENSEX BFO weekly/monthly expiry as
+        'D-MMM-YYYY' string.  Includes today so same-day options are tracked
+        on expiry day.
         """
         expiries = self._get_available_expiries(after_today=True, exclude_today=False)
         if not expiries:
@@ -240,7 +273,7 @@ class SensexOptionChain:
     def _get_available_expiries(
         self, after_today: bool = True, exclude_today: bool = False
     ) -> list[date]:
-        """Fetch SENSEX expiries from BFO via Shoonya SearchScrip."""
+        """Fetch SENSEX expiries from BFO via Shoonya SearchScrip for BSXOPT."""
         today = date.today()
         cache_key = f"SENSEX|{today}"
         if cache_key in self._expiry_cache:
@@ -257,28 +290,44 @@ class SensexOptionChain:
 
         expiry_set: set[date] = set()
 
-        # Pass 1: generic search on BFO for SENSEX
-        results = self._client.search_scrip(_EXCHANGE, _SYMBOL) or []
-        self._parse_expiries(results, today, after_today, exclude_today, expiry_set)
+        # Pass 1: generic BSXOPT symname search
+        results = self._client.search_scrip(_EXCHANGE, _BSXOPT_SYMNAME) or []
+        self._parse_expiries_from_results(results, today, after_today, exclude_today, expiry_set)
 
-        # Pass 2: date-specific fallback (needed on expiry days)
-        if not expiry_set:
+        # Pass 2: date-specific fallback using SENSEX weekly tsym prefixes
+        # Needed when BSXOPT generic search only returns current-expiry contracts.
+        if not expiry_set or len(expiry_set) < 2:
             logger.info(
-                "SensexOptionChain: generic BFO search found no future SENSEX expiries "
-                "— trying date-specific fallback"
+                "SensexOptionChain: BSXOPT generic search found %d expiries — "
+                "trying date-specific fallback",
+                len(expiry_set),
             )
             for days_ahead in range(1, 57):
                 candidate = today + timedelta(days=days_ahead)
-                date_suffix = candidate.strftime("%d%b%y").upper()
-                search_term = f"{_SYMBOL}{date_suffix}"
-                rows = self._client.search_scrip(_EXCHANGE, search_term) or []
-                self._parse_expiries(rows, today, after_today, exclude_today, expiry_set)
+                # Build weekly tsym prefix for this candidate date
+                yy = str(candidate.year % 100).zfill(2)
+                m_code = _MONTH_WEEKLY_CODE[candidate.month]
+                dd = str(candidate.day).zfill(2)
+                weekly_prefix = f"SENSEX{yy}{m_code}{dd}"
+                rows = self._client.search_scrip(_EXCHANGE, weekly_prefix) or []
+                self._parse_expiries_from_results(
+                    rows, today, after_today, exclude_today, expiry_set
+                )
+                # Also try monthly format prefix for the month
+                if candidate.day == 1:   # only probe month prefix once per month
+                    mmm = candidate.strftime("%b").upper()
+                    monthly_prefix = f"SENSEX{yy}{mmm}"
+                    rows2 = self._client.search_scrip(_EXCHANGE, monthly_prefix) or []
+                    self._parse_expiries_from_results(
+                        rows2, today, after_today, exclude_today, expiry_set
+                    )
                 if len(expiry_set) >= 2:
                     break
 
         if expiry_set:
             logger.info(
-                "SensexOptionChain: found SENSEX BFO expiries: %s", sorted(expiry_set)
+                "SensexOptionChain: found SENSEX BFO expiries: %s",
+                sorted(expiry_set),
             )
         else:
             logger.warning("SensexOptionChain: no SENSEX BFO expiries found")
@@ -292,16 +341,15 @@ class SensexOptionChain:
         ]
 
     @staticmethod
-    def _parse_expiries(
+    def _parse_expiries_from_results(
         results: list, today: date, after_today: bool,
         exclude_today: bool, expiry_set: set,
     ) -> None:
         for r in results:
-            instname = r.get("instname", "")
-            if instname and instname != _INSTNAME:
+            if r.get("instname") != _INSTNAME:
                 continue
-            tsym = _clean_tsym(r.get("tsym", ""))
-            if not _SENSEX_TSYM_RE.match(tsym):
+            tsym = str(r.get("tsym", "")).upper()
+            if not _is_sensex_optidx_tsym(tsym):
                 continue
             exd = r.get("exd", "")
             try:
@@ -323,6 +371,7 @@ class SensexOptionChain:
         """
         Resolve a SENSEX BFO option contract.
 
+        Tries both weekly and monthly tsym formats as Shoonya may use either.
         Returns dict with {token, tsym, exchange, symbol, strike, option_type,
         expiry, expiry_str} or None on failure.
         """
@@ -344,52 +393,41 @@ class SensexOptionChain:
         if not self._client:
             return None
 
-        # Shoonya BFO tsym format: SENSEX + DDMMMYY + C/P + Strike
-        exp_suffix = expiry_date.strftime("%d%b%y").upper()   # e.g. "11JUN26"
-        expected_tsym = f"SENSEX{exp_suffix}{_OPTION_CODE[ot]}{int(strike)}"
+        # Build candidate tsyms and try each
+        candidate_tsyms = _build_sensex_tsym(expiry_date, strike, ot)
+        for expected_tsym in candidate_tsyms:
+            results = self._client.search_scrip(_EXCHANGE, expected_tsym) or []
+            for r in results:
+                if not self._row_matches(r, expiry_date, strike, ot, expected_tsym):
+                    continue
 
-        results = self._client.search_scrip(_EXCHANGE, expected_tsym) or []
-        if not results:
-            logger.warning(
-                "resolve_option: no BFO SearchScrip results for SENSEX %s %s %s",
-                expiry, strike, expected_tsym,
-            )
-            return None
+                tsym = r.get("tsym", "")
+                token = r.get("token", "")
+                if not tsym or not token:
+                    continue
 
-        for r in results:
-            if not self._row_matches(r, expiry_date, strike, ot, expected_tsym):
-                continue
-
-            tsym = r.get("tsym", "")
-            if not tsym:
-                continue
-            token = r.get("token", "")
-            if not token:
-                continue
-
-            info = {
-                "token": token,
-                "tsym": tsym,
-                "exchange": _EXCHANGE,
-                "symbol": _SYMBOL,
-                "strike": strike,
-                "option_type": ot,
-                "expiry": expiry_date,
-                "expiry_str": expiry,
-            }
-            self._token_cache[cache_key] = info
-            logger.info(
-                "SensexOptionChain: resolved %s strike=%d %s expiry=%s "
-                "token=%s exchange=%s",
-                tsym, strike, ot, expiry, token, _EXCHANGE,
-            )
-            return info
+                info = {
+                    "token": token,
+                    "tsym": tsym,
+                    "exchange": _EXCHANGE,
+                    "symbol": _SYMBOL,
+                    "strike": strike,
+                    "option_type": ot,
+                    "expiry": expiry_date,
+                    "expiry_str": expiry,
+                }
+                self._token_cache[cache_key] = info
+                logger.info(
+                    "SensexOptionChain: resolved %s strike=%d %s expiry=%s "
+                    "token=%s exchange=%s",
+                    tsym, strike, ot, expiry, token, _EXCHANGE,
+                )
+                return info
 
         logger.warning(
-            "resolve_option: no matching OPTIDX for SENSEX %s %s; "
-            "sample_tsyms=%s",
-            expiry, expected_tsym,
-            [r.get("tsym") for r in results[:8]],
+            "SensexOptionChain: no matching OPTIDX for SENSEX %s %s %s; "
+            "tried_tsyms=%s",
+            expiry, strike, ot, candidate_tsyms,
         )
         return None
 
@@ -397,16 +435,14 @@ class SensexOptionChain:
     def _row_matches(
         row: dict, expiry: date, strike: int, option_type: str, expected_tsym: str
     ) -> bool:
-        instname = row.get("instname", "")
-        if instname and instname != _INSTNAME:
+        if row.get("instname") != _INSTNAME:
             return False
 
-        tsym = _clean_tsym(row.get("tsym", ""))
-        if not tsym:
-            return False
-        if not _SENSEX_TSYM_RE.match(tsym):
+        tsym = str(row.get("tsym", "")).upper()
+        if not _is_sensex_optidx_tsym(tsym):
             return False
 
+        # Expiry check via exd field
         r_expiry = row.get("exd", "")
         if r_expiry:
             try:
@@ -415,14 +451,25 @@ class SensexOptionChain:
             except ValueError:
                 return False
 
-        r_strike = row.get("strprc") or row.get("strike")
-        r_otype = row.get("optt") or row.get("option_type") or row.get("optiontype")
-        if r_strike is not None and r_otype is not None:
-            if _strike_matches(r_strike, strike) and _option_type_matches(r_otype, option_type):
-                return True
+        # Option type check
+        r_otype = row.get("optt", "")
+        if r_otype and r_otype.upper() != option_type.upper():
+            return False
 
-        # Fallback: exact documented tsym match
-        return tsym == expected_tsym
+        # Strike check: parse from tsym since strprc is absent in Shoonya response
+        parsed_strike = _parse_strike_from_sensex_tsym(tsym)
+        if parsed_strike is not None and parsed_strike != strike:
+            return False
+
+        # Exact tsym match as final fallback
+        if tsym == expected_tsym:
+            return True
+
+        # If strike and expiry both match, accept
+        if parsed_strike == strike and r_expiry:
+            return True
+
+        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -442,7 +489,7 @@ class SensexATMOptionRecorder:
             shoonya_client=client,
         )
         # On each scan tick:
-        recorder.update_atm(underlying_ltp=81250.0)
+        recorder.update_atm(underlying_ltp=74000.0)
         recorder.sample_due_contracts()
         # At EOD:
         recorder.flush()
@@ -474,7 +521,6 @@ class SensexATMOptionRecorder:
         """
         Discover strike step and expiry at session start.
         Call once before the first update_atm().
-        Logs all resolved information; fails silently so the trading loop continues.
         """
         self._strike_step = self._chain.discover_strike_step()
         self._expiry = self._chain.get_nearest_expiry()
@@ -498,7 +544,6 @@ class SensexATMOptionRecorder:
         if underlying_ltp is None or underlying_ltp <= 0:
             return
         if not self._expiry:
-            # Retry expiry resolution if it was unavailable at init
             self._expiry = self._chain.get_nearest_expiry()
             if not self._expiry:
                 return
@@ -627,7 +672,6 @@ class SensexATMOptionRecorder:
 
         with self._lock:
             current_atm = self._current_atm
-            # underlying_ltp is the SENSEX spot index value
             underlying_ltp: Optional[float] = self._latest_underlying_ltp
 
         is_current_atm = (contract.strike == current_atm) if current_atm else False
@@ -694,7 +738,7 @@ class SensexATMOptionRecorder:
             )
             return base
 
-        # Validate that the response token and exchange match the contract.
+        # Validate that the response token matches the contract.
         # Prevents index-price contamination if the wrong instrument is returned.
         resp_token = str(resp.get("token", resp.get("tok", ""))).strip()
         resp_exch = str(resp.get("exch", resp.get("exchange", ""))).strip().upper()
@@ -731,9 +775,9 @@ class SensexATMOptionRecorder:
         # underlying_ltp which holds the SENSEX spot price.
         option_ltp = _f("lp") or _f("c")
 
-        # Sanity check: reject if option LTP looks like it might be the index value.
-        # SENSEX index is ~70,000–85,000. A valid option price should be < 10,000.
-        # This is a guard against misconfigured responses, not a business ceiling.
+        # Sanity guard: SENSEX spot is ~74000+. A valid SENSEX option price
+        # should be well under 10,000. Values above 15,000 almost certainly
+        # indicate an index value leaking into the option quote path.
         if option_ltp is not None and option_ltp > 15_000:
             logger.warning(
                 "SensexATMOptionRecorder: suspicious option LTP %.2f for %s (token=%s) "
