@@ -121,22 +121,30 @@ def round_to_sensex_strike(price: float, step: int) -> int:
     return int(((float(price) + step / 2) // step) * step)
 
 
-def _build_sensex_tsym(expiry_date: date, strike: int, option_type: str) -> list[str]:
-    """
-    Build candidate Shoonya tsyms for a SENSEX option.
+def _is_last_thursday(d: date) -> bool:
+    """True if d is the last Thursday of its month (monthly expiry)."""
+    return d.weekday() == 3 and (d + timedelta(days=7)).month != d.month
 
-    Returns a list of possible tsyms to try (weekly format first, then monthly),
-    because we cannot always know which format Shoonya used at instrument creation.
+
+def _build_sensex_tsym(expiry_date: date, strike: int, option_type: str) -> str:
     """
-    ot = option_type.upper()   # "CE" or "PE"
+    Build the exact Shoonya BFO tsym for a SENSEX option.
+
+    Weekly (non-last-Thursday):  SENSEX{YY}{M}{DD}{strike}{CE/PE}
+      e.g. SENSEX2661174000CE  = 11-JUN-2026 74000 CE
+    Monthly (last Thursday):     SENSEX{YY}{MMM}{strike}{CE/PE}
+      e.g. SENSEX26JUN74000CE  = 25-JUN-2026 74000 CE
+
+    One exact tsym per contract — same approach as NIFTY options_chain.
+    """
+    ot = option_type.upper()
     yy = str(expiry_date.year % 100).zfill(2)
+    if _is_last_thursday(expiry_date):
+        mmm = expiry_date.strftime("%b").upper()
+        return f"SENSEX{yy}{mmm}{strike}{ot}"
     m_code = _MONTH_WEEKLY_CODE[expiry_date.month]
     dd = str(expiry_date.day).zfill(2)
-    mmm = expiry_date.strftime("%b").upper()   # "JUN"
-
-    weekly  = f"SENSEX{yy}{m_code}{dd}{strike}{ot}"
-    monthly = f"SENSEX{yy}{mmm}{strike}{ot}"
-    return [weekly, monthly]
+    return f"SENSEX{yy}{m_code}{dd}{strike}{ot}"
 
 
 def _parse_strike_from_sensex_tsym(tsym: str) -> Optional[int]:
@@ -294,8 +302,8 @@ class SensexOptionChain:
         results = self._client.search_scrip(_EXCHANGE, _BSXOPT_SYMNAME) or []
         self._parse_expiries_from_results(results, today, after_today, exclude_today, expiry_set)
 
-        # Pass 2: date-specific fallback using SENSEX weekly tsym prefixes
-        # Needed when BSXOPT generic search only returns current-expiry contracts.
+        # Pass 2: date-specific fallback — probe each Thursday using the correct
+        # tsym prefix format for that date (weekly vs monthly).
         if not expiry_set or len(expiry_set) < 2:
             logger.info(
                 "SensexOptionChain: BSXOPT generic search found %d expiries — "
@@ -304,23 +312,19 @@ class SensexOptionChain:
             )
             for days_ahead in range(1, 57):
                 candidate = today + timedelta(days=days_ahead)
-                # Build weekly tsym prefix for this candidate date
+                if candidate.weekday() != 3:   # only check Thursdays
+                    continue
                 yy = str(candidate.year % 100).zfill(2)
-                m_code = _MONTH_WEEKLY_CODE[candidate.month]
-                dd = str(candidate.day).zfill(2)
-                weekly_prefix = f"SENSEX{yy}{m_code}{dd}"
-                rows = self._client.search_scrip(_EXCHANGE, weekly_prefix) or []
+                if _is_last_thursday(candidate):
+                    prefix = f"SENSEX{yy}{candidate.strftime('%b').upper()}"
+                else:
+                    m_code = _MONTH_WEEKLY_CODE[candidate.month]
+                    dd = str(candidate.day).zfill(2)
+                    prefix = f"SENSEX{yy}{m_code}{dd}"
+                rows = self._client.search_scrip(_EXCHANGE, prefix) or []
                 self._parse_expiries_from_results(
                     rows, today, after_today, exclude_today, expiry_set
                 )
-                # Also try monthly format prefix for the month
-                if candidate.day == 1:   # only probe month prefix once per month
-                    mmm = candidate.strftime("%b").upper()
-                    monthly_prefix = f"SENSEX{yy}{mmm}"
-                    rows2 = self._client.search_scrip(_EXCHANGE, monthly_prefix) or []
-                    self._parse_expiries_from_results(
-                        rows2, today, after_today, exclude_today, expiry_set
-                    )
                 if len(expiry_set) >= 2:
                     break
 
@@ -393,41 +397,40 @@ class SensexOptionChain:
         if not self._client:
             return None
 
-        # Build candidate tsyms and try each
-        candidate_tsyms = _build_sensex_tsym(expiry_date, strike, ot)
-        for expected_tsym in candidate_tsyms:
-            results = self._client.search_scrip(_EXCHANGE, expected_tsym) or []
-            for r in results:
-                if not self._row_matches(r, expiry_date, strike, ot, expected_tsym):
-                    continue
+        # Build the exact tsym — deterministic from expiry date, same as NIFTY approach
+        expected_tsym = _build_sensex_tsym(expiry_date, strike, ot)
+        results = self._client.search_scrip(_EXCHANGE, expected_tsym) or []
+        for r in results:
+            if not self._row_matches(r, expiry_date, strike, ot, expected_tsym):
+                continue
 
-                tsym = r.get("tsym", "")
-                token = r.get("token", "")
-                if not tsym or not token:
-                    continue
+            tsym = r.get("tsym", "")
+            token = r.get("token", "")
+            if not tsym or not token:
+                continue
 
-                info = {
-                    "token": token,
-                    "tsym": tsym,
-                    "exchange": _EXCHANGE,
-                    "symbol": _SYMBOL,
-                    "strike": strike,
-                    "option_type": ot,
-                    "expiry": expiry_date,
-                    "expiry_str": expiry,
-                }
-                self._token_cache[cache_key] = info
-                logger.info(
-                    "SensexOptionChain: resolved %s strike=%d %s expiry=%s "
-                    "token=%s exchange=%s",
-                    tsym, strike, ot, expiry, token, _EXCHANGE,
-                )
-                return info
+            info = {
+                "token": token,
+                "tsym": tsym,
+                "exchange": _EXCHANGE,
+                "symbol": _SYMBOL,
+                "strike": strike,
+                "option_type": ot,
+                "expiry": expiry_date,
+                "expiry_str": expiry,
+            }
+            self._token_cache[cache_key] = info
+            logger.info(
+                "SensexOptionChain: resolved %s strike=%d %s expiry=%s "
+                "token=%s exchange=%s",
+                tsym, strike, ot, expiry, token, _EXCHANGE,
+            )
+            return info
 
         logger.warning(
             "SensexOptionChain: no matching OPTIDX for SENSEX %s %s %s; "
-            "tried_tsyms=%s",
-            expiry, strike, ot, candidate_tsyms,
+            "expected_tsym=%s",
+            expiry, strike, ot, expected_tsym,
         )
         return None
 
