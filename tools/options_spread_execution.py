@@ -112,7 +112,7 @@ class SpreadExecutionEngine:
     Places two-leg vertical spreads via Shoonya with hard safety invariants.
 
     Usage:
-        engine = SpreadExecutionEngine(shoonya_client, state_manager, max_open_spreads=2)
+        engine = SpreadExecutionEngine(shoonya_client, state_manager)
         result = engine.place_spread(candidate)
     """
 
@@ -120,7 +120,7 @@ class SpreadExecutionEngine:
         self,
         shoonya_client,
         state_manager,
-        max_open_spreads: int = 2,
+        max_open_spreads: int = 10,
         no_entry_after: str = "15:05",
         fill_timeout_seconds: int = _DEFAULT_FILL_TIMEOUT,
         virtual: bool = True,

@@ -53,7 +53,7 @@ Python controls ALL entries and exits. For each spread candidate Python builds, 
 ═══════════════════════════════════════
 HARD CONSTRAINTS (never override)
 ═══════════════════════════════════════
-- Max 2 simultaneous open spreads across NIFTY and BANKNIFTY
+- Max 10 simultaneous open spreads across NIFTY and BANKNIFTY
 - No pyramiding: only one open spread per instrument at a time
 - Max {max_risk_pct * 100:.0f}% capital per spread ({_fmt_inr(max_risk_amount)} max loss per spread)
 - No new entries after 3:05 PM IST

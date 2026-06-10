@@ -76,6 +76,8 @@ from config import (
     TELEGRAM_POLL_INTERVAL_SECONDS,
     TRADE_SYMBOLS,
     VIRTUAL_CAPITAL,
+    SENSEX_SPOT_TOKEN,
+    SENSEX_SPOT_EXCHANGE,
     setup_logging,
 )
 from broker.shoonya_client import ShoonyaClient, assert_client_identity
@@ -97,6 +99,7 @@ from tools.futures_filter_loader import load_active_filters, apply_promoted_filt
 from tools.gemini_gatekeeper import GeminiGatekeeper
 from tools.candidate_audit import CandidateAudit
 from tools.atm_option_recorder import ATMOptionRecorder
+from tools.sensex_atm_recorder import SensexATMOptionRecorder
 from tools.position_serial import (
     build_status_message,
     save_position_index,
@@ -152,6 +155,7 @@ class BlitzTrader:
         self._spread_exec: SpreadExecutionEngine | None = None
         self._spread_portfolio: SpreadPortfolio | None = None
         self._atm_recorder: ATMOptionRecorder | None = None
+        self._sensex_recorder: SensexATMOptionRecorder | None = None
 
     def run(self):
         """Run the full trading session."""
@@ -325,6 +329,13 @@ class BlitzTrader:
         # front-month futures, but weekly-option ATM classification uses spot.
         active_tokens["NIFTY_SPOT"] = dict(NSE_TOKENS["NIFTY"])
 
+        # SENSEX spot — subscribed for the ATM option recorder only.
+        # SENSEX is never traded; this subscription is for data collection.
+        active_tokens["SENSEX_SPOT"] = {
+            "exchange": SENSEX_SPOT_EXCHANGE,
+            "token": SENSEX_SPOT_TOKEN,
+        }
+
         # Store resolved tokens so the iteration context can surface them to the agent.
         self._active_tokens = active_tokens
 
@@ -436,6 +447,22 @@ class BlitzTrader:
         except Exception:
             logger.warning(
                 "NIFTY ATM ladder recorder failed to initialize (non-fatal)",
+                exc_info=True,
+            )
+
+        try:
+            self._sensex_recorder = SensexATMOptionRecorder(
+                base_dir=DATA_EXPORTS_DIR,
+                shoonya_client=self._shoonya,
+            )
+            self._sensex_recorder.initialise()
+            logger.info(
+                "✓ SENSEX ATM/ATM±1 recorder initialized at %s (recording only — not traded)",
+                self._sensex_recorder.export_dir,
+            )
+        except Exception:
+            logger.warning(
+                "SENSEX ATM ladder recorder failed to initialize (non-fatal)",
                 exc_info=True,
             )
 
@@ -799,7 +826,7 @@ class BlitzTrader:
         if self._goals and not self._goals.has_goals():
             self._goals.set_session_goals([
                 "Trade only deterministic scanner-confirmed option vertical spread setups",
-                "Max 2 simultaneous open spreads; no pyramiding per instrument",
+                "Max 10 simultaneous open spreads; no pyramiding per instrument",
                 "Let Python-managed spread exit thresholds handle risk (60%/60%/70%)",
             ])
             logger.info("✓ Deterministic startup goals set")
@@ -1131,6 +1158,29 @@ class BlitzTrader:
                     except Exception:
                         logger.warning(
                             "NIFTY ATM ladder sample failed (non-fatal)",
+                            exc_info=True,
+                        )
+
+                # SENSEX ATM recorder — recording only, never traded.
+                if self._sensex_recorder and self._feed:
+                    sensex_info = self._active_tokens.get("SENSEX_SPOT", {})
+                    sensex_token = sensex_info.get("token")
+                    sensex_exch = sensex_info.get("exchange", SENSEX_SPOT_EXCHANGE)
+                    if sensex_token:
+                        sensex_ltp = self._feed.get_ltp(sensex_token)
+                        if sensex_ltp and sensex_ltp > 0:
+                            try:
+                                self._sensex_recorder.update_atm(sensex_ltp)
+                            except Exception:
+                                logger.warning(
+                                    "SENSEX ATM update failed (non-fatal)",
+                                    exc_info=True,
+                                )
+                    try:
+                        self._sensex_recorder.sample_due_contracts()
+                    except Exception:
+                        logger.warning(
+                            "SENSEX ATM ladder sample failed (non-fatal)",
                             exc_info=True,
                         )
 
@@ -1732,6 +1782,15 @@ class BlitzTrader:
             except Exception:
                 logger.warning(
                     "NIFTY ATM ladder EOD flush failed (non-fatal)",
+                    exc_info=True,
+                )
+
+        if self._sensex_recorder:
+            try:
+                self._sensex_recorder.flush()
+            except Exception:
+                logger.warning(
+                    "SENSEX ATM ladder EOD flush failed (non-fatal)",
                     exc_info=True,
                 )
 

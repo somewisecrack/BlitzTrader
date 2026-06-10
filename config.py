@@ -144,7 +144,7 @@ TRADE_SYMBOLS = ("NIFTY", "BANKNIFTY")
 # ──────────────────────────────────────────────────────────────
 
 # Maximum simultaneous open option spreads
-MAX_OPEN_OPTION_SPREADS = _optional_int_env("MAX_OPEN_OPTION_SPREADS", 2)
+MAX_OPEN_OPTION_SPREADS = _optional_int_env("MAX_OPEN_OPTION_SPREADS", 10)
 # Alias used in legacy guardrail checks
 MAX_POSITIONS = MAX_OPEN_OPTION_SPREADS
 
@@ -222,6 +222,12 @@ NSE_TOKENS = {
     "BANKNIFTY": {"exchange": "NSE", "token": "26009"},
     "INDIA VIX": {"exchange": "NSE", "token": "26017"},
 }
+
+# BSE SENSEX spot index token for live-feed subscription (recording only — not traded).
+# Shoonya BSE spot index: token "1" on exchange "BSE".
+# Override via SENSEX_SPOT_TOKEN / SENSEX_SPOT_EXCHANGE env vars if Shoonya ever changes it.
+SENSEX_SPOT_TOKEN: str = _optional_env("SENSEX_SPOT_TOKEN", "1")
+SENSEX_SPOT_EXCHANGE: str = _optional_env("SENSEX_SPOT_EXCHANGE", "BSE")
 
 # NFO exchange for options/futures
 NFO_EXCHANGE = "NFO"
