@@ -139,3 +139,46 @@ the watchlist strikes on the side the break favors.
   74200–74300C (contamination). Hold side. 14:24 up-spike fails → enter
   near-money puts 73900/74000P at 14:25–14:35 → ×6.1 / ×4.0, accelerated by
   the OI unwind.
+
+---
+
+## Condition-based (time-free) formulation
+
+The clock anchors above (13:30 arm, 14:45 cutoff, the noon volume baseline)
+were proxies for market *states*, not rules. Expressed as states, time drops
+out — the conditions can only become true once theta+drift have compressed
+premium and writers have loaded OI, which is *why* they fire late. Replace
+the fixed noon baseline with each strike's trailing-median bucket volume.
+
+### Stage 1 condition — the COILED strike (per strike, session-relative)
+A strike is a candidate when all hold simultaneously:
+- **Premium crushed:** current premium ≤ ~1.25× its session low, and that
+  low is a large drop from its session high (it has actually been compressed,
+  not merely quiet).
+- **OI loaded and still building:** OI ≥ ~90% of its session high AND net OI
+  change positive over the trailing ~30 min (writers still pressing).
+- **Absorption volume:** trailing volume ≥ ~1.5× the strike's own trailing-
+  median bucket volume (turnover elevated while premium does NOT recover).
+
+One-line tell: **premium making session lows while OI makes session highs on
+rising volume** — a price/positioning divergence. **Cluster gate:** focus
+where ≥3 adjacent same-type strikes are coiled together; that wall is the
+high-conviction zone. Both option sides can coil at once — Stage 1 does not
+pick a side.
+
+### Stage 2 condition — the RELEASE (no clock)
+Enter when, on a coiled cluster:
+- **Direction commits:** underlying breaks the edge of its established
+  intraday range toward the cluster, OR a thrust to the opposite side fails
+  and reverses.
+- **OI regime flips:** the loaded OI on the firing-side strikes turns from
+  building to **unwinding** (writers covering) — price-down/OI-up flips to
+  premium-up/OI-down. This flip is the detonation and the cleanest single
+  confirmation; it is also the accelerant.
+- **Imbalance confirms:** best-5 bid imbalance ≥ +0.3 on the firing side.
+- **Strike:** the coiled strikes nearest spot on the firing side.
+
+No-go / exhaustion (replaces the 14:45 cutoff with a state): do not enter if
+OI has already substantially unwound or premium has already re-expanded —
+the fuel is spent. Exit when the OI unwind stalls and premium stops making
+new highs, or if OI starts re-building (fresh writers) against the position.
