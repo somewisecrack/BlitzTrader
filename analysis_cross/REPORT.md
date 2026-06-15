@@ -28,12 +28,14 @@ folder IDs. The table below is post-verification.
 | 11-Jun | SENSEX | 11-Jun | **0** | 24 | 73538–74393 | **×6.1** (P73900) | 5 |
 | 15-Jun | NIFTY | 16-Jun | 1 | 12 | 23820–24007 | ×1.72 (P23800) | 0 |
 | 15-Jun | SENSEX | 18-Jun | 3 | 14 | 76148–76813 | ×1.27 (P76400) | 0 |
-| 12-Jun | NIFTY | 16-Jun | 4 | 5* | 23316–23642 | ×1.91 (C23450) | 0 |
+| 12-Jun | NIFTY | 16-Jun | 4 | 14 | 23315–23643 | ×2.05 (C23500) | 0 |
 | 11-Jun | NIFTY | 16-Jun | 5 | 18 | 23074–23327 | ×1.33 (P23000) | 0 |
 | 10-Jun | NIFTY | 16-Jun | 6 | 14 | 23201–23423 | ×1.47 (C23300) | 0 |
 | 12-Jun | SENSEX | 18-Jun | 6 | 18 | 74454–75604 | ×1.66 (C74900) | 0 |
 
-*12-Jun NIFTY: partial ladder (5 near-ATM strikes); does not change the verdict.
+Note: 12-Jun NIFTY and 12-Jun SENSEX both had strong intraday rallies (~+1.4%
+and ~+1.5%) yet topped out at ×2.05 and ×1.66 — reinforcing that off-expiry
+even a big directional move can't manufacture a blast.
 
 There is a **cliff between DTE 0 and DTE 1**, not a gentle fade. Every
 non-expiry session — including the day *before* expiry (15-Jun NIFTY, DTE 1) —
