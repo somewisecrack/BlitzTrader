@@ -223,6 +223,68 @@ class TestEvaluateFuturesDaySpreadParsing:
         assert result["spread_order_placed"] == 1
         assert result["gatekeeper_approved"] == 1
 
+    def test_spread_state_prevents_journal_entries_becoming_futures_trades(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from scripts import evaluate_futures_day
+
+        runtime = tmp_path / "runtime"
+        wiki = tmp_path / "wiki"
+        (runtime / "journals").mkdir(parents=True)
+        (runtime / "candidate_signals").mkdir(parents=True)
+
+        self._make_live_state(
+            runtime,
+            spreads_traded=[self._closed_spread()],
+        )
+        (runtime / "journals" / "20260604.md").write_text(
+            """# BlitzTrader Daily Journal
+
+### 09:20:00 — ENTER_SHORT
+**Instrument:** NIFTY
+**Strategy applied:** VP-05
+**Reasoning:** Spread placed: BEAR_CALL SELL on NIFTY.
+""",
+            encoding="utf-8",
+        )
+        (runtime / "candidate_signals" / "20260604.jsonl").write_text(
+            json.dumps(
+                {
+                    "ts": "T",
+                    "signal_id": "S1",
+                    "stage": "SPREAD_ORDER_PLACED",
+                    "symbol": "NIFTY",
+                    "strategy": "VP-05",
+                    "direction": "SELL",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "evaluate_futures_day.py",
+                "--date",
+                "2026-06-04",
+                "--runtime-root",
+                str(runtime),
+                "--wiki-dir",
+                str(wiki),
+            ],
+        )
+        evaluate_futures_day.main()
+
+        output = capsys.readouterr().out
+        review = (wiki / "daily_reviews" / "2026-06-04.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Skipping journal trade fallback" in output
+        assert "1 spread-placed, 0 futures-placed" in output
+        assert "Futures trades: 0" in output
+        assert "Futures trades executed: 1" not in review
+
     def test_wiki_review_uses_spread_not_futures_label(self):
         from scripts.evaluate_futures_day import build_review_markdown, compute_trade_stats
         stats = compute_trade_stats([])

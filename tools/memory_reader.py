@@ -85,15 +85,31 @@ class MemoryReader:
         if self._state_manager:
             state = self._state_manager.get_state()
             trades = state.get("trades", [])
+            spreads = state.get("spreads_traded", [])
             pnl = state.get("daily_pnl", 0)
-            trade_count = state.get("trade_count", 0)
+            trade_count = len(trades) + len(spreads)
+            trade_details = [
+                {k: t[k] for k in ("symbol", "direction", "pnl") if k in t}
+                for t in trades
+            ]
+            spread_details = [
+                {
+                    k: spread[k]
+                    for k in ("symbol", "spread_type", "strategy", "realized_pnl")
+                    if k in spread
+                }
+                for spread in spreads
+            ]
             ground_truth = (
                 f"\n\n---\n"
                 f"## VERIFIED SESSION DATA (auto-generated, not editable by agent)\n"
                 f"- Date: {now.strftime('%Y-%m-%d')}\n"
                 f"- Actual trades executed: {trade_count}\n"
+                f"- Futures trades: {len(trades)}\n"
+                f"- Option spreads: {len(spreads)}\n"
                 f"- Actual P&L: ₹{pnl:+,.2f}\n"
-                f"- Trade details: {[{k: t[k] for k in ('symbol', 'direction', 'pnl') if k in t} for t in trades] if trades else 'None'}\n"
+                f"- Futures trade details: {trade_details or 'None'}\n"
+                f"- Option spread details: {spread_details or 'None'}\n"
             )
 
         full_content = (

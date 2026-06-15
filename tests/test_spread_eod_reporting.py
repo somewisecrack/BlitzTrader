@@ -167,6 +167,71 @@ class TestOrderExecutionSpreadTools:
         assert abs(pnl_result["daily_pnl"] - 662.0) < 0.01
 
 
+# ── Tests: Journal spread ground truth ──────────────────────────────────────
+
+class TestJournalSpreadReporting:
+    def test_stop_ground_truth_counts_and_lists_option_spreads(self, tmp_path):
+        from tools.journal_writer import JournalWriter
+
+        sm = _make_state_manager(tmp_path)
+        sm.add_traded_spread(_make_closed_spread(realized_pnl=-331.0))
+        sm.update_daily_pnl(-331.0)
+
+        journal = JournalWriter(tmp_path / "journals", 1_000_000, state_manager=sm)
+        result = journal.log_decision(action="STOP", reason="End of session")
+
+        assert result["status"] == "logged"
+        content = Path(result["journal_file"]).read_text(encoding="utf-8")
+        assert "- Actual trades executed: 1" in content
+        assert "- Futures trades: 0" in content
+        assert "- Option spreads: 1" in content
+        assert "Spread: NIFTY BEAR_CALL" in content
+        assert "P&L: ₹-331.00" in content
+        assert "No trades were executed this session" not in content
+
+    def test_session_summary_includes_spread_count_and_win_rate(self, tmp_path):
+        from tools.journal_writer import JournalWriter
+
+        journal = JournalWriter(tmp_path / "journals", 1_000_000)
+        journal.log_decision(action="ENTER_LONG", symbol="NIFTY")
+        journal.update_session_summary(
+            end_capital=1_000_100,
+            net_pnl=100,
+            total_trades=2,
+            wins=1,
+        )
+
+        content = journal._get_journal_path().read_text(encoding="utf-8")
+        assert "- **Total Trades:** 2" in content
+        assert "- **Win Rate:** 50% (1/2)" in content
+
+    def test_session_summary_repairs_already_finalized_values(self, tmp_path):
+        from tools.journal_writer import JournalWriter
+
+        journal = JournalWriter(tmp_path / "journals", 1_000_000)
+        journal.log_decision(action="ENTER_LONG", symbol="NIFTY")
+        path = journal._get_journal_path()
+        content = path.read_text(encoding="utf-8")
+        content = content.replace("- **End Capital:** —", "- **End Capital:** ₹998,694")
+        content = content.replace(
+            "- **Net P&L:** —", "- **Net P&L:** ₹-1,306 (-0.13%)"
+        )
+        content = content.replace("- **Total Trades:** 0", "- **Total Trades:** 0")
+        content = content.replace("- **Win Rate:** —", "- **Win Rate:** N/A (0/0)")
+        path.write_text(content, encoding="utf-8")
+
+        journal.update_session_summary(
+            end_capital=998_694.5,
+            net_pnl=-1_305.5,
+            total_trades=2,
+            wins=0,
+        )
+
+        repaired = path.read_text(encoding="utf-8")
+        assert "- **Total Trades:** 2" in repaired
+        assert "- **Win Rate:** 0% (0/2)" in repaired
+
+
 # ── Tests: CandidateAudit spread stages ──────────────────────────────────────
 
 class TestCandidateAuditSpreadStages:

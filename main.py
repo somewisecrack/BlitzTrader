@@ -1759,16 +1759,26 @@ class BlitzTrader:
         if self._state:
             pnl, pnl_pct = self._state.get_daily_pnl()
             trades = self._state.get_trades()
+            spreads = self._state.get_traded_spreads()
+            total_trades = len(trades) + len(spreads)
             logger.info(f"Final P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)")
-            logger.info(f"Total trades: {len(trades)}")
+            logger.info(
+                "Total trades: %d (%d futures, %d option spreads)",
+                total_trades,
+                len(trades),
+                len(spreads),
+            )
 
             if self._journal:
-                wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
+                wins = (
+                    sum(1 for t in trades if t.get("pnl", 0) > 0)
+                    + sum(1 for s in spreads if s.get("realized_pnl", 0) > 0)
+                )
                 end_capital = VIRTUAL_CAPITAL + pnl
                 self._journal.update_session_summary(
                     end_capital=end_capital,
                     net_pnl=pnl,
-                    total_trades=len(trades),
+                    total_trades=total_trades,
                     wins=wins,
                 )
 

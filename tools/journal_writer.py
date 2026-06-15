@@ -5,6 +5,7 @@ Appends structured markdown entries to journals/YYYYMMDD.md.
 Claude calls log_decision() after every action — including skips and holds.
 """
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -108,17 +109,29 @@ class JournalWriter:
         if action.upper() in ("EOD", "EOD_SUMMARY", "STOP", "ABORT", "END") and self._state_manager:
             state = self._state_manager.get_state()
             trades = state.get("trades", [])
+            spreads = state.get("spreads_traded", [])
             pnl = state.get("daily_pnl", 0)
-            trade_count = state.get("trade_count", 0)
+            trade_count = len(trades) + len(spreads)
             entry += (
                 f"\n**[SYSTEM VERIFIED DATA — auto-injected, not from agent]**\n"
                 f"- Actual trades executed: {trade_count}\n"
+                f"- Futures trades: {len(trades)}\n"
+                f"- Option spreads: {len(spreads)}\n"
                 f"- Actual P&L: ₹{pnl:+,.2f}\n"
             )
             if trades:
                 for t in trades:
                     entry += f"- Trade: {t.get('direction', '?')} {t.get('symbol', '?')} | Entry: ₹{t.get('entry_price', 0):.2f} | Exit: ₹{t.get('exit_price', 0):.2f} | P&L: ₹{t.get('pnl', 0):+,.2f}\n"
-            else:
+            if spreads:
+                for spread in spreads:
+                    entry += (
+                        f"- Spread: {spread.get('symbol', '?')} "
+                        f"{spread.get('spread_type', '?')} | "
+                        f"Strategy: {spread.get('strategy', '—')} | "
+                        f"P&L: ₹{spread.get('realized_pnl', 0):+,.2f} | "
+                        f"Status: {'closed' if spread.get('closed') else 'open'}\n"
+                    )
+            if not trades and not spreads:
                 entry += f"- No trades were executed this session.\n"
 
         entry += "\n"
@@ -155,22 +168,22 @@ class JournalWriter:
 
             win_rate = f"{wins / total_trades * 100:.0f}%" if total_trades > 0 else "N/A"
 
-            content = content.replace(
-                "- **End Capital:** —",
-                f"- **End Capital:** ₹{end_capital:,.0f}",
-            )
-            content = content.replace(
-                "- **Net P&L:** —",
-                f"- **Net P&L:** ₹{net_pnl:+,.0f} ({net_pnl / self._capital * 100:+.2f}%)",
-            )
-            content = content.replace(
-                "- **Total Trades:** 0",
-                f"- **Total Trades:** {total_trades}",
-            )
-            content = content.replace(
-                "- **Win Rate:** —",
-                f"- **Win Rate:** {win_rate} ({wins}/{total_trades})",
-            )
+            summary_values = {
+                "End Capital": f"₹{end_capital:,.0f}",
+                "Net P&L": (
+                    f"₹{net_pnl:+,.0f} "
+                    f"({net_pnl / self._capital * 100:+.2f}%)"
+                ),
+                "Total Trades": str(total_trades),
+                "Win Rate": f"{win_rate} ({wins}/{total_trades})",
+            }
+            for label, value in summary_values.items():
+                content = re.sub(
+                    rf"(?m)^- \*\*{re.escape(label)}:\*\* .*$",
+                    f"- **{label}:** {value}",
+                    content,
+                    count=1,
+                )
 
             path.write_text(content, encoding="utf-8")
             logger.info("Updated session summary in journal")

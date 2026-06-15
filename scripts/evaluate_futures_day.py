@@ -1030,11 +1030,21 @@ def main():
         except Exception:
             pass
 
-    if not all_executed and journal_data["executed"]:
+    if (
+        not all_executed
+        and not closed_spreads
+        and not open_spreads_list
+        and journal_data["executed"]
+    ):
         # Fallback: use journal ENTER_LONG/ENTER_SHORT entries
         all_executed = journal_data["executed"]
         source_note = "journal (ENTER_LONG/ENTER_SHORT entries — P&L may be unavailable)"
         print(f"  Using journal fallback: {len(all_executed)} executed trade(s)")
+    elif journal_data["executed"] and (closed_spreads or open_spreads_list):
+        print(
+            "  Skipping journal trade fallback because option spreads are "
+            "already available in live_state.json"
+        )
     elif not journal_path.exists():
         print("  (journal not found, skipping)")
 
@@ -1077,7 +1087,8 @@ def main():
             f"{candidate_audit_data['guardrail_blocked']} guardrail-blocked, "
             f"{candidate_audit_data['python_rejected']} Python-rejected, "
             f"{candidate_audit_data['gatekeeper_rejected']} gate-rejected, "
-            f"{candidate_audit_data['orders_placed']} placed"
+            f"{candidate_audit_data['spread_order_placed']} spread-placed, "
+            f"{candidate_audit_data['orders_placed']} futures-placed"
         )
     else:
         print(f"[evaluate_futures_day] Candidate audit not found (skipping): {audit_path}")
