@@ -36,7 +36,7 @@ def parse_symbol(stem):
 
 def load(path):
     rows = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(errors="replace").splitlines():
         if not line.strip():
             continue
         try:

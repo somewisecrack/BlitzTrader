@@ -80,6 +80,25 @@ before any of this is tradeable.
 
 ---
 
+## Stage 0 — the gate: only at 0 DTE (cross-day survey, 09–15 Jun)
+
+A survey of every day with per-strike data (8 index-sessions, see
+`analysis_cross/REPORT.md`) shows ×3+ blasts occur **only on expiry day
+(0 DTE)**. There is a cliff, not a fade: the two 0-DTE sessions blast ×6–10
+(3–5 strikes each); all six non-expiry sessions — including T-1 — cap at
+×1.3–1.9 across the whole ATM ladder.
+
+The control case is 12-Jun SENSEX: a +1150-point (~1.5%) intraday index move
+with **no** blast (max ×1.66), because it was 6 DTE. The same-size move at
+0 DTE (11-Jun SENSEX) gave ×6–9. So a blast needs terminal gamma, not just a
+big underlying move; gamma ~1/√T explodes only in the final ~90 minutes, which
+is exactly when both blasts fired (14:25–15:05).
+
+**Gate: only hunt blasts at 0 DTE, arming in the final ~2 hours. On any
+non-expiry day, skip — the fuel (terminal gamma) is absent no matter how
+coiled a strike looks or how far the index travels.** Stages 1–2 below operate
+only inside this gate.
+
 ## Operational playbook — two stages
 
 All thresholds are self-normalized to each strike's own session (volume vs
