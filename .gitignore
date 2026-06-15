@@ -24,3 +24,10 @@ strategies/*.bak
 
 # macOS
 .DS_Store
+
+# Cross-day analysis raw downloads (large, reproducible from Drive)
+analysis_cross/raw/
+analysis_*/raw/
+
+# Agent worktrees / local Claude state
+.claude/
