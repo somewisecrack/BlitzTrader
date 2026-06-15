@@ -1,0 +1,10 @@
+[Unit]
+Description=GammaBlast Post-Market Wiki Loop Timer
+Requires=gammablast-wiki-loop.service
+
+[Timer]
+OnCalendar=Tue,Thu *-*-* 15:30:00 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target

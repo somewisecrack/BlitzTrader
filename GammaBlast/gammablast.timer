@@ -1,0 +1,11 @@
+[Unit]
+Description=Start GammaBlast at 8:55 AM IST (before 09:15 market open)
+
+[Timer]
+# NIFTY (Tuesday) and SENSEX (Thursday): ExecCondition in the service filters non-expiry days
+OnCalendar=Tue,Thu *-*-* 08:55:00 Asia/Kolkata
+Persistent=false
+Unit=gammablast.service
+
+[Install]
+WantedBy=timers.target
