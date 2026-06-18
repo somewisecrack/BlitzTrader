@@ -62,4 +62,5 @@ Key rules (v1):
 - **Stage 2 (RELEASE):** underlying breaks post-13:00 range edge toward
   cluster; OI flips building→unwinding; bid imbalance ≥+0.3.
 
-See `analysis_common/RULES.md` in the research branch for full derivation.
+See `GammaBlast/research/analysis_common/RULES.md` for full derivation, and
+`GammaBlast/research/analysis_cross/REPORT.md` for the cross-day survey.
