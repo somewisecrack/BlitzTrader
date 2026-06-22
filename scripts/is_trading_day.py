@@ -1,8 +1,9 @@
 """
 Systemd ExecCondition helper for BlitzTrader.
 
-Exit 0 on NSE trading days. Exit 1 on weekends/known NSE holidays so systemd
-skips ExecStart without marking the service as failed.
+Exit 0 on eligible Monday, Wednesday, and Friday NSE trading days. Exit 1 on
+Tuesday/Thursday GammaBlast sessions, weekends, and known NSE holidays so
+systemd skips ExecStart without marking the service as failed.
 """
 from __future__ import annotations
 
@@ -26,13 +27,20 @@ def _parse_date_arg(argv: list[str]) -> date:
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv
     day = _parse_date_arg(args)
-    if is_nse_trading_day(day):
-        print(f"NSE trading day: {day.isoformat()}")
-        return 0
+    if not is_nse_trading_day(day):
+        reason = get_market_holiday_name(day) or "weekend"
+        print(f"NSE market closed: {day.isoformat()} ({reason})")
+        return 1
 
-    reason = get_market_holiday_name(day) or "weekend"
-    print(f"NSE market closed: {day.isoformat()} ({reason})")
-    return 1
+    if day.weekday() in {1, 3}:
+        print(
+            f"BlitzTrader disabled: {day.isoformat()} "
+            "(Tuesday/Thursday reserved for GammaBlast)"
+        )
+        return 1
+
+    print(f"BlitzTrader trading day: {day.isoformat()}")
+    return 0
 
 
 if __name__ == "__main__":

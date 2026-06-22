@@ -3,7 +3,7 @@ Description=BlitzTrader Post-Market Wiki Loop Timer
 Requires=blitztrader-wiki-loop.service
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 15:30:00 Asia/Kolkata
+OnCalendar=Mon,Wed,Fri *-*-* 15:30:00 Asia/Kolkata
 Persistent=false
 
 [Install]
