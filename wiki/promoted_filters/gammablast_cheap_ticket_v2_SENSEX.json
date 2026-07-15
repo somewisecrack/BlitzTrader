@@ -1,0 +1,21 @@
+{
+  "id": "cheap_ticket_v2_sensex",
+  "scope": "SENSEX",
+  "rules": {
+    "ENTRY_MAX_PREMIUM": 2.0,
+    "ENTRY_MAX_PREMIUM_TIER": 6.0,
+    "ENTRY_TIER_ENABLED": true,
+    "DIRECTION_WINDOW_MIN": 5,
+    "MIN_UNDERLYING_MOVE_5M": 38.0,
+    "PROXIMITY_PCT": 0.006,
+    "SCALE_OUT_MULT": 3.0,
+    "SCALE_OUT_FRAC": 0.5,
+    "TRAIL_FRAC": 0.25,
+    "TRAIL_ACTIVATE_MULT": 2.0,
+    "ENTRY_CUTOFF": "15:00",
+    "TIME_STOP": "15:12",
+    "COOLDOWN_MIN": 15,
+    "LADDER_OFFSETS": 8,
+    "LOT_SIZE": 25
+  }
+}
