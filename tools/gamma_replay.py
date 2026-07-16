@@ -36,8 +36,8 @@ late entries that always came *after* the move.
   5. SCALE + TRAIL EXIT  — scale out scale_out_frac at scale_out_mult, then trail
                            the remainder at trail_frac of the peak. Cheap tickets
                            are not hard-stopped on a fraction of a 1-rupee premium.
-  6. TIME STOP           — flatten everything at time_stop_hhmm; no entries after
-                           entry_cutoff_hhmm (last-minutes prints are fake liquidity).
+  6. TIME STOP           — record the feed to 15:30 (the NSE/BSE close), allow new
+                           entries up to 15:25, and flatten everything at 15:30.
   7. RE-ENTRY COOLDOWN   — no re-entry on the same strike+side within
                            cooldown_min minutes of an exit.
 
@@ -98,9 +98,14 @@ class RuleConfig:
     trail_frac: float = 0.25                # TRAIL_FRAC (of running peak)
     trail_activate_mult: float = 2.0        # TRAIL_ACTIVATE_MULT (arm trail at 2x)
 
-    # Time controls (IST HH:MM)
-    entry_cutoff_hhmm: str = "15:00"        # ENTRY_CUTOFF
-    time_stop_hhmm: str = "15:12"           # TIME_STOP
+    # Time controls (IST HH:MM). Both NSE (NIFTY) and BSE (SENSEX) trade the
+    # continuous session to 15:30, so the feed is recorded to the close and the
+    # last entry is allowed at 15:25 — the previous 15:00 cutoff / 15:12 stop
+    # threw away the wildest 15 minutes of expiry-day gamma. Positions are
+    # flattened at 15:30 (the close).
+    entry_cutoff_hhmm: str = "15:25"        # ENTRY_CUTOFF  (last new entry)
+    time_stop_hhmm: str = "15:30"           # TIME_STOP     (flatten at close)
+    recorder_end_hhmm: str = "15:30"        # RECORDER_END  (feed recorded to close)
 
     # Re-entry cooldown
     cooldown_min: int = 15                  # COOLDOWN_MIN
@@ -130,6 +135,7 @@ class RuleConfig:
             "TRAIL_ACTIVATE_MULT": self.trail_activate_mult,
             "ENTRY_CUTOFF": self.entry_cutoff_hhmm,
             "TIME_STOP": self.time_stop_hhmm,
+            "RECORDER_END": self.recorder_end_hhmm,
             "COOLDOWN_MIN": self.cooldown_min,
             "LADDER_OFFSETS": self.ladder_offsets,
             "LOT_SIZE": self.lot_size,

@@ -39,8 +39,12 @@ always came after the move**.
 5. **Scale + trail exit.** Scale out 50% at 3×, then trail the remainder at 25%
    of the running gain (armed at 2×). Cheap tickets are never hard-stopped on a
    fraction of a 1-rupee premium — the ticket *is* the stop.
-6. **Time controls.** No entries after 15:00 (late prints are fake liquidity);
-   flatten everything at 15:12.
+6. **Time controls.** Record the feed to **15:30** (the NSE *and* BSE close —
+   both exchanges trade the continuous session to 15:30), allow new entries up to
+   **15:25**, and flatten everything at **15:30**. The legacy 15:15 recorder cutoff
+   and early entry stop discarded the wildest 15 minutes of expiry-day gamma
+   (`RECORDER_END`, `ENTRY_CUTOFF`, `TIME_STOP`). Caveat: the final minute or two
+   can print thin/fake liquidity — the scale+trail exit and cooldown blunt that.
 7. **Re-entry cooldown.** No re-entry on the same strike+side within 15 min of an
    exit (kills the revenge-entry seen on Jul 14 trade #2).
 8. **Widen the ladder to ±8.** The legacy ±2 ladder never tracks the deep-OTM
@@ -80,6 +84,16 @@ The live GammaBlast loads scoped promoted rules at startup (its log shows
    to the box's promoted-rules directory.
 2. Restart the GammaBlast session; it applies the scoped thresholds on the next
    expiry day. No engine source edit and no LLM involvement.
+
+**Note on the 15:30 window (`RECORDER_END` / `ENTRY_CUTOFF` / `TIME_STOP`).**
+The numeric-threshold rules above are honoured purely via the promoted-rules
+loader. But if the box's ladder recorder and main scan loop hard-code the
+old 15:15 EOD (the recorder shut off at 15:15:04 on 16 Jul, missing 15:15–15:30),
+those two call sites must be changed to read `RECORDER_END`/`ENTRY_CUTOFF` (or
+be bumped to 15:30/15:25) for the extended window to take effect — that is a
+GammaBlast source change on the box, not something the promoted-rules file alone
+can do. Verify against the next session's ladder: its last tick should be ~15:30,
+not ~15:15.
 
 **Recommend paper-running (already virtual) for ~4 expiry sessions before
 trusting live** — two sessions is not enough to prove the trend-day edge.

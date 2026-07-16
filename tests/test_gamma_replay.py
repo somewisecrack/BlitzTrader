@@ -35,7 +35,9 @@ def test_promoted_rules_roundtrip():
     rules = cfg.promoted_rules()
     assert rules["ENTRY_MAX_PREMIUM"] == 2.0
     assert rules["ENTRY_MAX_PREMIUM_TIER"] == 6.0
-    assert rules["TIME_STOP"] == "15:12"
+    assert rules["ENTRY_CUTOFF"] == "15:25"
+    assert rules["TIME_STOP"] == "15:30"
+    assert rules["RECORDER_END"] == "15:30"
     assert rules["LOT_SIZE"] == 25
 
 
@@ -108,20 +110,20 @@ def test_premium_cap_blocks_expensive_entry(tmp_path):
 
 
 def test_time_stop_flattens_position(tmp_path):
-    """An open position is flattened at the time stop even if still rising."""
+    """An open position is flattened at the 15:30 close even if still rising."""
     rows = [
-        ("14:58:00", 1.0, 24010),
-        ("14:59:00", 1.5, 24040),   # direction ok, cheap -> entry
-        ("15:11:00", 5.0, 24095),
-        ("15:12:30", 6.0, 24099),   # >= 15:12 time stop -> exit here
-        ("15:14:00", 9.0, 24101),   # never reached (after time stop)
+        ("15:20:00", 1.0, 24010),
+        ("15:21:00", 1.5, 24040),   # direction ok, cheap, before 15:25 cutoff -> entry
+        ("15:29:00", 5.0, 24095),
+        ("15:30:10", 6.0, 24099),   # >= 15:30 time stop -> exit here
+        ("15:31:00", 9.0, 24101),   # never reached (after the close)
     ]
     _write_ladder(tmp_path, 24100, "CE", rows)
     strikes, _ = gr.load_ladder_dir(tmp_path)
     trades = gr.replay(strikes, CONFIGS["nifty"])
     assert len(trades) == 1
     assert trades[0].exit_reason == "TIME_STOP"
-    assert trades[0].exit_ts <= "15:12:30"
+    assert trades[0].exit_ts <= "15:30:10"
 
 
 def test_winner_pnl_is_positive_and_scaled(tmp_path):
@@ -172,16 +174,33 @@ def test_cooldown_blocks_immediate_reentry(tmp_path):
 
 
 def test_no_entry_after_cutoff(tmp_path):
-    """Cheap directional setups after the entry cutoff are ignored."""
+    """Cheap directional setups after the 15:25 entry cutoff are ignored."""
     rows = [
-        ("15:01:00", 1.0, 24010),
-        ("15:02:00", 1.5, 24040),   # direction ok + cheap, but after 15:00 cutoff
-        ("15:03:00", 4.0, 24080),
+        ("15:26:00", 1.0, 24010),
+        ("15:27:00", 1.5, 24040),   # direction ok + cheap, but after 15:25 cutoff
+        ("15:28:00", 4.0, 24080),
     ]
     _write_ladder(tmp_path, 24100, "CE", rows)
     strikes, _ = gr.load_ladder_dir(tmp_path)
     trades = gr.replay(strikes, CONFIGS["nifty"])
     assert trades == []
+
+
+def test_entry_allowed_in_late_window(tmp_path):
+    """A cheap directional setup at 15:20 (after old 15:00 cutoff) now trades."""
+    rows = [
+        ("15:18:00", 1.0, 24010),
+        ("15:19:00", 1.2, 24030),
+        ("15:20:00", 1.6, 24050),   # direction ok + cheap, within new 15:25 window
+        ("15:21:00", 4.0, 24080),
+        ("15:22:00", 6.0, 24092),
+        ("15:23:00", 3.0, 24070),
+    ]
+    _write_ladder(tmp_path, 24100, "CE", rows)
+    strikes, _ = gr.load_ladder_dir(tmp_path)
+    trades = gr.replay(strikes, CONFIGS["nifty"])
+    assert len(trades) == 1
+    assert trades[0].entry_ts <= "15:20:00"
 
 
 # ── Loader robustness ───────────────────────────────────────────────────────────
