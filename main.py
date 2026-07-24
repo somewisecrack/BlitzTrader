@@ -48,6 +48,7 @@ from config import (
     MASTER_STRATEGY_FILE,
     MAX_DAILY_LOSS_AMOUNT,
     MAX_POSITIONS,
+    PAIR_CREDIT_REPLACEMENT_MODE,
     MAX_OPEN_OPTION_SPREADS,
     OPTION_SPREAD_MAX_RISK_RUPEES,
     SPREAD_MAX_LOSS_EXIT_FRACTION,
@@ -110,6 +111,7 @@ from tools.options_chain import OptionsChain
 from tools.options_spread_builder import SpreadBuilder
 from tools.options_spread_execution import SpreadExecutionEngine
 from tools.options_spread_portfolio import SpreadPortfolio
+from tools.pair_credit_trader import make_pair_credit_trader_from_config
 from context_builder import (
     SYSTEM_PROMPT,
     build_chat_context,
@@ -164,6 +166,10 @@ class BlitzTrader:
         logger.info("  BlitzTrader — Starting Session")
         logger.info("=" * 60)
 
+        if PAIR_CREDIT_REPLACEMENT_MODE:
+            self._run_pair_credit_replacement_session()
+            return
+
         today = datetime.now(IST).date()
         if not is_nse_trading_day(today):
             holiday_name = get_market_holiday_name(today)
@@ -194,6 +200,172 @@ class BlitzTrader:
             logger.exception("Fatal error in main loop")
         finally:
             self._shutdown()
+
+    def _run_pair_credit_replacement_session(self):
+        """
+        Replacement mode: virtual NIFTY50 cointegrated-pair credit spreads.
+
+        No market-data recorder, no ATM ladder recorder, no Google Drive data
+        export. Only position open/close state and ledger entries are written.
+        """
+        logger.info("=== PAIR CREDIT REPLACEMENT MODE ===")
+        today = datetime.now(IST).date()
+        if not is_nse_trading_day(today):
+            holiday_name = get_market_holiday_name(today)
+            logger.info("NSE market closed today (%s): %s", today.isoformat(), holiday_name or "weekend")
+            return
+
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+        self._telegram = TelegramHandler(TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHORIZED_USER_ID)
+        self._telegram.start()
+
+        try:
+            self._check_disk_space()
+            self._check_storage_mount()
+            self._telegram.send_telegram(
+                "BlitzTrader replacement mode starting: virtual NIFTY50 pair credit spreads."
+            )
+
+            self._shoonya = ShoonyaClient()
+            max_retries = 100
+            retry_interval = 300
+            for attempt in range(1, max_retries + 1):
+                success, msg = self._shoonya.login(
+                    user_id=SHOONYA_USER_ID,
+                    password=SHOONYA_PASSWORD,
+                    totp_secret=SHOONYA_TOTP_SECRET,
+                    api_key=SHOONYA_API_KEY,
+                    vendor_code=SHOONYA_VENDOR_CODE,
+                    imei=SHOONYA_IMEI,
+                    secret_code=SHOONYA_SECRET_CODE,
+                    auth_code=SHOONYA_AUTH_CODE,
+                )
+                if success:
+                    break
+                logger.warning("Shoonya login attempt %d/%d failed: %s", attempt, max_retries, msg)
+                if attempt % 5 == 0:
+                    self._telegram.send_telegram(
+                        f"Shoonya still offline/login failing (attempt {attempt}). Retrying."
+                    )
+                commands = self._telegram.get_pending_commands()
+                if any(c.get("command") == "/abort" for c in commands):
+                    raise RuntimeError("Aborted by user during login retry")
+                time.sleep(retry_interval)
+            else:
+                self._telegram.send_telegram("BlitzTrader: Shoonya login failed after all retries.")
+                raise RuntimeError("Shoonya login failed after all retries")
+
+            self._telegram.send_telegram("Shoonya login successful. Running pre-open pair scan.")
+            pair_trader = make_pair_credit_trader_from_config(telegram=self._telegram)
+
+            expiry_results = pair_trader.close_expired_positions()
+            for result in expiry_results:
+                if result.get("ok"):
+                    pos = result["position"]
+                    self._telegram.send_telegram(
+                        f"Automatic expiry exit: {pos.get('pair')} | "
+                        f"P&L Rs {float(result.get('realized_pnl') or 0):+,.2f}"
+                    )
+                else:
+                    pos = result.get("position") or {}
+                    self._telegram.send_telegram(
+                        f"Expiry exit pending: {pos.get('pair', '?')} | {result.get('error')}"
+                    )
+
+            self._telegram.send_telegram(pair_trader.status_message())
+            allocation = pair_trader.run_opening_allocation()
+            logger.info(
+                "Pair-credit opening allocation: opened=%d insufficient=%d rejected=%d remaining=%.2f",
+                len(allocation.get("opened", [])),
+                len(allocation.get("insufficient", [])),
+                len(allocation.get("rejected", [])),
+                float(allocation.get("remaining", 0) or 0),
+            )
+
+            self._running = True
+            self._pair_credit_monitor_loop(pair_trader)
+        except KeyboardInterrupt:
+            logger.info("Pair-credit mode interrupted")
+        except Exception:
+            logger.exception("Fatal error in pair-credit replacement mode")
+            if self._telegram:
+                self._telegram.send_telegram("Pair-credit replacement mode failed. Check logs.")
+        finally:
+            if self._telegram:
+                self._telegram.stop()
+
+    def _pair_credit_monitor_loop(self, pair_trader):
+        """Monitor Telegram commands and automatic expiry exits until market close."""
+        logger.info("=== PAIR CREDIT MONITOR LOOP STARTED ===")
+        while self._running:
+            now = datetime.now(IST)
+            eod_time = now.replace(hour=15, minute=25, second=0, microsecond=0)
+            if now >= eod_time:
+                logger.info("Pair-credit monitor EOD reached; positions remain open unless expired")
+                self._running = False
+                return
+
+            commands = self._telegram.get_pending_commands()
+            for cmd in commands:
+                text = (cmd.get("text") or "").lower().strip()
+                command = cmd.get("command") or ""
+                if command == "/abort":
+                    self._telegram.send_telegram(
+                        "Abort received. Service stopping; virtual pair-credit positions remain open."
+                    )
+                    self._running = False
+                    return
+
+                import re as _re
+                m = None
+                for pattern in (
+                    r"\bexit\s+#?(\d+)\b",
+                    r"\bclose\s+(?:position\s+|spread\s+|serial\s+)?#?(\d+)\b",
+                    r"\bsquare\s+off\s+#?(\d+)\b",
+                ):
+                    m = _re.search(pattern, text)
+                    if m:
+                        break
+                if m:
+                    serial = int(m.group(1))
+                    result = pair_trader.close_by_serial(serial)
+                    if result.get("ok"):
+                        pos = result["position"]
+                        self._telegram.send_telegram(
+                            f"Closed #{serial}: {pos.get('pair')} | "
+                            f"Realized P&L Rs {float(result.get('realized_pnl') or 0):+,.2f}\n"
+                            "Freed capital will be considered only during the next trading day's opening scan."
+                        )
+                    else:
+                        self._telegram.send_telegram(f"Could not close #{serial}: {result.get('error')}")
+                    continue
+
+                if command == "/status" or any(
+                    word in text for word in ("status", "position", "positions", "pnl", "p&l", "profit", "loss")
+                ):
+                    self._telegram.send_telegram(pair_trader.status_message())
+                    continue
+
+                self._telegram.send_telegram(
+                    "Supported commands: status, positions, pnl, exit #N, /abort."
+                )
+
+            expiry_results = pair_trader.close_expired_positions()
+            for result in expiry_results:
+                if result.get("ok"):
+                    pos = result["position"]
+                    self._telegram.send_telegram(
+                        f"Automatic expiry exit: {pos.get('pair')} | "
+                        f"P&L Rs {float(result.get('realized_pnl') or 0):+,.2f}"
+                    )
+                else:
+                    pos = result.get("position") or {}
+                    self._telegram.send_telegram(
+                        f"Expiry exit pending: {pos.get('pair', '?')} | {result.get('error')}"
+                    )
+            time.sleep(TELEGRAM_POLL_INTERVAL_SECONDS)
 
     # ──────────────────────────────────────────────────────────
     #   INITIALIZATION

@@ -25,3 +25,5 @@ pandas>=2.2.0
 scipy>=1.13.0
 statsmodels>=0.14.0
 yfinance>=0.2.40
+nselib>=2.5.1
+curl_cffi>=0.15.0

@@ -2,8 +2,6 @@
 Description=BlitzTrader Autonomous Trading Agent
 After=network-online.target
 Wants=network-online.target
-Wants=rclone-blitztrader-drive.service
-After=rclone-blitztrader-drive.service
 
 [Service]
 Type=simple
@@ -23,8 +21,7 @@ TimeoutStopSec=30
 # Restart only on unexpected failures (not normal exit)
 Restart=no
 
-# Keep service-manager logs local. App/runtime artifacts can still use
-# the configured runtime storage path and upload/export flow separately.
+# Keep service-manager logs local. Pair-credit mode records only position ledgers.
 StandardOutput=journal
 StandardError=journal
 

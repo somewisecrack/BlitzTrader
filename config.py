@@ -73,6 +73,8 @@ LOGS_DIR = RUNTIME_STORAGE_DIR / "logs"
 DATA_EXPORTS_DIR = RUNTIME_STORAGE_DIR / "data_exports"
 STATE_FILE = RUNTIME_STORAGE_DIR / "live_state.json"
 CANDIDATE_AUDIT_DIR = RUNTIME_STORAGE_DIR / "candidate_signals"
+PAIR_CREDIT_STATE_FILE = RUNTIME_STORAGE_DIR / "pair_credit_positions.json"
+PAIR_CREDIT_LEDGER_FILE = RUNTIME_STORAGE_DIR / "pair_credit_ledger.jsonl"
 
 # Ensure directories exist
 JOURNALS_DIR.mkdir(parents=True, exist_ok=True)
@@ -138,6 +140,33 @@ RCLONE_FOLDER = _optional_env("RCLONE_FOLDER", "BlitzTrader")
 
 VIRTUAL_CAPITAL = 1_000_000  # ₹10,00,000
 TRADE_SYMBOLS = ("NIFTY", "BANKNIFTY")
+
+# ──────────────────────────────────────────────────────────────
+#   PAIR CREDIT-SPREAD REPLACEMENT MODE
+# ──────────────────────────────────────────────────────────────
+
+PAIR_CREDIT_REPLACEMENT_MODE = (
+    _optional_env("PAIR_CREDIT_REPLACEMENT_MODE", "true").lower()
+    in {"1", "true", "yes", "on"}
+)
+
+_LOCAL_OMNISPREAD_BACKEND = Path("/Users/rahulgirishkumar/PROJECTS/omnispread/backend")
+_VM_OMNISPREAD_BACKEND = Path("/opt/omnispread/backend")
+OMNISPREAD_BACKEND_PATH = Path(
+    _optional_env(
+        "OMNISPREAD_BACKEND_PATH",
+        str(_LOCAL_OMNISPREAD_BACKEND if _LOCAL_OMNISPREAD_BACKEND.exists() else _VM_OMNISPREAD_BACKEND),
+    )
+).expanduser()
+
+PAIR_CREDIT_PRESET = _optional_env("PAIR_CREDIT_PRESET", "nifty_50")
+PAIR_CREDIT_PERIOD = _optional_env("PAIR_CREDIT_PERIOD", "1y")
+PAIR_CREDIT_INTERVAL = _optional_env("PAIR_CREDIT_INTERVAL", "1d")
+PAIR_CREDIT_TOP_N = _optional_int_env("PAIR_CREDIT_TOP_N", 50)
+PAIR_CREDIT_CAPITAL = float(_optional_env("PAIR_CREDIT_CAPITAL", str(VIRTUAL_CAPITAL)))
+PAIR_CREDIT_STRIKE_RULE = _optional_env("PAIR_CREDIT_STRIKE_RULE", "vol")
+PAIR_CREDIT_SOLD_SD = float(_optional_env("PAIR_CREDIT_SOLD_SD", "1.0"))
+PAIR_CREDIT_HEDGE_SD = float(_optional_env("PAIR_CREDIT_HEDGE_SD", "2.5"))
 
 # ──────────────────────────────────────────────────────────────
 #   OPTION SPREAD TRADING PARAMETERS
