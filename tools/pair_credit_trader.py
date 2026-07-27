@@ -152,6 +152,8 @@ class OmniSpreadReadOnlyAdapter:
         self._loaded = False
         self._shoonya_client = None
         self._option_token_cache: dict[str, dict[str, Any]] = {}
+        self._iv_cache: dict[tuple[str, str, float, str], float | None] = {}
+        self._hv_cache: dict[tuple[str, date, int, int, int], dict[str, Any] | None] = {}
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -317,6 +319,193 @@ class OmniSpreadReadOnlyAdapter:
             return None
         return price if math.isfinite(price) and price >= 0 else None
 
+    @staticmethod
+    def _trading_days_to_expiry(expiry: date, today: date | None = None) -> int:
+        today = today or _now_ist().date()
+        if expiry <= today:
+            return 1
+        days = 0
+        cursor = today + timedelta(days=1)
+        while cursor <= expiry:
+            if cursor.weekday() < 5:
+                days += 1
+            cursor += timedelta(days=1)
+        return max(1, days)
+
+    @staticmethod
+    def _hv_lookback_days(
+        expiry: date,
+        min_days: int,
+        max_days: int,
+        multiplier: int,
+        today: date | None = None,
+    ) -> int:
+        trading_days = OmniSpreadReadOnlyAdapter._trading_days_to_expiry(expiry, today=today)
+        return max(int(min_days), min(int(max_days), trading_days * int(multiplier)))
+
+    def historical_volatility(
+        self,
+        symbol: str,
+        expiry: date,
+        min_days: int,
+        max_days: int,
+        multiplier: int,
+    ) -> dict[str, Any] | None:
+        lookback = self._hv_lookback_days(expiry, min_days, max_days, multiplier)
+        ticker = symbol if str(symbol).upper().endswith(".NS") else f"{str(symbol).upper()}.NS"
+        cache_key = (ticker, expiry, int(min_days), int(max_days), int(multiplier))
+        if cache_key in self._hv_cache:
+            return self._hv_cache[cache_key]
+        try:
+            import numpy as np
+            import yfinance as yf
+
+            period_days = max(45, lookback * 4)
+            df = yf.download(
+                ticker,
+                period=f"{period_days}d",
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            if df is None or df.empty:
+                self._hv_cache[cache_key] = None
+                return None
+            close = df["Close"].dropna()
+            if hasattr(close, "columns"):
+                close = close.iloc[:, 0]
+            if len(close) < lookback + 1:
+                self._hv_cache[cache_key] = None
+                return None
+            returns = np.log(close / close.shift(1)).dropna().tail(lookback)
+            if len(returns) < lookback:
+                self._hv_cache[cache_key] = None
+                return None
+            hv = float(returns.std(ddof=1) * math.sqrt(252) * 100.0)
+            if not math.isfinite(hv) or hv <= 0:
+                self._hv_cache[cache_key] = None
+                return None
+            result = {
+                "symbol": ticker,
+                "hv": hv,
+                "lookback_days": lookback,
+                "trading_days_to_expiry": self._trading_days_to_expiry(expiry),
+                "source": "yfinance",
+            }
+            self._hv_cache[cache_key] = result
+            return result
+        except Exception:
+            logger.exception("Pair-credit vol gate: HV unavailable for %s", ticker)
+            self._hv_cache[cache_key] = None
+            return None
+
+    def option_iv(self, leg: dict[str, Any]) -> float | None:
+        expiry = _parse_expiry(str(leg.get("expiry", "")))
+        if not expiry:
+            return None
+        symbol = str(leg.get("symbol", "")).upper()
+        option_type = str(leg.get("instrument", "")).upper()
+        strike = float(leg.get("strike"))
+        cache_key = (symbol, expiry.isoformat(), strike, option_type)
+        if cache_key in self._iv_cache:
+            return self._iv_cache[cache_key]
+        try:
+            from nselib import derivatives
+
+            chain = derivatives.nse_live_option_chain(
+                symbol=symbol,
+                expiry_date=expiry.strftime("%d-%m-%Y"),
+                oi_mode="compact",
+            )
+            if chain is None or chain.empty:
+                self._iv_cache[cache_key] = None
+                return None
+            rows = chain[chain["Strike_Price"].astype(float) == strike]
+            if rows.empty:
+                self._iv_cache[cache_key] = None
+                return None
+            col = "CALLS_IV" if option_type == "CE" else "PUTS_IV" if option_type == "PE" else ""
+            if not col:
+                self._iv_cache[cache_key] = None
+                return None
+            iv = float(rows.iloc[0][col])
+            if not math.isfinite(iv) or iv <= 0:
+                self._iv_cache[cache_key] = None
+                return None
+            self._iv_cache[cache_key] = iv
+            return iv
+        except Exception:
+            logger.exception("Pair-credit vol gate: IV unavailable for %s", self._expected_option_tsym(leg))
+            self._iv_cache[cache_key] = None
+            return None
+
+    def evaluate_credit_volatility(
+        self,
+        structure: dict[str, Any],
+        min_ratio: float,
+        min_days: int,
+        max_days: int,
+        multiplier: int,
+    ) -> dict[str, Any]:
+        leg_metrics: list[dict[str, Any]] = []
+        ratios: list[float] = []
+        for leg in structure.get("legs", []):
+            if str(leg.get("side", "")).upper() != "SELL":
+                continue
+            expiry = _parse_expiry(str(leg.get("expiry", "")))
+            if not expiry:
+                return {"ok": False, "preferred_structure": "UNKNOWN", "reason": "missing expiry", "legs": leg_metrics}
+            iv = self.option_iv(leg)
+            hv_info = self.historical_volatility(
+                str(leg.get("symbol", "")),
+                expiry,
+                min_days=min_days,
+                max_days=max_days,
+                multiplier=multiplier,
+            )
+            hv = float(hv_info["hv"]) if hv_info else None
+            ratio = (iv / hv) if iv and hv else None
+            metric = {
+                "symbol": leg.get("symbol"),
+                "strike": leg.get("strike"),
+                "option_type": leg.get("instrument"),
+                "expiry": leg.get("expiry"),
+                "side": leg.get("side"),
+                "iv": iv,
+                "hv": hv,
+                "iv_hv_ratio": ratio,
+                "hv_lookback_days": hv_info.get("lookback_days") if hv_info else None,
+                "trading_days_to_expiry": hv_info.get("trading_days_to_expiry") if hv_info else None,
+            }
+            leg_metrics.append(metric)
+            if ratio is None:
+                return {
+                    "ok": False,
+                    "preferred_structure": "UNKNOWN",
+                    "reason": "IV/HV unavailable for sold leg",
+                    "legs": leg_metrics,
+                }
+            ratios.append(float(ratio))
+
+        if not ratios:
+            return {"ok": False, "preferred_structure": "UNKNOWN", "reason": "no sold option legs", "legs": leg_metrics}
+        min_observed = min(ratios)
+        if min_observed >= float(min_ratio):
+            return {
+                "ok": True,
+                "preferred_structure": "CREDIT_SPREAD",
+                "min_iv_hv_ratio": min_observed,
+                "legs": leg_metrics,
+            }
+        return {
+            "ok": False,
+            "preferred_structure": "LONG_VOL",
+            "reason": f"IV/HV below credit threshold: {min_observed:.2f} < {float(min_ratio):.2f}",
+            "min_iv_hv_ratio": min_observed,
+            "legs": leg_metrics,
+        }
+
 
 @dataclass
 class PairCreditConfig:
@@ -331,6 +520,11 @@ class PairCreditConfig:
     strike_rule: str = "vol"
     sold_sd: float = 1.0
     hedge_sd: float = 2.5
+    vol_gate_enabled: bool = True
+    iv_hv_min_ratio: float = 1.0
+    hv_lookback_multiplier: int = 2
+    hv_min_lookback_days: int = 5
+    hv_max_lookback_days: int = 30
 
 
 class PairCreditTrader:
@@ -381,6 +575,24 @@ class PairCreditTrader:
                     sold_sd=self.config.sold_sd,
                     hedge_sd=self.config.hedge_sd,
                 )
+                vol_check = {"ok": True, "preferred_structure": "CREDIT_SPREAD", "legs": []}
+                if self.config.vol_gate_enabled:
+                    vol_check = self.adapter.evaluate_credit_volatility(
+                        structure,
+                        min_ratio=self.config.iv_hv_min_ratio,
+                        min_days=self.config.hv_min_lookback_days,
+                        max_days=self.config.hv_max_lookback_days,
+                        multiplier=self.config.hv_lookback_multiplier,
+                    )
+                    if not vol_check.get("ok"):
+                        rejected.append({
+                            "pair": pair,
+                            "reason": vol_check.get("reason", "IV/HV credit gate rejected"),
+                            "preferred_structure": vol_check.get("preferred_structure"),
+                            "volatility": vol_check,
+                        })
+                        continue
+                    structure["volatility"] = vol_check
                 margin = float((structure.get("margin") or {}).get("estimated_margin") or 0)
                 if margin <= 0:
                     rejected.append({"pair": pair, "reason": "non-positive margin estimate"})
@@ -441,6 +653,7 @@ class PairCreditTrader:
             "entry_margin": margin,
             "margin": structure.get("margin"),
             "entry_net_credit": round(net_credit, 2),
+            "volatility": structure.get("volatility"),
             "earliest_expiry": min(expiries).isoformat() if expiries else "",
             "legs": legs,
         }
@@ -557,8 +770,26 @@ class PairCreditTrader:
             f"Margin: Rs {float(position.get('entry_margin', 0)):,.2f} | "
             f"Net credit: Rs {float(position.get('entry_net_credit', 0)):,.2f} | "
             f"Unallocated left: Rs {remaining:,.2f}\n"
+            + PairCreditTrader._format_volatility_line(position)
             + "\n".join(leg_lines)
         )
+
+    @staticmethod
+    def _format_volatility_line(position: dict[str, Any]) -> str:
+        volatility = position.get("volatility") or {}
+        legs = volatility.get("legs") or []
+        if not legs:
+            return ""
+        parts = []
+        for leg in legs:
+            try:
+                parts.append(
+                    f"{leg.get('symbol')} {float(leg.get('iv')):.1f}/{float(leg.get('hv')):.1f} "
+                    f"({float(leg.get('iv_hv_ratio')):.2f}x)"
+                )
+            except (TypeError, ValueError):
+                continue
+        return "IV/HV: " + "; ".join(parts) + "\n" if parts else ""
 
 
 def make_pair_credit_trader_from_config(telegram=None) -> PairCreditTrader:
@@ -574,6 +805,11 @@ def make_pair_credit_trader_from_config(telegram=None) -> PairCreditTrader:
         PAIR_CREDIT_STATE_FILE,
         PAIR_CREDIT_STRIKE_RULE,
         PAIR_CREDIT_TOP_N,
+        PAIR_CREDIT_VOL_GATE_ENABLED,
+        PAIR_CREDIT_IV_HV_MIN_RATIO,
+        PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER,
+        PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS,
+        PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS,
     )
 
     cfg = PairCreditConfig(
@@ -588,5 +824,10 @@ def make_pair_credit_trader_from_config(telegram=None) -> PairCreditTrader:
         strike_rule=PAIR_CREDIT_STRIKE_RULE,
         sold_sd=PAIR_CREDIT_SOLD_SD,
         hedge_sd=PAIR_CREDIT_HEDGE_SD,
+        vol_gate_enabled=PAIR_CREDIT_VOL_GATE_ENABLED,
+        iv_hv_min_ratio=PAIR_CREDIT_IV_HV_MIN_RATIO,
+        hv_lookback_multiplier=PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER,
+        hv_min_lookback_days=PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS,
+        hv_max_lookback_days=PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS,
     )
     return PairCreditTrader(cfg, telegram=telegram)

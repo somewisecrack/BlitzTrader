@@ -23,6 +23,19 @@ class FakeAdapter:
     def latest_option_price(self, leg):
         return float(leg["price"])
 
+    def evaluate_credit_volatility(self, structure, min_ratio, min_days, max_days, multiplier):
+        result = structure.get("volatility_result")
+        if result is not None:
+            return result
+        return {
+            "ok": True,
+            "preferred_structure": "CREDIT_SPREAD",
+            "min_iv_hv_ratio": 1.2,
+            "legs": [
+                {"symbol": structure["pair"].split("/")[0], "iv": 24.0, "hv": 20.0, "iv_hv_ratio": 1.2}
+            ],
+        }
+
 
 class FakeTelegram:
     def __init__(self):
@@ -50,7 +63,7 @@ def _structure(pair, margin):
     }
 
 
-def _trader(tmp_path: Path, adapter, telegram=None):
+def _trader(tmp_path: Path, adapter, telegram=None, **config_overrides):
     cfg = PairCreditConfig(
         backend_path=tmp_path,
         state_file=tmp_path / "pair_credit_positions.json",
@@ -61,6 +74,8 @@ def _trader(tmp_path: Path, adapter, telegram=None):
         interval="1d",
         top_n=50,
     )
+    for key, value in config_overrides.items():
+        setattr(cfg, key, value)
     return PairCreditTrader(cfg, telegram=telegram, adapter=adapter)
 
 
@@ -176,3 +191,61 @@ def test_latest_option_price_returns_none_when_exact_contract_not_resolved(tmp_p
         "strike": 287.5,
     })
     assert price is None
+
+
+
+def test_rejects_credit_candidate_when_iv_hv_below_threshold(tmp_path):
+    structures = {
+        "AAA/BBB": {
+            **_structure("AAA/BBB", 10_000),
+            "volatility_result": {
+                "ok": False,
+                "preferred_structure": "LONG_VOL",
+                "reason": "IV/HV below credit threshold: 0.80 < 1.00",
+                "min_iv_hv_ratio": 0.8,
+                "legs": [{"symbol": "AAA", "iv": 12.0, "hv": 15.0, "iv_hv_ratio": 0.8}],
+            },
+        },
+        "CCC/DDD": _structure("CCC/DDD", 10_000),
+    }
+    trader = _trader(tmp_path, FakeAdapter(structures))
+    result = trader.run_opening_allocation()
+    assert [p["pair"] for p in result["opened"]] == ["CCC/DDD"]
+    assert result["rejected"][0]["pair"] == "AAA/BBB"
+    assert result["rejected"][0]["preferred_structure"] == "LONG_VOL"
+
+
+def test_position_records_volatility_gate_metrics(tmp_path):
+    structures = {"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 95_000)}
+    trader = _trader(tmp_path, FakeAdapter(structures))
+    result = trader.run_opening_allocation()
+    position = result["opened"][0]
+    assert position["volatility"]["preferred_structure"] == "CREDIT_SPREAD"
+    assert position["volatility"]["min_iv_hv_ratio"] == 1.2
+
+
+def test_hv_lookback_matches_expiry_with_floor_and_cap():
+    from datetime import date
+    adapter = OmniSpreadReadOnlyAdapter(Path("/tmp"))
+    assert adapter._hv_lookback_days(date(2026, 7, 29), 5, 30, 2, today=date(2026, 7, 28)) == 5
+    assert adapter._hv_lookback_days(date(2026, 8, 11), 5, 30, 2, today=date(2026, 7, 28)) == 20
+    assert adapter._hv_lookback_days(date(2026, 9, 30), 5, 30, 2, today=date(2026, 7, 28)) == 30
+
+
+def test_open_message_includes_iv_hv_line():
+    position = {
+        "position_id": "PCR-1",
+        "pair": "AAA/BBB",
+        "direction": "LONG_SPREAD",
+        "prob_profit": 97.8,
+        "z_score": -2.2,
+        "hurst": 0.21,
+        "entry_margin": 10000,
+        "entry_net_credit": 500,
+        "volatility": {
+            "legs": [{"symbol": "AAA", "iv": 24.0, "hv": 20.0, "iv_hv_ratio": 1.2}]
+        },
+        "legs": [],
+    }
+    message = PairCreditTrader._format_open_message(position, remaining=90000)
+    assert "IV/HV: AAA 24.0/20.0 (1.20x)" in message

@@ -152,10 +152,23 @@ PAIR_CREDIT_REPLACEMENT_MODE = (
 
 _LOCAL_OMNISPREAD_BACKEND = Path("/Users/rahulgirishkumar/PROJECTS/omnispread/backend")
 _VM_OMNISPREAD_BACKEND = Path("/opt/omnispread/backend")
+_VM_OMNISPREAD_ROOT = Path("/opt/omnispread")
+_DEFAULT_OMNISPREAD_BACKEND = next(
+    (
+        path
+        for path in (
+            _LOCAL_OMNISPREAD_BACKEND,
+            _VM_OMNISPREAD_BACKEND,
+            _VM_OMNISPREAD_ROOT,
+        )
+        if path.exists()
+    ),
+    _VM_OMNISPREAD_BACKEND,
+)
 OMNISPREAD_BACKEND_PATH = Path(
     _optional_env(
         "OMNISPREAD_BACKEND_PATH",
-        str(_LOCAL_OMNISPREAD_BACKEND if _LOCAL_OMNISPREAD_BACKEND.exists() else _VM_OMNISPREAD_BACKEND),
+        str(_DEFAULT_OMNISPREAD_BACKEND),
     )
 ).expanduser()
 
@@ -167,6 +180,14 @@ PAIR_CREDIT_CAPITAL = float(_optional_env("PAIR_CREDIT_CAPITAL", str(VIRTUAL_CAP
 PAIR_CREDIT_STRIKE_RULE = _optional_env("PAIR_CREDIT_STRIKE_RULE", "vol")
 PAIR_CREDIT_SOLD_SD = float(_optional_env("PAIR_CREDIT_SOLD_SD", "1.0"))
 PAIR_CREDIT_HEDGE_SD = float(_optional_env("PAIR_CREDIT_HEDGE_SD", "2.5"))
+PAIR_CREDIT_VOL_GATE_ENABLED = (
+    _optional_env("PAIR_CREDIT_VOL_GATE_ENABLED", "true").lower()
+    in {"1", "true", "yes", "on"}
+)
+PAIR_CREDIT_IV_HV_MIN_RATIO = float(_optional_env("PAIR_CREDIT_IV_HV_MIN_RATIO", "1.0"))
+PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER = _optional_int_env("PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER", 2)
+PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS", 5)
+PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS", 30)
 
 # ──────────────────────────────────────────────────────────────
 #   OPTION SPREAD TRADING PARAMETERS
