@@ -49,6 +49,19 @@ def _parse_expiry(value: str) -> date | None:
     return None
 
 
+class _LegacyStrikeFallbackDetector(logging.Handler):
+    """Detect OmniSpread downgrading vol strikes to the legacy rule."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if "using the legacy rule" in message:
+            self.messages.append(message)
+
+
 class PairCreditLedger:
     """Atomic JSON state plus JSONL trade ledger for virtual pair spreads."""
 
@@ -184,17 +197,32 @@ class OmniSpreadReadOnlyAdapter:
 
     def build_credit_structure(self, candidate: dict[str, Any], strike_rule: str, sold_sd: float, hedge_sd: float) -> dict[str, Any]:
         self._ensure_loaded()
-        return self._build_credit_spread_structure(
-            x=candidate["x"],
-            y=candidate["y"],
-            qty=float(candidate["qty"]),
-            direction=candidate["direction"],
-            fetch_future=self._fetch_future,
-            fetch_option=self._fetch_option,
-            strike_rule=strike_rule,
-            sold_sd=sold_sd,
-            hedge_sd=hedge_sd,
-        )
+        detector = _LegacyStrikeFallbackDetector()
+        backend_logger = logging.getLogger("derivatives_backtest")
+        backend_logger.addHandler(detector)
+        try:
+            structure = self._build_credit_spread_structure(
+                x=candidate["x"],
+                y=candidate["y"],
+                qty=float(candidate["qty"]),
+                direction=candidate["direction"],
+                fetch_future=self._fetch_future,
+                fetch_option=self._fetch_option,
+                strike_rule=strike_rule,
+                sold_sd=sold_sd,
+                hedge_sd=hedge_sd,
+            )
+        finally:
+            backend_logger.removeHandler(detector)
+        if detector.messages:
+            raise RuntimeError(
+                "volatility strike selection fell back to legacy rule; rejecting candidate: "
+                + " | ".join(detector.messages)
+            )
+        structure["strike_rule"] = strike_rule
+        structure["sold_sd"] = sold_sd
+        structure["hedge_sd"] = hedge_sd
+        return structure
 
     @staticmethod
     def _strike_text(strike: Any) -> str:
@@ -321,13 +349,15 @@ class OmniSpreadReadOnlyAdapter:
 
     @staticmethod
     def _trading_days_to_expiry(expiry: date, today: date | None = None) -> int:
+        from tools.market_calendar import is_nse_trading_day
+
         today = today or _now_ist().date()
         if expiry <= today:
             return 1
         days = 0
         cursor = today + timedelta(days=1)
         while cursor <= expiry:
-            if cursor.weekday() < 5:
+            if is_nse_trading_day(cursor):
                 days += 1
             cursor += timedelta(days=1)
         return max(1, days)
@@ -653,6 +683,9 @@ class PairCreditTrader:
             "entry_margin": margin,
             "margin": structure.get("margin"),
             "entry_net_credit": round(net_credit, 2),
+            "strike_rule": structure.get("strike_rule"),
+            "sold_sd": structure.get("sold_sd"),
+            "hedge_sd": structure.get("hedge_sd"),
             "volatility": structure.get("volatility"),
             "earliest_expiry": min(expiries).isoformat() if expiries else "",
             "legs": legs,

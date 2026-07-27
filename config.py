@@ -150,27 +150,44 @@ PAIR_CREDIT_REPLACEMENT_MODE = (
     in {"1", "true", "yes", "on"}
 )
 
-_LOCAL_OMNISPREAD_BACKEND = Path("/Users/rahulgirishkumar/PROJECTS/omnispread/backend")
-_VM_OMNISPREAD_BACKEND = Path("/opt/omnispread/backend")
-_VM_OMNISPREAD_ROOT = Path("/opt/omnispread")
-_DEFAULT_OMNISPREAD_BACKEND = next(
-    (
-        path
-        for path in (
-            _LOCAL_OMNISPREAD_BACKEND,
-            _VM_OMNISPREAD_BACKEND,
-            _VM_OMNISPREAD_ROOT,
-        )
-        if path.exists()
-    ),
-    _VM_OMNISPREAD_BACKEND,
+_OMNISPREAD_REQUIRED_MODULES = (
+    "derivatives_backtest.py",
+    "engine.py",
+    "nse_client.py",
+    "presets.py",
 )
-OMNISPREAD_BACKEND_PATH = Path(
-    _optional_env(
-        "OMNISPREAD_BACKEND_PATH",
-        str(_DEFAULT_OMNISPREAD_BACKEND),
+
+
+def _is_omnispread_backend(path: Path) -> bool:
+    return path.exists() and all((path / module).exists() for module in _OMNISPREAD_REQUIRED_MODULES)
+
+
+def _default_omnispread_backend() -> str:
+    for path in (
+        Path("/Users/rahulgirishkumar/PROJECTS/omnispread/backend"),
+        Path("/Users/rahulgirishkumar/PROJECTS/omnispread"),
+        Path("/opt/omnispread/backend"),
+        Path("/opt/omnispread"),
+    ):
+        if _is_omnispread_backend(path):
+            return str(path)
+    raise RuntimeError(
+        "OMNISPREAD_BACKEND_PATH is not set and no valid OmniSpread backend directory was found"
     )
-).expanduser()
+
+
+def _resolve_omnispread_backend() -> Path:
+    configured = _optional_env("OMNISPREAD_BACKEND_PATH")
+    path = Path(configured).expanduser() if configured else Path(_default_omnispread_backend())
+    if not _is_omnispread_backend(path):
+        raise RuntimeError(
+            f"Invalid OMNISPREAD_BACKEND_PATH: {path}. "
+            f"Required files: {', '.join(_OMNISPREAD_REQUIRED_MODULES)}"
+        )
+    return path
+
+
+OMNISPREAD_BACKEND_PATH = _resolve_omnispread_backend()
 
 PAIR_CREDIT_PRESET = _optional_env("PAIR_CREDIT_PRESET", "nifty_50")
 PAIR_CREDIT_PERIOD = _optional_env("PAIR_CREDIT_PERIOD", "1y")

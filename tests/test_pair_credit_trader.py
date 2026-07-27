@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from datetime import date
 from pathlib import Path
 
 from tools.pair_credit_trader import OmniSpreadReadOnlyAdapter, PairCreditConfig, PairCreditTrader
@@ -249,3 +251,36 @@ def test_open_message_includes_iv_hv_line():
     }
     message = PairCreditTrader._format_open_message(position, remaining=90000)
     assert "IV/HV: AAA 24.0/20.0 (1.20x)" in message
+
+
+
+def test_build_credit_structure_rejects_legacy_strike_fallback(tmp_path):
+    class BackendFallbackAdapter(OmniSpreadReadOnlyAdapter):
+        def _ensure_loaded(self):
+            self._loaded = True
+            self._fetch_future = lambda **kwargs: None
+            self._fetch_option = lambda **kwargs: None
+            self._build_credit_spread_structure = self._fake_build
+
+        def _fake_build(self, **kwargs):
+            logging.getLogger("derivatives_backtest").warning(
+                "Volatility-scaled strikes unavailable for PE 31-Dec-2099 (test); using the legacy rule."
+            )
+            return _structure("AAA/BBB", 10_000)
+
+    adapter = BackendFallbackAdapter(tmp_path)
+    try:
+        adapter.build_credit_structure(
+            {"x": "AAA.NS", "y": "BBB.NS", "qty": 1.0, "direction": "LONG_SPREAD"},
+            strike_rule="vol", sold_sd=1.0, hedge_sd=2.5,
+        )
+    except RuntimeError as exc:
+        assert "fell back to legacy rule" in str(exc)
+    else:
+        raise AssertionError("expected legacy fallback to be rejected")
+
+
+def test_trading_days_to_expiry_uses_nse_holidays():
+    adapter = OmniSpreadReadOnlyAdapter(Path("/tmp"))
+    # 2026-09-14 is a configured NSE holiday; it must not count toward expiry lookback.
+    assert adapter._trading_days_to_expiry(date(2026, 9, 15), today=date(2026, 9, 11)) == 1
