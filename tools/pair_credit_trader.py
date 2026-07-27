@@ -150,6 +150,8 @@ class OmniSpreadReadOnlyAdapter:
     def __init__(self, backend_path: Path):
         self.backend_path = Path(backend_path)
         self._loaded = False
+        self._shoonya_client = None
+        self._option_token_cache: dict[str, dict[str, Any]] = {}
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -192,34 +194,127 @@ class OmniSpreadReadOnlyAdapter:
             hedge_sd=hedge_sd,
         )
 
-    def latest_option_price(self, leg: dict[str, Any]) -> float | None:
-        self._ensure_loaded()
-        symbol = str(leg["symbol"])
-        option_type = str(leg["instrument"]).upper()
-        expiry = _parse_expiry(str(leg["expiry"]))
-        if not expiry:
-            return None
-        strike = float(leg["strike"])
-        _, option_instrument = self._instrument_types(symbol)
-        end = _now_ist()
-        start = end - timedelta(days=21)
-        raw = self._fetch_option(
-            symbol=symbol,
-            instrument=option_instrument,
-            option_type=None,
-            from_date=start.strftime("%d-%m-%Y"),
-            to_date=end.strftime("%d-%m-%Y"),
-        )
-        import pandas as pd
+    @staticmethod
+    def _strike_text(strike: Any) -> str:
+        value = float(strike)
+        return str(int(value)) if value.is_integer() else f"{value:g}"
 
-        df = self._clean(raw)
-        if df.empty:
+    @staticmethod
+    def _option_code(option_type: str) -> str | None:
+        option_type = str(option_type).upper()
+        if option_type == "CE":
+            return "C"
+        if option_type == "PE":
+            return "P"
+        return None
+
+    def _expected_option_tsym(self, leg: dict[str, Any]) -> str | None:
+        expiry = _parse_expiry(str(leg.get("expiry", "")))
+        option_code = self._option_code(str(leg.get("instrument", "")))
+        if not expiry or not option_code:
             return None
-        rows = df[(df["expiry"] == pd.Timestamp(expiry)) & (df["OPTION_TYPE"] == option_type) & (df["STRIKE_PRICE"] == strike)]
-        if rows.empty:
+        symbol = str(leg.get("symbol", "")).upper()
+        expiry_code = expiry.strftime("%d%b%y").upper()
+        strike = self._strike_text(leg.get("strike"))
+        return f"{symbol}{expiry_code}{option_code}{strike}"
+
+    def _ensure_shoonya_client(self):
+        if self._shoonya_client is not None:
+            return self._shoonya_client
+        try:
+            from broker.shoonya_client import ShoonyaClient
+            from config import (
+                SHOONYA_API_KEY,
+                SHOONYA_AUTH_CODE,
+                SHOONYA_IMEI,
+                SHOONYA_PASSWORD,
+                SHOONYA_SECRET_CODE,
+                SHOONYA_TOTP_SECRET,
+                SHOONYA_USER_ID,
+                SHOONYA_VENDOR_CODE,
+            )
+
+            client = ShoonyaClient()
+            ok, msg = client.login(
+                SHOONYA_USER_ID,
+                SHOONYA_PASSWORD,
+                SHOONYA_TOTP_SECRET,
+                SHOONYA_API_KEY,
+                SHOONYA_VENDOR_CODE,
+                SHOONYA_IMEI,
+                SHOONYA_SECRET_CODE,
+                SHOONYA_AUTH_CODE,
+            )
+            if not ok:
+                logger.warning("Pair-credit MTM: Shoonya login failed: %s", msg)
+                return None
+            self._shoonya_client = client
+            return client
+        except Exception:
+            logger.exception("Pair-credit MTM: Shoonya client unavailable")
             return None
-        latest = rows.sort_values("date").iloc[-1]
-        price = float(latest["CLOSING_PRICE"])
+
+    def _resolve_live_option(self, leg: dict[str, Any]) -> dict[str, Any] | None:
+        expected_tsym = self._expected_option_tsym(leg)
+        if not expected_tsym:
+            return None
+        cached = self._option_token_cache.get(expected_tsym)
+        if cached:
+            return cached
+
+        client = self._ensure_shoonya_client()
+        if client is None:
+            return None
+        results = client.search_scrip("NFO", expected_tsym) or []
+        expiry = _parse_expiry(str(leg.get("expiry", "")))
+        option_type = str(leg.get("instrument", "")).upper()
+        symbol = str(leg.get("symbol", "")).upper()
+        expected_exd = expiry.strftime("%d-%b-%Y").upper() if expiry else ""
+
+        for row in results:
+            tsym = str(row.get("tsym", "")).upper()
+            if tsym != expected_tsym:
+                continue
+            if str(row.get("instname", "")).upper() != "OPTSTK":
+                continue
+            if str(row.get("symname", "")).upper() != symbol:
+                continue
+            if str(row.get("optt", "")).upper() != option_type:
+                continue
+            if str(row.get("exd", "")).upper() != expected_exd:
+                continue
+            token = str(row.get("token", "")).strip()
+            if not token:
+                continue
+            resolved = {"exchange": "NFO", "token": token, "tsym": row.get("tsym", expected_tsym)}
+            self._option_token_cache[expected_tsym] = resolved
+            return resolved
+
+        logger.warning(
+            "Pair-credit MTM: exact option not resolved for %s; sample_tsyms=%s",
+            expected_tsym,
+            [row.get("tsym") for row in results[:5]],
+        )
+        return None
+
+    def latest_option_price(self, leg: dict[str, Any]) -> float | None:
+        resolved = self._resolve_live_option(leg)
+        if not resolved:
+            return None
+        client = self._ensure_shoonya_client()
+        if client is None:
+            return None
+        quote = client.get_quotes(resolved["exchange"], resolved["token"]) or {}
+        try:
+            price = float(quote.get("lp"))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Pair-credit MTM: quote missing lp for %s token=%s quote=%s",
+                resolved["tsym"],
+                resolved["token"],
+                quote,
+            )
+            return None
         return price if math.isfinite(price) and price >= 0 else None
 
 
@@ -418,6 +513,7 @@ class PairCreditTrader:
             return "\n".join(lines)
         total_pnl = 0.0
         total_ok = True
+        marks_updated = False
         for idx, position in enumerate(open_positions, start=1):
             mark = self.mark_position(position)
             pnl = mark["unrealized_pnl"]
@@ -427,11 +523,17 @@ class PairCreditTrader:
             else:
                 total_pnl += pnl
                 pnl_txt = f"P&L Rs {pnl:+,.2f}"
+                position["unrealized_pnl"] = pnl
+                position["marked_at"] = _now_ist().isoformat()
+                position["mark_legs"] = mark["legs"]
+                marks_updated = True
             lines.append(
                 f"{idx}. {position['pair']} | {position['direction']} | "
                 f"margin Rs {float(position.get('entry_margin', 0)):,.2f} | "
                 f"expiry {position.get('earliest_expiry', '?')} | {pnl_txt}"
             )
+        if marks_updated:
+            self.ledger.save()
         if total_ok:
             lines.extend(["", f"Total unrealized P&L: Rs {total_pnl:+,.2f}"])
         return "\n".join(lines)
@@ -444,10 +546,12 @@ class PairCreditTrader:
                 f"{leg['side']} {leg['symbol']} {leg['expiry']} "
                 f"{leg['strike']:g}{leg['instrument']} x{leg['lots']} @ Rs {float(leg['price']):.2f}"
             )
+        prob_profit = float(position.get("prob_profit") or 0)
+        prob_text = f"{prob_profit:.1f}%" if prob_profit > 1 else f"{prob_profit:.1%}"
         return (
             "PAIR CREDIT ENTRY [VIRTUAL]\n"
             f"{position['position_id']} | {position['pair']} | {position['direction']}\n"
-            f"Prob profit: {float(position.get('prob_profit') or 0):.1%} | "
+            f"Prob profit: {prob_text} | "
             f"z: {float(position.get('z_score') or 0):+.2f} | "
             f"hurst: {float(position.get('hurst') or 0):.2f}\n"
             f"Margin: Rs {float(position.get('entry_margin', 0)):,.2f} | "

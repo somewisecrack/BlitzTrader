@@ -153,6 +153,75 @@ def parse_spreads_from_live_state(live_state_path: Path, review_date: date) -> t
     return closed, open_spreads
 
 
+def parse_pair_credit_state(pair_state_path: Path, review_date: date) -> tuple[list[dict], list[dict]]:
+    """Parse pair-credit replacement-mode state into review spread records."""
+    if not pair_state_path.exists():
+        return [], []
+    try:
+        data = json.loads(pair_state_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  WARNING: Could not parse {pair_state_path}: {e}", file=sys.stderr)
+        return [], []
+
+    def _parse_ist_date(iso_str: str) -> date | None:
+        if not iso_str:
+            return None
+        try:
+            import pytz
+            IST = pytz.timezone("Asia/Kolkata")
+            dt = datetime.fromisoformat(iso_str)
+            if dt.tzinfo is None:
+                dt = IST.localize(dt)
+            else:
+                dt = dt.astimezone(IST)
+            return dt.date()
+        except Exception:
+            return None
+
+    def _normalize(position: dict, is_closed: bool) -> dict:
+        record = {
+            "spread_id": position.get("position_id", "—"),
+            "symbol": position.get("pair", "—"),
+            "spread_type": "PAIR_CREDIT",
+            "direction": position.get("direction", "—"),
+            "strategy": position.get("method") or "pair-credit",
+            "opened_at": position.get("opened_at", ""),
+            "closed_at": position.get("closed_at", ""),
+            "close_reason": position.get("close_reason", "—"),
+            "entry_margin": position.get("entry_margin"),
+            "entry_net_credit": position.get("entry_net_credit"),
+            "prob_profit": position.get("prob_profit"),
+            "z_score": position.get("z_score"),
+            "half_life": position.get("half_life"),
+            "legs": position.get("legs", []),
+        }
+        if is_closed:
+            record["realized_pnl"] = position.get("realized_pnl", 0)
+        else:
+            record["unrealized_pnl"] = position.get("unrealized_pnl")
+        return record
+
+    closed = []
+    for position in data.get("closed_positions", []) if isinstance(data.get("closed_positions"), list) else []:
+        if not isinstance(position, dict):
+            continue
+        opened_date = _parse_ist_date(position.get("opened_at", ""))
+        if opened_date is not None and opened_date != review_date:
+            continue
+        closed.append(_normalize(position, is_closed=True))
+
+    open_positions = []
+    for position in data.get("open_positions", []) if isinstance(data.get("open_positions"), list) else []:
+        if not isinstance(position, dict) or position.get("status") != "OPEN":
+            continue
+        opened_date = _parse_ist_date(position.get("opened_at", ""))
+        if opened_date is not None and opened_date != review_date:
+            continue
+        open_positions.append(_normalize(position, is_closed=False))
+
+    return closed, open_positions
+
+
 def parse_live_state(live_state_path: Path, review_date: date) -> list[dict]:
     """
     Parse runtime/live_state.json to extract executed futures trades.
@@ -788,6 +857,14 @@ def build_review_markdown(
 
     # Option spread summary (primary trading vehicle)
     if closed_spreads or open_spreads:
+        open_unrealized_values = []
+        for spread in open_spreads:
+            try:
+                value = spread.get("unrealized_pnl")
+                if value is not None:
+                    open_unrealized_values.append(float(value))
+            except (TypeError, ValueError):
+                pass
         lines.append(f"- Option spreads opened: {spread_stats['total'] + len(open_spreads)}")
         lines.append(f"- Option spreads exited: {spread_stats['total']}")
         lines.append(f"- Open spreads remaining: {len(open_spreads)}")
@@ -797,7 +874,9 @@ def build_review_markdown(
                 f"- Spread wins: {spread_stats['wins']} | "
                 f"Losses: {spread_stats['losses']} | Win rate: {win_rate:.0f}%"
             )
-        lines.append(f"- Net option-spread P&L: ₹{spread_stats['net_pnl']:+,.2f}")
+        lines.append(f"- Net realized option-spread P&L: ₹{spread_stats['net_pnl']:+,.2f}")
+        if open_unrealized_values:
+            lines.append(f"- Open unrealized option-spread P&L: ₹{sum(open_unrealized_values):+,.2f}")
     else:
         lines.append("- Option spreads opened: 0")
         lines.append("- Option spreads exited: 0")
@@ -851,7 +930,12 @@ def build_review_markdown(
             sid = s.get("spread_id", "—")
             sym = s.get("symbol", "—")
             stype = s.get("spread_type", "—")
-            lines.append(f"- {sid}: {sym} {stype} opened {opened} (unrealized)")
+            unrealized = s.get("unrealized_pnl")
+            try:
+                pnl_text = f" | unrealized ₹{float(unrealized):+,.2f}" if unrealized is not None else " | unrealized unavailable"
+            except (TypeError, ValueError):
+                pnl_text = " | unrealized unavailable"
+            lines.append(f"- {sid}: {sym} {stype} opened {opened}{pnl_text}")
     if not closed_spreads and not open_spreads:
         lines.append("_No option spreads opened on this date._")
     lines.append("")
@@ -986,6 +1070,7 @@ def main():
 
     # Define input paths
     live_state_path = runtime_root / "live_state.json"
+    pair_credit_state_path = runtime_root / "pair_credit_positions.json"
     journal_path = runtime_root / "journals" / f"{date_compact}.md"
     log_path = runtime_root / "logs" / f"blitztrader_{date_compact}.log"
     indicators_path = runtime_root / "data_exports" / date_compact / "indicators.md"
@@ -1017,6 +1102,16 @@ def main():
             print("  No legacy futures trades found in live_state.json for this date")
     else:
         print(f"[evaluate_futures_day] live_state.json not found: {live_state_path}")
+
+    if pair_credit_state_path.exists():
+        print(f"[evaluate_futures_day] Reading pair_credit_positions.json: {pair_credit_state_path}")
+        pc_closed, pc_open = parse_pair_credit_state(pair_credit_state_path, review_date)
+        if pc_closed or pc_open:
+            closed_spreads.extend(pc_closed)
+            open_spreads_list.extend(pc_open)
+            print(f"  Found {len(pc_closed)} closed pair-credit spread(s) and {len(pc_open)} open pair-credit spread(s)")
+    else:
+        print(f"[evaluate_futures_day] pair_credit_positions.json not found: {pair_credit_state_path}")
 
     # ── SOURCE 2: Journal (fallback for executed trades if live_state.json empty) ──
     # Always parse journal for REJECTED signals (not recorded in live_state.json)

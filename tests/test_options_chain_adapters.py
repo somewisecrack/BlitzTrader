@@ -43,14 +43,14 @@ class TestGetNearestExpiry:
     def test_returns_string_in_expected_format(self):
         """get_nearest_expiry returns 'D-MMM-YYYY' (no zero-pad on day)."""
         client = MagicMock()
-        expiry = date(2026, 6, 26)
+        expiry = date(2027, 6, 24)
         # search_scrip returns one option row for this expiry
         client.search_scrip.return_value = [_shoonya_search_result("NIFTY", expiry, 24500, "CE")]
         chain = _make_chain(client)
         result = chain.get_nearest_expiry("NIFTY")
         assert result is not None
         assert "JUN" in result
-        assert "2026" in result
+        assert "2027" in result
         # Should be parseable back to a date via datetime.strptime
         from datetime import datetime
         # strptime %d accepts both zero-padded ("06") and non-padded ("6") days;
@@ -68,8 +68,8 @@ class TestGetNearestExpiry:
     def test_returns_nearest_when_multiple_expiries(self):
         """When multiple expiries are available, the earliest is returned."""
         client = MagicMock()
-        near = date(2026, 6, 26)
-        far = date(2026, 7, 31)
+        near = date(2027, 6, 24)
+        far = date(2027, 7, 29)
         rows = [
             _shoonya_search_result("NIFTY", near, 24500, "CE"),
             _shoonya_search_result("NIFTY", far, 24500, "CE"),
@@ -100,7 +100,7 @@ class TestGetNearestExpiry:
 class TestResolveOption:
     def test_resolves_valid_contract(self):
         client = MagicMock()
-        expiry = date(2026, 6, 26)
+        expiry = date(2027, 6, 24)
         expiry_str = expiry.strftime("%-d-%b-%Y")
         client.search_scrip.return_value = [
             _shoonya_search_result("NIFTY", expiry, 24500, "CE")
@@ -119,7 +119,7 @@ class TestResolveOption:
 
     def test_resolve_option_pe(self):
         client = MagicMock()
-        expiry = date(2026, 6, 26)
+        expiry = date(2027, 6, 24)
         expiry_str = expiry.strftime("%-d-%b-%Y")
         client.search_scrip.return_value = [
             _shoonya_search_result("NIFTY", expiry, 24500, "PE")
@@ -132,7 +132,7 @@ class TestResolveOption:
     def test_no_matching_scrip_returns_none(self):
         client = MagicMock()
         client.search_scrip.return_value = []
-        expiry = date(2026, 6, 26)
+        expiry = date(2027, 6, 24)
         expiry_str = expiry.strftime("%-d-%b-%Y")
         chain = _make_chain(client)
         result = chain.resolve_option("NIFTY", expiry_str, 24500, "CE")

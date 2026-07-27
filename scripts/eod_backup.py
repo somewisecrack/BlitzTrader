@@ -226,6 +226,8 @@ def main() -> None:
         ("journal",           "file", runtime_dir / "journals" / f"{date_str}.md",       f"journals/{date_str}.md"),
         ("log",               "file", runtime_dir / "logs" / f"blitztrader_{date_str}.log", f"logs/blitztrader_{date_str}.log"),
         ("live_state",        "file", runtime_dir / "live_state.json",                   "live_state.json"),
+        ("pair_credit_state", "file", runtime_dir / "pair_credit_positions.json",        "pair_credit_positions.json"),
+        ("pair_credit_ledger", "file", runtime_dir / "pair_credit_ledger.jsonl",         f"ledgers/pair_credit_ledger_{date_str}.jsonl"),
     ]
 
     all_ok = True
