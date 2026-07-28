@@ -109,6 +109,28 @@ def test_allocates_only_affordable_margin_and_notifies(tmp_path):
     assert any("Insufficient margin" in msg for msg in telegram.messages)
 
 
+def test_rejects_candidates_that_reuse_a_stock_already_allocated(tmp_path):
+    class RepeatedStockAdapter(FakeAdapter):
+        def scan(self, preset, period, interval, top_n):
+            self.scan_calls.append((preset, period, interval, top_n))
+            return [
+                {"pair": "AAA/BBB", "x": "AAA.NS", "y": "BBB.NS", "qty": 1.0, "direction": "SHORT_SPREAD", "method": "CADF", "z_score": 2.5, "hurst": 0.3, "prob_profit": 0.75, "half_life": 5},
+                {"pair": "AAA/CCC", "x": "AAA.NS", "y": "CCC.NS", "qty": 1.0, "direction": "SHORT_SPREAD", "method": "CADF", "z_score": 2.4, "hurst": 0.3, "prob_profit": 0.74, "half_life": 5},
+                {"pair": "DDD/EEE", "x": "DDD.NS", "y": "EEE.NS", "qty": 1.0, "direction": "SHORT_SPREAD", "method": "CADF", "z_score": 2.3, "hurst": 0.3, "prob_profit": 0.73, "half_life": 5},
+            ]
+
+    structures = {
+        "AAA/BBB": _structure("AAA/BBB", 10_000),
+        "AAA/CCC": _structure("AAA/CCC", 10_000),
+        "DDD/EEE": _structure("DDD/EEE", 10_000),
+    }
+    trader = _trader(tmp_path, RepeatedStockAdapter(structures), capital=100_000)
+    result = trader.run_opening_allocation()
+    assert [position["pair"] for position in result["opened"]] == ["AAA/BBB", "DDD/EEE"]
+    assert result["rejected"][0]["pair"] == "AAA/CCC"
+    assert result["rejected"][0]["symbols"] == ["AAA"]
+
+
 def test_manual_exit_records_pnl_and_blocks_same_day_reallocation_until_next_scan(tmp_path):
     adapter = FakeAdapter({"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 10_000)})
     trader = _trader(tmp_path, adapter)

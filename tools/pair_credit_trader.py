@@ -890,6 +890,32 @@ class PairCreditTrader:
             self.telegram.send_telegram(message)
         logger.info("TELEGRAM: %s", message.replace("\n", " | "))
 
+    @staticmethod
+    def _clean_pair_symbol(value: Any) -> str:
+        symbol = str(value or "").upper().strip()
+        return symbol.removesuffix(".NS").removesuffix(".BO")
+
+    @classmethod
+    def _candidate_symbols(cls, candidate: dict[str, Any]) -> set[str]:
+        return {
+            cls._clean_pair_symbol(candidate.get("x")),
+            cls._clean_pair_symbol(candidate.get("y")),
+        } - {""}
+
+    @classmethod
+    def _position_symbols(cls, position: dict[str, Any]) -> set[str]:
+        symbols = {
+            cls._clean_pair_symbol(position.get("x")),
+            cls._clean_pair_symbol(position.get("y")),
+        } - {""}
+        if symbols:
+            return symbols
+        return {
+            cls._clean_pair_symbol(leg.get("symbol"))
+            for leg in position.get("legs", [])
+            if cls._clean_pair_symbol(leg.get("symbol"))
+        }
+
     def run_opening_allocation(self) -> dict[str, Any]:
         today = _date_key()
         if self.ledger.state.get("last_scan_date") == today:
@@ -913,9 +939,21 @@ class PairCreditTrader:
             raise
 
         open_pairs = {p.get("pair") for p in self.ledger.open_positions()}
+        used_symbols: set[str] = set()
+        for position in self.ledger.open_positions():
+            used_symbols.update(self._position_symbols(position))
         for candidate in candidates:
             pair = str(candidate.get("pair") or f"{candidate.get('x')}/{candidate.get('y')}")
             if pair in open_pairs:
+                continue
+            symbols = self._candidate_symbols(candidate)
+            repeated = sorted(symbols & used_symbols)
+            if repeated:
+                rejected.append({
+                    "pair": pair,
+                    "reason": "stock already allocated in another open pair",
+                    "symbols": repeated,
+                })
                 continue
             try:
                 if self.config.leg_selection == "iv_expected_move":
@@ -959,6 +997,7 @@ class PairCreditTrader:
                 position = self._position_from(candidate, structure, margin)
                 self.ledger.add_position(position)
                 open_pairs.add(pair)
+                used_symbols.update(symbols)
                 remaining -= margin
                 opened.append(position)
                 self.send(self._format_open_message(position, remaining))
