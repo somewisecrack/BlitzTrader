@@ -7,7 +7,7 @@ Tests for the OptionsChain adapter methods used by ATMOptionRecorder:
 
 Also covers eod_backup runtime_dir default path consistency.
 """
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
@@ -43,18 +43,21 @@ class TestGetNearestExpiry:
     def test_returns_string_in_expected_format(self):
         """get_nearest_expiry returns 'D-MMM-YYYY' (no zero-pad on day)."""
         client = MagicMock()
-        expiry = date(2026, 6, 26)
+        # Use a future date so get_available_expiries (after_today=True) doesn't filter it out
+        expiry = date.today() + timedelta(days=7)
         # search_scrip returns one option row for this expiry
         client.search_scrip.return_value = [_shoonya_search_result("NIFTY", expiry, 24500, "CE")]
         chain = _make_chain(client)
         result = chain.get_nearest_expiry("NIFTY")
         assert result is not None
-        assert "JUN" in result
-        assert "2026" in result
+        expected_month = expiry.strftime("%b").upper()
+        expected_year = str(expiry.year)
+        assert expected_month in result
+        assert expected_year in result
         # Should be parseable back to a date via datetime.strptime
         from datetime import datetime
         # strptime %d accepts both zero-padded ("06") and non-padded ("6") days;
-        # %b is case-insensitive in CPython so "JUN" and "Jun" both work.
+        # %b is case-insensitive in CPython so "AUG" and "Aug" both work.
         parsed = datetime.strptime(result, "%d-%b-%Y").date()
         assert parsed == expiry
 
@@ -66,10 +69,11 @@ class TestGetNearestExpiry:
         assert result is None
 
     def test_returns_nearest_when_multiple_expiries(self):
-        """When multiple expiries are available, the earliest is returned."""
+        """When multiple expiries are available, the earliest upcoming is returned."""
         client = MagicMock()
-        near = date(2026, 6, 26)
-        far = date(2026, 7, 31)
+        # Both dates must be in the future; get_nearest_expiry filters past dates out
+        near = date.today() + timedelta(days=7)
+        far = date.today() + timedelta(days=35)
         rows = [
             _shoonya_search_result("NIFTY", near, 24500, "CE"),
             _shoonya_search_result("NIFTY", far, 24500, "CE"),
