@@ -25,6 +25,13 @@ class FakeAdapter:
     def build_credit_structure(self, candidate, strike_rule, sold_sd, hedge_sd):
         return self.structures[candidate["pair"]]
 
+    def build_iv_expected_move_credit_structure(self, candidate, sell_iv_move, hedge_max_iv_move):
+        structure = dict(self.structures[candidate["pair"]])
+        structure["leg_selection"] = "iv_expected_move"
+        structure["sell_iv_move"] = sell_iv_move
+        structure["hedge_max_iv_move"] = hedge_max_iv_move
+        return structure
+
     def latest_option_price(self, leg):
         return float(leg["price"])
 
@@ -255,7 +262,7 @@ def test_rejects_credit_candidate_when_iv_hv_below_threshold(tmp_path):
         },
         "CCC/DDD": _structure("CCC/DDD", 10_000),
     }
-    trader = _trader(tmp_path, FakeAdapter(structures))
+    trader = _trader(tmp_path, FakeAdapter(structures), vol_gate_enabled=True)
     result = trader.run_opening_allocation()
     assert [p["pair"] for p in result["opened"]] == ["CCC/DDD"]
     assert result["rejected"][0]["pair"] == "AAA/BBB"
@@ -264,11 +271,34 @@ def test_rejects_credit_candidate_when_iv_hv_below_threshold(tmp_path):
 
 def test_position_records_volatility_gate_metrics(tmp_path):
     structures = {"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 95_000)}
-    trader = _trader(tmp_path, FakeAdapter(structures))
+    trader = _trader(tmp_path, FakeAdapter(structures), vol_gate_enabled=True)
     result = trader.run_opening_allocation()
     position = result["opened"][0]
     assert position["volatility"]["preferred_structure"] == "CREDIT_SPREAD"
     assert position["volatility"]["min_iv_hv_ratio"] == 1.2
+
+
+def test_default_pair_credit_ignores_iv_hv_gate_and_uses_iv_leg_selection(tmp_path):
+    structures = {
+        "AAA/BBB": {
+            **_structure("AAA/BBB", 10_000),
+            "volatility_result": {
+                "ok": False,
+                "preferred_structure": "LONG_VOL",
+                "reason": "IV/HV below credit threshold: 0.80 < 1.00",
+                "min_iv_hv_ratio": 0.8,
+                "legs": [{"symbol": "AAA", "iv": 12.0, "hv": 15.0, "iv_hv_ratio": 0.8}],
+            },
+        },
+        "CCC/DDD": _structure("CCC/DDD", 95_000),
+    }
+    trader = _trader(tmp_path, FakeAdapter(structures))
+    result = trader.run_opening_allocation()
+    assert [p["pair"] for p in result["opened"]] == ["AAA/BBB"]
+    assert result["opened"][0]["leg_selection"] == "iv_expected_move"
+    assert result["opened"][0]["sell_iv_move"] == 1.0
+    assert result["opened"][0]["hedge_max_iv_move"] == 2.5
+    assert result["rejected"] == []
 
 
 def test_hv_lookback_matches_expiry_with_floor_and_cap():

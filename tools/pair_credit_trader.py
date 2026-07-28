@@ -177,14 +177,28 @@ class OmniSpreadReadOnlyAdapter:
             raise RuntimeError(f"OmniSpread backend not found: {self.backend_path}")
         if str(self.backend_path) not in sys.path:
             sys.path.insert(0, str(self.backend_path))
-        from derivatives_backtest import _clean, build_credit_spread_structure, instrument_types
+        from derivatives_backtest import (
+            _clean,
+            _fetch_credit_snapshot,
+            _snapshot_price,
+            build_credit_spread_structure,
+            instrument_types,
+            nse_symbol,
+            whole_lot_hedge,
+        )
         from engine import OmniSpreadEngine
+        from margin_estimator import estimate_margin
         from nse_client import fetch_future, fetch_option
         from presets import PRESETS
 
         self._clean = _clean
+        self._fetch_credit_snapshot = _fetch_credit_snapshot
+        self._snapshot_price = _snapshot_price
         self._build_credit_spread_structure = build_credit_spread_structure
         self._instrument_types = instrument_types
+        self._nse_symbol = nse_symbol
+        self._whole_lot_hedge = whole_lot_hedge
+        self._estimate_margin = estimate_margin
         self._engine_cls = OmniSpreadEngine
         self._fetch_future = fetch_future
         self._fetch_option = fetch_option
@@ -225,6 +239,306 @@ class OmniSpreadReadOnlyAdapter:
         structure["sold_sd"] = sold_sd
         structure["hedge_sd"] = hedge_sd
         return structure
+
+    @staticmethod
+    def _normal_cdf(value: float) -> float:
+        return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+    @classmethod
+    def _black_scholes_price(
+        cls,
+        spot: float,
+        strike: float,
+        years: float,
+        rate: float,
+        sigma: float,
+        option_type: str,
+    ) -> float:
+        if spot <= 0 or strike <= 0 or years <= 0 or sigma <= 0:
+            return 0.0
+        sqrt_t = math.sqrt(years)
+        d1 = (math.log(spot / strike) + (rate + 0.5 * sigma * sigma) * years) / (sigma * sqrt_t)
+        d2 = d1 - sigma * sqrt_t
+        discounted_strike = strike * math.exp(-rate * years)
+        if option_type == "CE":
+            return spot * cls._normal_cdf(d1) - discounted_strike * cls._normal_cdf(d2)
+        if option_type == "PE":
+            return discounted_strike * cls._normal_cdf(-d2) - spot * cls._normal_cdf(-d1)
+        return 0.0
+
+    @classmethod
+    def _implied_volatility(
+        cls,
+        price: float,
+        spot: float,
+        strike: float,
+        years: float,
+        option_type: str,
+        rate: float = 0.065,
+    ) -> float | None:
+        if price <= 0 or spot <= 0 or strike <= 0 or years <= 0:
+            return None
+        low = 0.0001
+        high = 5.0
+        intrinsic = max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
+        if price < intrinsic:
+            return None
+        for _ in range(80):
+            mid = (low + high) / 2.0
+            estimate = cls._black_scholes_price(spot, strike, years, rate, mid, option_type)
+            if estimate > price:
+                high = mid
+            else:
+                low = mid
+        iv = (low + high) / 2.0
+        return iv if math.isfinite(iv) and iv > 0 else None
+
+    @staticmethod
+    def _snapshot_entry_price(snapshot, strike: float, option_type: str) -> float | None:
+        row = snapshot[
+            (snapshot["STRIKE_PRICE"].astype(float) == float(strike))
+            & (snapshot["OPTION_TYPE"] == option_type)
+        ]
+        if row.empty:
+            return None
+        price = float(row.iloc[0]["CLOSING_PRICE"])
+        return price if math.isfinite(price) and price > 0 else None
+
+    @staticmethod
+    def _snapshot_traded(snapshot, strike: float, option_type: str) -> bool:
+        row = snapshot[
+            (snapshot["STRIKE_PRICE"].astype(float) == float(strike))
+            & (snapshot["OPTION_TYPE"] == option_type)
+        ]
+        if row.empty:
+            return False
+        try:
+            volume = float(row.iloc[0].get("TOT_TRADED_QTY") or 0)
+        except (TypeError, ValueError):
+            volume = 0.0
+        return volume > 0
+
+    def _atm_iv_expected_move(self, asset: dict[str, Any]) -> dict[str, Any]:
+        snapshot = asset["option_snapshot"]
+        spot = float(asset["spot"])
+        expiry = asset["expiry"]
+        as_of = asset.get("as_of")
+        if hasattr(as_of, "date"):
+            as_of_date = as_of.date()
+        else:
+            as_of_date = _now_ist().date()
+        calendar_days = max((expiry.date() - as_of_date).days, 1)
+        years = calendar_days / 365.0
+        strikes = sorted(float(value) for value in snapshot["STRIKE_PRICE"].dropna().unique())
+        if not strikes:
+            raise ValueError(f"No option strikes available for {asset['symbol']} IV sizing.")
+        atm = min(strikes, key=lambda strike: abs(strike - spot))
+
+        ivs: list[float] = []
+        for option_type in ("CE", "PE"):
+            if not self._snapshot_traded(snapshot, atm, option_type):
+                continue
+            price = self._snapshot_entry_price(snapshot, atm, option_type)
+            if price is None:
+                continue
+            iv = self._implied_volatility(price, spot, atm, years, option_type)
+            if iv is not None:
+                ivs.append(iv)
+        if not ivs:
+            raise ValueError(
+                f"No traded ATM option with valid price for {asset['symbol']} {expiry.strftime('%d-%b-%Y')}."
+            )
+        iv = sum(ivs) / len(ivs)
+        expected_move = spot * iv * math.sqrt(years)
+        if not math.isfinite(expected_move) or expected_move <= 0:
+            raise ValueError(f"Invalid IV expected move for {asset['symbol']}.")
+        return {
+            "atm_strike": atm,
+            "atm_iv": iv,
+            "calendar_days": calendar_days,
+            "expected_move": expected_move,
+        }
+
+    def _select_iv_credit_leg(
+        self,
+        asset_key: str,
+        asset: dict[str, Any],
+        option_type: str,
+        lots: int,
+        sell_iv_move: float,
+        hedge_max_iv_move: float,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        snapshot = asset["option_snapshot"]
+        spot = float(asset["spot"])
+        expiry = asset["expiry"]
+        iv_metrics = self._atm_iv_expected_move(asset)
+        expected_move = float(iv_metrics["expected_move"])
+        away = -1.0 if option_type == "PE" else 1.0
+        sold_target = spot + away * float(sell_iv_move) * expected_move
+        hedge_limit = spot + away * float(hedge_max_iv_move) * expected_move
+
+        typed = snapshot[(snapshot["OPTION_TYPE"] == option_type) & snapshot["STRIKE_PRICE"].notna()].copy()
+        if typed.empty:
+            raise ValueError(f"No {option_type} option strikes available for {asset['symbol']}.")
+        strikes = sorted(float(value) for value in typed["STRIKE_PRICE"].unique())
+        otm_sold = [
+            strike for strike in strikes
+            if away * (strike - spot) > 0 and self._snapshot_traded(typed, strike, option_type)
+        ]
+        if not otm_sold:
+            raise ValueError(f"No traded OTM {option_type} sell strike for {asset['symbol']}.")
+        sold_strike = min(otm_sold, key=lambda strike: abs(strike - sold_target))
+        sold_price = self._snapshot_entry_price(typed, sold_strike, option_type)
+        if sold_price is None:
+            raise ValueError(f"No valid sold-leg price for {asset['symbol']} {sold_strike:g}{option_type}.")
+
+        best: tuple[float, dict[str, Any], float, float] | None = None
+        for hedge_strike in strikes:
+            if away * (hedge_strike - sold_strike) <= 0:
+                continue
+            if away * (hedge_strike - hedge_limit) > 0:
+                continue
+            if not self._snapshot_traded(typed, hedge_strike, option_type):
+                continue
+            hedge_price = self._snapshot_entry_price(typed, hedge_strike, option_type)
+            if hedge_price is None:
+                continue
+            credit_per_share = sold_price - hedge_price
+            if credit_per_share <= 0:
+                continue
+            probe_legs = [
+                {
+                    "asset": asset_key,
+                    "symbol": asset["symbol"],
+                    "instrument": option_type,
+                    "side": "SELL",
+                    "lots": 1,
+                    "lot_size": int(asset["future_lot"]),
+                    "strike": sold_strike,
+                    "spot": spot,
+                    "price": sold_price,
+                    "is_index": asset["is_index"],
+                },
+                {
+                    "asset": asset_key,
+                    "symbol": asset["symbol"],
+                    "instrument": option_type,
+                    "side": "BUY",
+                    "lots": 1,
+                    "lot_size": int(asset["future_lot"]),
+                    "strike": hedge_strike,
+                    "spot": spot,
+                    "price": hedge_price,
+                    "is_index": asset["is_index"],
+                },
+            ]
+            margin = float(self._estimate_margin(probe_legs).get("estimated_margin") or 0)
+            if margin <= 0:
+                continue
+            score = credit_per_share * int(asset["future_lot"]) / margin
+            if best is None or score > best[0]:
+                hedge_info = {
+                    "strike": hedge_strike,
+                    "price": hedge_price,
+                    "margin_per_lot": margin,
+                    "credit_to_margin": score,
+                }
+                best = (score, hedge_info, credit_per_share, margin)
+        if best is None:
+            raise ValueError(
+                f"No viable traded hedge for {asset['symbol']} {sold_strike:g}{option_type} "
+                f"inside {hedge_max_iv_move:g}x IV move."
+            )
+
+        _, hedge_info, credit_per_share, margin_per_lot = best
+        common = {
+            "asset": asset_key,
+            "symbol": asset["symbol"],
+            "instrument": option_type,
+            "lots": int(lots),
+            "lot_size": int(asset["future_lot"]),
+            "expiry": asset["expiry"].strftime("%d-%b-%Y"),
+            "spot": round(spot, 2),
+            "is_index": asset["is_index"],
+        }
+        legs = [
+            {**common, "side": "SELL", "strike": sold_strike, "price": sold_price},
+            {**common, "side": "BUY", "strike": hedge_info["strike"], "price": hedge_info["price"]},
+        ]
+        metrics = {
+            **iv_metrics,
+            "symbol": asset["symbol"],
+            "option_type": option_type,
+            "sold_target": sold_target,
+            "hedge_limit": hedge_limit,
+            "sold_strike": sold_strike,
+            "hedge_strike": hedge_info["strike"],
+            "credit_per_share": credit_per_share,
+            "margin_per_lot": margin_per_lot,
+            "credit_to_margin": hedge_info["credit_to_margin"],
+        }
+        return legs, metrics
+
+    def build_iv_expected_move_credit_structure(
+        self,
+        candidate: dict[str, Any],
+        sell_iv_move: float,
+        hedge_max_iv_move: float,
+    ) -> dict[str, Any]:
+        self._ensure_loaded()
+        from pandas import Timestamp
+
+        as_of = datetime.now()
+        start = as_of - timedelta(days=14)
+        required_expiry = Timestamp(as_of.date())
+        assets = {
+            "x": self._fetch_credit_snapshot(
+                candidate["x"], start, as_of, required_expiry, self._fetch_future, self._fetch_option
+            ),
+            "y": self._fetch_credit_snapshot(
+                candidate["y"], start, as_of, required_expiry, self._fetch_future, self._fetch_option
+            ),
+        }
+        x_lots, y_lots = self._whole_lot_hedge(
+            float(candidate["qty"]), assets["x"]["future_lot"], assets["y"]["future_lot"]
+        )
+        lot_counts = {"x": x_lots, "y": y_lots}
+        short_spread = candidate["direction"] in {"SHORT_SPREAD", "long_x_short_y"}
+        signs = {"x": 1 if short_spread else -1, "y": -1 if short_spread else 1}
+
+        legs: list[dict[str, Any]] = []
+        iv_leg_selection: list[dict[str, Any]] = []
+        for key, asset in assets.items():
+            option_type = "PE" if signs[key] > 0 else "CE"
+            selected_legs, metrics = self._select_iv_credit_leg(
+                key,
+                asset,
+                option_type,
+                lot_counts[key],
+                sell_iv_move=sell_iv_move,
+                hedge_max_iv_move=hedge_max_iv_move,
+            )
+            legs.extend(selected_legs)
+            iv_leg_selection.append(metrics)
+
+        actual_ratio = x_lots * assets["x"]["future_lot"] / (y_lots * assets["y"]["future_lot"])
+        margin = self._estimate_margin(legs)
+        return {
+            "pair": f"{self._nse_symbol(candidate['x'])}/{self._nse_symbol(candidate['y'])}",
+            "qty": candidate["qty"],
+            "direction": candidate["direction"],
+            "as_of": min(asset["as_of"] for asset in assets.values()).strftime("%d-%b-%Y"),
+            "x_lots": x_lots,
+            "y_lots": y_lots,
+            "actual_ratio": round(actual_ratio, 4),
+            "legs": legs,
+            "margin": margin,
+            "leg_selection": "iv_expected_move",
+            "sell_iv_move": sell_iv_move,
+            "hedge_max_iv_move": hedge_max_iv_move,
+            "iv_leg_selection": iv_leg_selection,
+            "note": "Current structure only; prices and available strikes can change before execution.",
+        }
 
     @staticmethod
     def _strike_text(strike: Any) -> str:
@@ -549,10 +863,13 @@ class PairCreditConfig:
     period: str = "1y"
     interval: str = "1d"
     top_n: int = 50
+    leg_selection: str = "iv_expected_move"
     strike_rule: str = "vol"
     sold_sd: float = 1.0
     hedge_sd: float = 2.5
-    vol_gate_enabled: bool = True
+    sell_iv_move: float = 1.0
+    hedge_max_iv_move: float = 2.5
+    vol_gate_enabled: bool = False
     iv_hv_min_ratio: float = 1.0
     hv_lookback_multiplier: int = 2
     hv_min_lookback_days: int = 5
@@ -601,12 +918,19 @@ class PairCreditTrader:
             if pair in open_pairs:
                 continue
             try:
-                structure = self.adapter.build_credit_structure(
-                    candidate,
-                    strike_rule=self.config.strike_rule,
-                    sold_sd=self.config.sold_sd,
-                    hedge_sd=self.config.hedge_sd,
-                )
+                if self.config.leg_selection == "iv_expected_move":
+                    structure = self.adapter.build_iv_expected_move_credit_structure(
+                        candidate,
+                        sell_iv_move=self.config.sell_iv_move,
+                        hedge_max_iv_move=self.config.hedge_max_iv_move,
+                    )
+                else:
+                    structure = self.adapter.build_credit_structure(
+                        candidate,
+                        strike_rule=self.config.strike_rule,
+                        sold_sd=self.config.sold_sd,
+                        hedge_sd=self.config.hedge_sd,
+                    )
                 vol_check = {"ok": True, "preferred_structure": "CREDIT_SPREAD", "legs": []}
                 if self.config.vol_gate_enabled:
                     vol_check = self.adapter.evaluate_credit_volatility(
@@ -685,6 +1009,10 @@ class PairCreditTrader:
             "entry_margin": margin,
             "margin": structure.get("margin"),
             "entry_net_credit": round(net_credit, 2),
+            "leg_selection": structure.get("leg_selection"),
+            "sell_iv_move": structure.get("sell_iv_move"),
+            "hedge_max_iv_move": structure.get("hedge_max_iv_move"),
+            "iv_leg_selection": structure.get("iv_leg_selection"),
             "strike_rule": structure.get("strike_rule"),
             "sold_sd": structure.get("sold_sd"),
             "hedge_sd": structure.get("hedge_sd"),
@@ -835,10 +1163,13 @@ def make_pair_credit_trader_from_config(telegram=None, shoonya_client=None) -> P
         OMNISPREAD_BACKEND_PATH,
         PAIR_CREDIT_CAPITAL,
         PAIR_CREDIT_HEDGE_SD,
+        PAIR_CREDIT_HEDGE_MAX_IV_MOVE,
         PAIR_CREDIT_INTERVAL,
+        PAIR_CREDIT_LEG_SELECTION,
         PAIR_CREDIT_LEDGER_FILE,
         PAIR_CREDIT_PERIOD,
         PAIR_CREDIT_PRESET,
+        PAIR_CREDIT_SELL_IV_MOVE,
         PAIR_CREDIT_SOLD_SD,
         PAIR_CREDIT_STATE_FILE,
         PAIR_CREDIT_STRIKE_RULE,
@@ -859,9 +1190,12 @@ def make_pair_credit_trader_from_config(telegram=None, shoonya_client=None) -> P
         period=PAIR_CREDIT_PERIOD,
         interval=PAIR_CREDIT_INTERVAL,
         top_n=PAIR_CREDIT_TOP_N,
+        leg_selection=PAIR_CREDIT_LEG_SELECTION,
         strike_rule=PAIR_CREDIT_STRIKE_RULE,
         sold_sd=PAIR_CREDIT_SOLD_SD,
         hedge_sd=PAIR_CREDIT_HEDGE_SD,
+        sell_iv_move=PAIR_CREDIT_SELL_IV_MOVE,
+        hedge_max_iv_move=PAIR_CREDIT_HEDGE_MAX_IV_MOVE,
         vol_gate_enabled=PAIR_CREDIT_VOL_GATE_ENABLED,
         iv_hv_min_ratio=PAIR_CREDIT_IV_HV_MIN_RATIO,
         hv_lookback_multiplier=PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER,
