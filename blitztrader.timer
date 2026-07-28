@@ -1,5 +1,5 @@
 [Unit]
-Description=Start BlitzTrader at 8:20 AM IST (before 09:15 market open)
+Description=Start BlitzTrader at 8:20 AM IST on non-GammaBlast trading days
 
 [Timer]
 OnCalendar=Mon,Wed,Fri *-*-* 08:20:00 Asia/Kolkata

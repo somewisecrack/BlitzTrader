@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
+import pytz
+
+from tools import pair_credit_trader
 from tools.pair_credit_trader import OmniSpreadReadOnlyAdapter, PairCreditConfig, PairCreditTrader
 
 
@@ -108,6 +111,48 @@ def test_manual_exit_records_pnl_and_blocks_same_day_reallocation_until_next_sca
     assert trader.ledger.state["manual_exit_dates"]
     second = trader.run_opening_allocation()
     assert second["status"] == "skipped"
+
+
+def test_same_day_expiry_does_not_close_before_market_close(tmp_path, monkeypatch):
+    structure = _structure("AAA/BBB", 10_000)
+    for leg in structure["legs"]:
+        leg["expiry"] = "28-Jul-2026"
+    adapter = FakeAdapter({"AAA/BBB": structure, "CCC/DDD": _structure("CCC/DDD", 10_000)})
+    trader = _trader(tmp_path, adapter)
+    trader.run_opening_allocation()
+
+    ist = pytz.timezone("Asia/Kolkata")
+    monkeypatch.setattr(
+        pair_credit_trader,
+        "_now_ist",
+        lambda: ist.localize(datetime(2026, 7, 28, 9, 20)),
+    )
+
+    assert trader.close_expired_positions() == []
+    expiring = [p for p in trader.ledger.open_positions() if p["earliest_expiry"] == "2026-07-28"]
+    assert len(expiring) == 1
+
+
+def test_same_day_expiry_closes_after_market_close(tmp_path, monkeypatch):
+    structure = _structure("AAA/BBB", 10_000)
+    for leg in structure["legs"]:
+        leg["expiry"] = "28-Jul-2026"
+    adapter = FakeAdapter({"AAA/BBB": structure, "CCC/DDD": _structure("CCC/DDD", 10_000)})
+    trader = _trader(tmp_path, adapter)
+    trader.run_opening_allocation()
+
+    ist = pytz.timezone("Asia/Kolkata")
+    monkeypatch.setattr(
+        pair_credit_trader,
+        "_now_ist",
+        lambda: ist.localize(datetime(2026, 7, 28, 15, 16)),
+    )
+
+    results = trader.close_expired_positions()
+    assert len(results) == 1
+    assert results[0]["ok"] is True
+    expiring = [p for p in trader.ledger.open_positions() if p["earliest_expiry"] == "2026-07-28"]
+    assert expiring == []
 
 
 

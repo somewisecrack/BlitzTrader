@@ -20,6 +20,8 @@ from typing import Any
 
 import pytz
 
+from tools.blitz_schedule import is_pair_credit_expiry_close_time
+
 logger = logging.getLogger("BlitzTrader.PairCredit")
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -725,11 +727,14 @@ class PairCreditTrader:
         return {"ok": True, "position": closed, "realized_pnl": mark["unrealized_pnl"]}
 
     def close_expired_positions(self) -> list[dict[str, Any]]:
-        today = _now_ist().date()
+        now = _now_ist()
+        today = now.date()
         results = []
         for position in list(self.ledger.open_positions()):
             expiry = _parse_expiry(position.get("earliest_expiry", ""))
             if not expiry or today < expiry:
+                continue
+            if today == expiry and not is_pair_credit_expiry_close_time(now):
                 continue
             mark = self.mark_position(position)
             if not mark["data_ok"]:
