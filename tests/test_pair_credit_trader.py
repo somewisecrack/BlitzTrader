@@ -284,3 +284,23 @@ def test_trading_days_to_expiry_uses_nse_holidays():
     adapter = OmniSpreadReadOnlyAdapter(Path("/tmp"))
     # 2026-09-14 is a configured NSE holiday; it must not count toward expiry lookback.
     assert adapter._trading_days_to_expiry(date(2026, 9, 15), today=date(2026, 9, 11)) == 1
+
+
+
+def test_factory_can_reuse_existing_shoonya_client(tmp_path, monkeypatch):
+    import tools.pair_credit_trader as pct
+
+    fake_client = object()
+    monkeypatch.setattr(pct, "OMNISPREAD_BACKEND_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(pct, "PAIR_CREDIT_STATE_FILE", tmp_path / "state.json", raising=False)
+    monkeypatch.setattr(pct, "PAIR_CREDIT_LEDGER_FILE", tmp_path / "ledger.jsonl", raising=False)
+    trader = pct.PairCreditTrader(
+        pct.PairCreditConfig(
+            backend_path=tmp_path,
+            state_file=tmp_path / "state.json",
+            ledger_file=tmp_path / "ledger.jsonl",
+            capital=100_000,
+        ),
+        shoonya_client=fake_client,
+    )
+    assert trader.adapter._shoonya_client is fake_client

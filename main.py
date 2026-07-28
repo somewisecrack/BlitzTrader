@@ -258,7 +258,10 @@ class BlitzTrader:
                 raise RuntimeError("Shoonya login failed after all retries")
 
             self._telegram.send_telegram("Shoonya login successful. Running pre-open pair scan.")
-            pair_trader = make_pair_credit_trader_from_config(telegram=self._telegram)
+            pair_trader = make_pair_credit_trader_from_config(
+                telegram=self._telegram,
+                shoonya_client=self._shoonya,
+            )
 
             expiry_results = pair_trader.close_expired_positions()
             for result in expiry_results:

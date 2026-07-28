@@ -160,10 +160,10 @@ class PairCreditLedger:
 class OmniSpreadReadOnlyAdapter:
     """Read-only adapter over OmniSpread's scanner and credit-spread builder."""
 
-    def __init__(self, backend_path: Path):
+    def __init__(self, backend_path: Path, shoonya_client=None):
         self.backend_path = Path(backend_path)
         self._loaded = False
-        self._shoonya_client = None
+        self._shoonya_client = shoonya_client
         self._option_token_cache: dict[str, dict[str, Any]] = {}
         self._iv_cache: dict[tuple[str, str, float, str], float | None] = {}
         self._hv_cache: dict[tuple[str, date, int, int, int], dict[str, Any] | None] = {}
@@ -560,11 +560,11 @@ class PairCreditConfig:
 class PairCreditTrader:
     """Daily virtual allocation, status, manual exit, and expiry exit engine."""
 
-    def __init__(self, config: PairCreditConfig, telegram=None, adapter: OmniSpreadReadOnlyAdapter | None = None):
+    def __init__(self, config: PairCreditConfig, telegram=None, adapter: OmniSpreadReadOnlyAdapter | None = None, shoonya_client=None):
         self.config = config
         self.telegram = telegram
         self.ledger = PairCreditLedger(config.state_file, config.ledger_file, config.capital)
-        self.adapter = adapter or OmniSpreadReadOnlyAdapter(config.backend_path)
+        self.adapter = adapter or OmniSpreadReadOnlyAdapter(config.backend_path, shoonya_client=shoonya_client)
 
     def send(self, message: str) -> None:
         if self.telegram:
@@ -825,7 +825,7 @@ class PairCreditTrader:
         return "IV/HV: " + "; ".join(parts) + "\n" if parts else ""
 
 
-def make_pair_credit_trader_from_config(telegram=None) -> PairCreditTrader:
+def make_pair_credit_trader_from_config(telegram=None, shoonya_client=None) -> PairCreditTrader:
     from config import (
         OMNISPREAD_BACKEND_PATH,
         PAIR_CREDIT_CAPITAL,
@@ -863,4 +863,4 @@ def make_pair_credit_trader_from_config(telegram=None) -> PairCreditTrader:
         hv_min_lookback_days=PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS,
         hv_max_lookback_days=PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS,
     )
-    return PairCreditTrader(cfg, telegram=telegram)
+    return PairCreditTrader(cfg, telegram=telegram, shoonya_client=shoonya_client)
