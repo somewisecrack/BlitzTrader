@@ -18,6 +18,7 @@ wiki/daily_reviews/
 wiki/hypotheses/
 wiki/metrics/
 wiki/no_proposals/
+wiki/promoted_filters/*.json
 
 # Python
 __pycache__/
