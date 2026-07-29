@@ -1,6 +1,7 @@
 [Unit]
 Description=BlitzTrader Post-Market Wiki Loop Timer
 Requires=blitztrader-wiki-loop.service
+ConditionPathExists=/opt/blitztrader/ENABLE_WIKI_LOOP
 
 [Timer]
 OnCalendar=Mon,Wed,Fri *-*-* 15:30:00 Asia/Kolkata

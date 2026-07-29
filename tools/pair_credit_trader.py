@@ -926,6 +926,7 @@ class PairCreditTrader:
         opened: list[dict[str, Any]] = []
         insufficient: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
+        structured_candidates: list[dict[str, Any]] = []
 
         try:
             candidates = self.adapter.scan(
@@ -947,14 +948,6 @@ class PairCreditTrader:
             if pair in open_pairs:
                 continue
             symbols = self._candidate_symbols(candidate)
-            repeated = sorted(symbols & used_symbols)
-            if repeated:
-                rejected.append({
-                    "pair": pair,
-                    "reason": "stock already allocated in another open pair",
-                    "symbols": repeated,
-                })
-                continue
             try:
                 if self.config.leg_selection == "iv_expected_move":
                     structure = self.adapter.build_iv_expected_move_credit_structure(
@@ -991,10 +984,35 @@ class PairCreditTrader:
                 if margin <= 0:
                     rejected.append({"pair": pair, "reason": "non-positive margin estimate"})
                     continue
+                structured_candidates.append({
+                    "pair": pair,
+                    "candidate": candidate,
+                    "structure": structure,
+                    "margin": margin,
+                    "symbols": symbols,
+                })
+            except Exception as exc:
+                logger.exception("Could not structure pair %s", pair)
+                rejected.append({"pair": pair, "reason": str(exc)})
+
+        structured_candidates.sort(key=lambda item: (item["margin"], item["pair"]))
+        for item in structured_candidates:
+            pair = item["pair"]
+            margin = item["margin"]
+            symbols = item["symbols"]
+            repeated = sorted(symbols & used_symbols)
+            if repeated:
+                rejected.append({
+                    "pair": pair,
+                    "reason": "stock already allocated in another open pair",
+                    "symbols": repeated,
+                })
+                continue
+            try:
                 if margin > remaining:
                     insufficient.append({"pair": pair, "margin": margin, "remaining": remaining})
                     continue
-                position = self._position_from(candidate, structure, margin)
+                position = self._position_from(item["candidate"], item["structure"], margin)
                 self.ledger.add_position(position)
                 open_pairs.add(pair)
                 used_symbols.update(symbols)
@@ -1002,7 +1020,7 @@ class PairCreditTrader:
                 opened.append(position)
                 self.send(self._format_open_message(position, remaining))
             except Exception as exc:
-                logger.exception("Could not structure pair %s", pair)
+                logger.exception("Could not allocate pair %s", pair)
                 rejected.append({"pair": pair, "reason": str(exc)})
 
         if insufficient:

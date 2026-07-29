@@ -29,10 +29,15 @@ def test_friday_is_allowed():
 def test_all_blitztrader_timers_run_only_monday_wednesday_friday():
     timer_names = (
         "blitztrader.timer",
-        "blitztrader-wiki-loop.timer",
         "blitztrader-eod-backup.timer",
     )
     for timer_name in timer_names:
         text = (ROOT / timer_name).read_text()
         assert "OnCalendar=Mon,Wed,Fri " in text
         assert "OnCalendar=Mon..Fri " not in text
+
+
+def test_wiki_loop_timer_is_deactivated_by_default():
+    text = (ROOT / "blitztrader-wiki-loop.timer").read_text()
+    assert "ConditionPathExists=/opt/blitztrader/ENABLE_WIKI_LOOP" in text
+    assert "OnCalendar=Mon,Wed,Fri " in text

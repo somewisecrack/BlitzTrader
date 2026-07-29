@@ -273,6 +273,10 @@ class TestScopeGuard:
         assert "15:30:00" in text
         assert "Asia/Kolkata" in text
 
+    def test_timer_is_deactivated_by_default(self):
+        text = (_REPO_ROOT / "blitztrader-wiki-loop.timer").read_text()
+        assert "ConditionPathExists=/opt/blitztrader/ENABLE_WIKI_LOOP" in text
+
     def test_service_uses_is_trading_day_exec_condition(self):
         text = (_REPO_ROOT / "blitztrader-wiki-loop.service").read_text()
         assert "ExecCondition" in text

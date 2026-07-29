@@ -104,9 +104,27 @@ def test_allocates_only_affordable_margin_and_notifies(tmp_path):
     trader = _trader(tmp_path, adapter, telegram)
     result = trader.run_opening_allocation()
     assert len(result["opened"]) == 1
-    assert result["opened"][0]["pair"] == "AAA/BBB"
-    assert result["insufficient"][0]["pair"] == "CCC/DDD"
+    assert result["opened"][0]["pair"] == "CCC/DDD"
+    assert result["insufficient"][0]["pair"] == "AAA/BBB"
     assert any("Insufficient margin" in msg for msg in telegram.messages)
+
+
+def test_allocates_lowest_margin_pair_first_even_if_scanner_rank_is_lower(tmp_path):
+    class MarginRankAdapter(FakeAdapter):
+        def scan(self, preset, period, interval, top_n):
+            self.scan_calls.append((preset, period, interval, top_n))
+            return [
+                {"pair": "AAA/BBB", "x": "AAA.NS", "y": "BBB.NS", "qty": 1.0, "direction": "SHORT_SPREAD", "method": "CADF", "z_score": 3.0, "hurst": 0.3, "prob_profit": 99.0, "half_life": 5},
+                {"pair": "CCC/DDD", "x": "CCC.NS", "y": "DDD.NS", "qty": 1.0, "direction": "SHORT_SPREAD", "method": "CADF", "z_score": 2.1, "hurst": 0.3, "prob_profit": 70.0, "half_life": 5},
+            ]
+
+    structures = {
+        "AAA/BBB": _structure("AAA/BBB", 50_000),
+        "CCC/DDD": _structure("CCC/DDD", 10_000),
+    }
+    trader = _trader(tmp_path, MarginRankAdapter(structures), capital=100_000)
+    result = trader.run_opening_allocation()
+    assert [position["pair"] for position in result["opened"]] == ["CCC/DDD", "AAA/BBB"]
 
 
 def test_rejects_candidates_that_reuse_a_stock_already_allocated(tmp_path):
@@ -121,13 +139,13 @@ def test_rejects_candidates_that_reuse_a_stock_already_allocated(tmp_path):
 
     structures = {
         "AAA/BBB": _structure("AAA/BBB", 10_000),
-        "AAA/CCC": _structure("AAA/CCC", 10_000),
+        "AAA/CCC": _structure("AAA/CCC", 5_000),
         "DDD/EEE": _structure("DDD/EEE", 10_000),
     }
     trader = _trader(tmp_path, RepeatedStockAdapter(structures), capital=100_000)
     result = trader.run_opening_allocation()
-    assert [position["pair"] for position in result["opened"]] == ["AAA/BBB", "DDD/EEE"]
-    assert result["rejected"][0]["pair"] == "AAA/CCC"
+    assert [position["pair"] for position in result["opened"]] == ["AAA/CCC", "DDD/EEE"]
+    assert result["rejected"][0]["pair"] == "AAA/BBB"
     assert result["rejected"][0]["symbols"] == ["AAA"]
 
 
