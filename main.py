@@ -339,18 +339,8 @@ class BlitzTrader:
                     self._running = False
                     return
 
-                import re as _re
-                m = None
-                for pattern in (
-                    r"\bexit\s+#?(\d+)\b",
-                    r"\bclose\s+(?:position\s+|spread\s+|serial\s+)?#?(\d+)\b",
-                    r"\bsquare\s+off\s+#?(\d+)\b",
-                ):
-                    m = _re.search(pattern, text)
-                    if m:
-                        break
-                if m:
-                    serial = int(m.group(1))
+                serial = self._extract_pair_credit_exit_serial(text)
+                if serial is not None:
                     result = pair_trader.close_by_serial(serial)
                     if result.get("ok"):
                         pos = result["position"]
@@ -370,7 +360,7 @@ class BlitzTrader:
                     continue
 
                 self._telegram.send_telegram(
-                    "Supported commands: status, positions, pnl, exit #N, /abort."
+                    "Supported commands: status, positions, pnl, exit #N, exit pair #N, /abort."
                 )
 
             expiry_results = pair_trader.close_expired_positions()
@@ -387,6 +377,22 @@ class BlitzTrader:
                         f"Expiry exit pending: {pos.get('pair', '?')} | {result.get('error')}"
                     )
             time.sleep(TELEGRAM_POLL_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _extract_pair_credit_exit_serial(text: str) -> int | None:
+        """Parse deterministic pair-credit exit commands from Telegram text."""
+        import re as _re
+
+        normalized = (text or "").lower().strip()
+        for pattern in (
+            r"\bexit\s+(?:pair\s+|position\s+|spread\s+|serial\s+)?#?(\d+)\b",
+            r"\bclose\s+(?:pair\s+|position\s+|spread\s+|serial\s+)?#?(\d+)\b",
+            r"\bsquare\s+off\s+(?:pair\s+|position\s+|spread\s+|serial\s+)?#?(\d+)\b",
+        ):
+            match = _re.search(pattern, normalized)
+            if match:
+                return int(match.group(1))
+        return None
 
     # ──────────────────────────────────────────────────────────
     #   INITIALIZATION
