@@ -231,9 +231,6 @@ class TelegramHandler:
                     })
                     logger.info(f"Telegram message received: {text[:50]}")
 
-                    # Acknowledge receipt
-                    self.send_telegram(f"✅ Received — responding now.")
-
             except Exception:
                 logger.exception("Error in Telegram listener")
                 time.sleep(10)
