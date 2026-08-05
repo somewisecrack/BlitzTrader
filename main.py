@@ -236,6 +236,7 @@ class BlitzTrader:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
+        self._write_trading_pid()
         self._telegram = TelegramHandler(TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHORIZED_USER_ID)
         self._telegram.start()
 
@@ -316,6 +317,7 @@ class BlitzTrader:
         finally:
             if self._telegram:
                 self._telegram.stop()
+            self._remove_trading_pid()
 
     def _pair_credit_monitor_loop(self, pair_trader):
         """Monitor Telegram commands and automatic expiry exits until market close."""
@@ -1057,12 +1059,7 @@ class BlitzTrader:
 
         # Write PID file so blitztrader-agent.service yields Telegram polling to us.
         # Removed in _remove_trading_pid() on any exit path.
-        _TRADING_PID_FILE = Path("/tmp/blitztrader_trading.pid")
-        try:
-            _TRADING_PID_FILE.write_text(str(os.getpid()))
-            logger.info("Trading PID file written: %s (pid=%d)", _TRADING_PID_FILE, os.getpid())
-        except Exception:
-            logger.warning("Could not write trading PID file — agent coordination unavailable")
+        self._write_trading_pid()
 
         try:
             while self._running:
@@ -1857,6 +1854,16 @@ class BlitzTrader:
             f"Scanner conditions valid; spread will be built by SpreadBuilder."
         )
         return True, context_summary, reason
+
+    @staticmethod
+    def _write_trading_pid() -> None:
+        """Write the PID coordination file so the Q&A agent yields Telegram."""
+        pid_file = Path("/tmp/blitztrader_trading.pid")
+        try:
+            pid_file.write_text(str(os.getpid()))
+            logger.info("Trading PID file written: %s (pid=%d)", pid_file, os.getpid())
+        except Exception:
+            logger.warning("Could not write trading PID file — agent coordination unavailable")
 
     @staticmethod
     def _remove_trading_pid() -> None:
