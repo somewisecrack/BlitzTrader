@@ -4,23 +4,28 @@ scripts/blitztrader_agent.py — Always-on Telegram Q&A agent.
 Runs continuously on the VM (24/7, weekends included) so the user can ask
 questions about past sessions, strategies, wiki, and portfolio state at any time.
 
-Coordination with the trading service (main.py):
-  - main.py writes /tmp/blitztrader_trading.pid when it's alive and polling Telegram
-  - This script yields Telegram polling to main.py when that PID file is active
-  - When main.py exits (EOD or weekend), this script resumes Q&A polling
-  - No shared state or IPC — PID file is the only coordination point
+Coordination with the trading service (main.py / pair-credit script):
+  - Any live trading service writes /tmp/blitztrader_trading.pid when alive and
+    polling Telegram.  It must remove the file on clean exit.
+  - This script yields Telegram polling to the trading service when that PID is active.
+  - When the trading service exits (EOD, weekend, or crash), this script resumes Q&A.
+  - Stale PID files (process gone) are detected via os.kill(pid, 0) and ignored.
+  - No shared state or IPC — the PID file is the only coordination point.
 
 Responsibilities:
   - Respond to free-form Telegram questions using Gemini
+  - Handle deterministic status/pnl queries from state file (no Gemini needed)
+  - Reject exit/abort commands with a clear "trading inactive" message
   - Never place trades, never manage positions
-  - Read-only access to journals, wiki, strategy docs, memory, goals
 
 Start automatically on VM boot:
   sudo cp blitztrader-agent.service /etc/systemd/system/
   sudo systemctl enable --now blitztrader-agent.service
 """
+import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -47,24 +52,45 @@ from config import (
 TRADING_PID_FILE = Path("/tmp/blitztrader_trading.pid")
 AGENT_PID_FILE = Path("/tmp/blitztrader_agent.pid")
 
+# State file written by main.py (and the pair-credit service if applicable)
+_LIVE_STATE_FILE = JOURNALS_DIR.parent / "live_state.json"
+
 POLL_INTERVAL_SECONDS = 5           # how often to check Telegram when active
 YIELD_CHECK_INTERVAL_SECONDS = 10   # how often to check if trader is still alive
 
 logger = logging.getLogger("BlitzTrader.Agent")
+
+# Exit-command patterns — same set as main.py._try_answer_simple_chat
+_EXIT_PATTERNS = [
+    r'\bexit\s+#?\d+\b',
+    r'\bclose\s+(?:position|spread|pair|serial)\s+#?\d+\b',
+    r'\bclose\s+#?\d+\b',
+    r'\bsquare\s+off\s+#?\d+\b',
+    r'\bexit\s+pair\b',
+    r'\bclose\s+all\b',
+    r'\bsquare\s+off\s+all\b',
+]
+
+# Status-query keywords
+_STATUS_KEYWORDS = frozenset(
+    {"pnl", "p&l", "profit", "loss", "position", "positions", "status", "balance", "capital"}
+)
 
 
 def _is_trading_service_active() -> bool:
     """
     Return True if the main trading service is alive and polling Telegram.
 
-    Checks the PID file written by main.py. Returns False if the file is absent
-    or the PID it references is no longer running.
+    Checks the PID file written by main.py (or any other live trading service).
+    Returns False if the file is absent or the PID it references is no longer
+    running (stale file).
     """
     if not TRADING_PID_FILE.exists():
         return False
     try:
         pid = int(TRADING_PID_FILE.read_text().strip())
-        # os.kill(pid, 0) raises OSError if pid doesn't exist
+        # os.kill(pid, 0) raises OSError if the process doesn't exist or we
+        # lack permission; both mean the file is stale.
         os.kill(pid, 0)
         return True
     except (ValueError, OSError):
@@ -139,12 +165,68 @@ def _build_minimal_registry(telegram_handler, agent_loop):
     return registry
 
 
+def _is_exit_command(text: str) -> bool:
+    """
+    Return True if text looks like a position-exit command.
+
+    These must never be routed to Gemini when the trading service is inactive —
+    Gemini has no broker connection and cannot execute or simulate exits.
+    """
+    t = text.lower()
+    return any(re.search(p, t) for p in _EXIT_PATTERNS)
+
+
+def _try_readonly_status(text: str) -> str | None:
+    """
+    If text is a status/pnl query, try to read the last-known state from disk
+    and return a formatted reply string.  Returns None if not a status query
+    or if the state file cannot be read.
+    """
+    t = text.lower()
+    if not any(kw in t for kw in _STATUS_KEYWORDS):
+        return None
+
+    try:
+        if not _LIVE_STATE_FILE.exists():
+            return (
+                "📊 No live state file found — trading service has not run yet today.\n"
+                "Start BlitzTrader to begin recording state."
+            )
+        state = json.loads(_LIVE_STATE_FILE.read_text())
+        pnl = float(state.get("daily_pnl", 0) or 0)
+        pnl_pct = float(state.get("daily_pnl_pct", 0) or 0)
+        open_spreads = state.get("open_spreads") or []
+        positions = state.get("positions") or []
+
+        lines = ["📊 Last known session state (trading service inactive):"]
+        lines.append(f"Session P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)")
+
+        if open_spreads:
+            lines.append(f"Open spreads: {len(open_spreads)}")
+            for s in open_spreads[:5]:
+                sid = s.get("spread_id", "?")
+                sym = s.get("symbol", "?")
+                stype = s.get("spread_type", "?")
+                lines.append(f"  • {sid} — {sym} {stype}")
+            if len(open_spreads) > 5:
+                lines.append(f"  … and {len(open_spreads) - 5} more")
+        elif positions:
+            lines.append(f"Open futures: {len(positions)}")
+        else:
+            lines.append("No open positions.")
+
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("Could not read state file for Q&A status reply")
+        return None
+
+
 class BlitzTraderAgent:
     """
     Always-on Telegram Q&A agent for BlitzTrader.
 
     Polls Telegram for messages and answers using Gemini.
-    Yields polling to main.py while trading is active.
+    Yields polling to main.py (or any live trading service) while trading is active.
     """
 
     def __init__(self):
@@ -199,7 +281,29 @@ class BlitzTraderAgent:
         )
 
     def _answer_message(self, message_text: str) -> None:
-        """Send one message to Gemini and deliver the response via Telegram."""
+        """
+        Handle one incoming Telegram message.
+
+        Routing priority:
+          1. Exit/close commands → reject with clear 'not active' message (never Gemini)
+          2. Status/pnl queries → serve from state file (deterministic, no Gemini)
+          3. Everything else → route to Gemini Q&A
+        """
+        # 1. Exit commands — never routable to Gemini; no broker connection
+        if _is_exit_command(message_text):
+            self._telegram.send_telegram(
+                "⛔ No live trading session is active — cannot execute exit commands.\n"
+                "Start the trading service to manage open positions."
+            )
+            return
+
+        # 2. Status/pnl — try to serve deterministically from last-known state
+        status_reply = _try_readonly_status(message_text)
+        if status_reply is not None:
+            self._telegram.send_telegram(status_reply)
+            return
+
+        # 3. Free-form question — route to Gemini
         try:
             from context_builder import build_chat_context
             from tools.state_manager import StateManager
@@ -265,7 +369,7 @@ class BlitzTraderAgent:
                             continue
                         command = cmd.get("command", "")
 
-                        # Ignore trading commands — those are for the live trader
+                        # Slash-only trading commands — only active during live trading
                         if command in {"/abort", "/pause", "/resume"}:
                             self._telegram.send_telegram(
                                 f"⚠️ Command {command!r} is only active during live trading hours. "
