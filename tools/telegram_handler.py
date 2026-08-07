@@ -79,7 +79,9 @@ class TelegramHandler:
     def __init__(self, bot_token: str, authorized_user_id: str, state_manager=None):
         self._bot_token = bot_token
         self._user_id = authorized_user_id
-        self._state_manager = state_manager
+        # Retained as an optional argument for existing callers.  The transport
+        # must never alter a message with state from a different trading mode.
+        del state_manager
         self._bot = None
         self._listener_thread: Optional[threading.Thread] = None
         self._running = False
@@ -143,17 +145,6 @@ class TelegramHandler:
 
         return message
 
-    # Keywords that indicate the message is reporting on trading performance
-    _PERFORMANCE_KEYWORDS = [
-        "trade", "trades", "p&l", "pnl", "profit", "loss", "win rate",
-        "win_rate", "eod", "summary", "executed", "closed", "session",
-    ]
-
-    def _is_performance_message(self, message: str) -> bool:
-        """Check if a message is reporting on trading performance."""
-        msg_lower = message.lower()
-        return sum(1 for kw in self._PERFORMANCE_KEYWORDS if kw in msg_lower) >= 2
-
     def send_telegram(self, message: str) -> dict:
         """
         Send a message to the authorized Telegram user.
@@ -167,16 +158,6 @@ class TelegramHandler:
         if not self._bot_token or not self._user_id:
             logger.warning("Telegram not configured, message not sent")
             return {"status": "skipped", "reason": "Telegram not configured"}
-
-        # Auto-append ground truth to performance-related messages
-        if self._state_manager and self._is_performance_message(message):
-            state = self._state_manager.get_state()
-            trade_count = state.get("trade_count", 0)
-            pnl = state.get("daily_pnl", 0)
-            message += (
-                f"\n\n---\n"
-                f"[Verified] Trades: {trade_count} | P&L: ₹{pnl:+,.2f}"
-            )
 
         formatted = self._format_message(message)
         ok = send_telegram_safe(self._bot_token, self._user_id, formatted)
