@@ -563,10 +563,11 @@ class BlitzTrader:
         ok = [result for result in results if result.get("ok")]
         failed = [result for result in results if not result.get("ok")]
         pnl = sum(float(result.get("realized_pnl") or 0) for result in ok)
-        lines = [
-            f"{prefix}: closed {len(ok)}/{len(results)} leg(s).",
-            f"Realized P&L Rs {pnl:+,.2f}",
-        ]
+        lines = [f"{prefix}: closed {len(ok)}/{len(results)} leg(s)."]
+        if ok:
+            lines.append(f"Realized P&L Rs {pnl:+,.2f}")
+        else:
+            lines.append("No realized P&L booked because no legs were closed.")
         if failed:
             lines.append("Failed legs still need attention:")
             for result in failed[:6]:

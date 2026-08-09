@@ -211,3 +211,15 @@ def test_momentum_exit_summary_reports_failures():
     assert "closed 1/2 leg(s)" in msg
     assert "Failed legs still need attention" in msg
     assert "INFY-EQ: quote unavailable" in msg
+
+
+def test_momentum_exit_summary_avoids_numeric_pnl_when_all_legs_fail():
+    msg = BlitzTrader._format_momentum_exit_results(
+        "NIFTY first-hour manual exit",
+        [
+            {"ok": False, "error": "quote unavailable", "position": {"tradingsymbol": "INFY-EQ"}},
+        ],
+    )
+    assert "closed 0/1 leg(s)" in msg
+    assert "No realized P&L booked because no legs were closed." in msg
+    assert "Realized P&L Rs +0.00" not in msg
