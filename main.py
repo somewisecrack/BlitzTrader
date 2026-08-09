@@ -59,7 +59,12 @@ from config import (
     NO_NEW_ENTRY_AFTER,
     LIMIT_ORDER_TIMEOUT_SECONDS,
     LIVE_ORDER_EXECUTION,
+    NIFTY_FIRST_HOUR_MOMENTUM_ENABLED,
+    NIFTY_FIRST_HOUR_MOMENTUM_ENTRY_TIME,
+    NIFTY_FIRST_HOUR_MOMENTUM_EOD_EXIT_TIME,
+    NIFTY_FIRST_HOUR_MOMENTUM_STATE_FILE,
     NSE_TOKENS,
+    PAIR_CREDIT_STATE_FILE,
     RCLONE_FOLDER,
     RCLONE_REMOTE,
     SHOONYA_API_KEY,
@@ -117,6 +122,7 @@ from tools.options_spread_builder import SpreadBuilder
 from tools.options_spread_execution import SpreadExecutionEngine
 from tools.options_spread_portfolio import SpreadPortfolio
 from tools.pair_credit_trader import make_pair_credit_trader_from_config
+from tools.nifty_first_hour_momentum import make_nifty_first_hour_momentum_trader_from_config
 from context_builder import (
     SYSTEM_PROMPT,
     build_chat_context,
@@ -226,7 +232,8 @@ class BlitzTrader:
             holiday_name = get_market_holiday_name(today)
             logger.info("NSE market closed today (%s): %s", today.isoformat(), holiday_name or "weekend")
             return
-        if not is_pair_credit_opening_scan_time(now):
+        opening_scan_allowed = is_pair_credit_opening_scan_time(now)
+        if not opening_scan_allowed and not self._replacement_monitor_needed(now):
             logger.info(
                 "Pair-credit opening scan skipped outside 08:00-09:15 IST window: %s",
                 now.strftime("%H:%M:%S"),
@@ -276,11 +283,24 @@ class BlitzTrader:
                 self._telegram.send_telegram("BlitzTrader: Shoonya login failed after all retries.")
                 raise RuntimeError("Shoonya login failed after all retries")
 
-            self._telegram.send_telegram("Shoonya login successful. Running pre-open pair scan.")
+            if opening_scan_allowed:
+                self._telegram.send_telegram("Shoonya login successful. Running pre-open pair scan.")
+            else:
+                self._telegram.send_telegram(
+                    "Shoonya login successful. Monitoring active replacement-mode positions; "
+                    "pair opening scan skipped outside pre-open window."
+                )
             pair_trader = make_pair_credit_trader_from_config(
                 telegram=self._telegram,
                 shoonya_client=self._shoonya,
             )
+            momentum_trader = None
+            if NIFTY_FIRST_HOUR_MOMENTUM_ENABLED:
+                momentum_trader = make_nifty_first_hour_momentum_trader_from_config(
+                    telegram=self._telegram,
+                    shoonya_client=self._shoonya,
+                )
+                logger.info("NIFTY first-hour momentum A enabled")
 
             expiry_results = pair_trader.close_expired_positions()
             for result in expiry_results:
@@ -297,17 +317,20 @@ class BlitzTrader:
                     )
 
             self._telegram.send_telegram(pair_trader.status_message())
-            allocation = pair_trader.run_opening_allocation()
-            logger.info(
-                "Pair-credit opening allocation: opened=%d insufficient=%d rejected=%d remaining=%.2f",
-                len(allocation.get("opened", [])),
-                len(allocation.get("insufficient", [])),
-                len(allocation.get("rejected", [])),
-                float(allocation.get("remaining", 0) or 0),
-            )
+            if opening_scan_allowed:
+                allocation = pair_trader.run_opening_allocation()
+                logger.info(
+                    "Pair-credit opening allocation: opened=%d insufficient=%d rejected=%d remaining=%.2f",
+                    len(allocation.get("opened", [])),
+                    len(allocation.get("insufficient", [])),
+                    len(allocation.get("rejected", [])),
+                    float(allocation.get("remaining", 0) or 0),
+                )
+            else:
+                logger.info("Pair-credit opening allocation skipped outside pre-open window")
 
             self._running = True
-            self._pair_credit_monitor_loop(pair_trader)
+            self._pair_credit_monitor_loop(pair_trader, momentum_trader)
         except KeyboardInterrupt:
             logger.info("Pair-credit mode interrupted")
         except Exception:
@@ -319,7 +342,46 @@ class BlitzTrader:
                 self._telegram.stop()
             self._remove_trading_pid()
 
-    def _pair_credit_monitor_loop(self, pair_trader):
+    @staticmethod
+    def _hhmm_to_time(value: str):
+        from datetime import time as _time
+
+        hour, minute = [int(part) for part in value.split(":", 1)]
+        return _time(hour=hour, minute=minute)
+
+    @staticmethod
+    def _state_file_has_open_positions(path: Path) -> bool:
+        try:
+            if not path.exists():
+                return False
+            import json as _json
+
+            data = _json.loads(path.read_text())
+            return any(
+                pos.get("status") == "OPEN"
+                for pos in data.get("open_positions", [])
+                if isinstance(pos, dict)
+            )
+        except Exception:
+            logger.exception("Could not inspect replacement state file %s", path)
+            return True
+
+    def _replacement_monitor_needed(self, now: datetime) -> bool:
+        market_close = now.replace(hour=15, minute=25, second=0, microsecond=0)
+        if now >= market_close:
+            return False
+        if self._state_file_has_open_positions(PAIR_CREDIT_STATE_FILE):
+            return True
+        if self._state_file_has_open_positions(NIFTY_FIRST_HOUR_MOMENTUM_STATE_FILE):
+            return True
+        if NIFTY_FIRST_HOUR_MOMENTUM_ENABLED:
+            first_hour_start = self._hhmm_to_time("09:15")
+            eod_time = self._hhmm_to_time(NIFTY_FIRST_HOUR_MOMENTUM_EOD_EXIT_TIME)
+            if first_hour_start <= now.time() < eod_time:
+                return True
+        return False
+
+    def _pair_credit_monitor_loop(self, pair_trader, momentum_trader=None):
         """Monitor Telegram commands and automatic expiry exits until market close."""
         logger.info("=== PAIR CREDIT MONITOR LOOP STARTED ===")
         while self._running:
@@ -341,6 +403,35 @@ class BlitzTrader:
                     self._running = False
                     return
 
+                if momentum_trader:
+                    momentum_serial = self._extract_momentum_exit_serial(text)
+                    if self._is_momentum_exit_all_text(text, command):
+                        results = momentum_trader.close_all("manual Telegram exit")
+                        self._telegram.send_telegram(
+                            self._format_momentum_exit_results(
+                                "NIFTY first-hour momentum manual exit",
+                                results,
+                            )
+                        )
+                        continue
+                    if momentum_serial is not None:
+                        result = momentum_trader.close_by_serial(momentum_serial)
+                        if result.get("ok"):
+                            pos = result["position"]
+                            self._telegram.send_telegram(
+                                f"Closed momentum #{momentum_serial}: "
+                                f"{pos.get('direction')} {pos.get('tradingsymbol')} | "
+                                f"Realized P&L Rs {float(result.get('realized_pnl') or 0):+,.2f}"
+                            )
+                        else:
+                            self._telegram.send_telegram(
+                                f"Could not close momentum #{momentum_serial}: {result.get('error')}"
+                            )
+                        continue
+                    if self._is_momentum_status_text(text, command):
+                        self._telegram.send_telegram(momentum_trader.status_message())
+                        continue
+
                 serial = self._extract_pair_credit_exit_serial(text)
                 if serial is not None:
                     result = pair_trader.close_by_serial(serial)
@@ -359,11 +450,44 @@ class BlitzTrader:
                     word in text for word in ("status", "position", "positions", "pnl", "p&l", "profit", "loss")
                 ):
                     self._telegram.send_telegram(pair_trader.status_message())
+                    if momentum_trader:
+                        self._telegram.send_telegram(momentum_trader.status_message())
                     continue
 
                 self._telegram.send_telegram(
-                    "Supported commands: status, positions, pnl, exit #N, exit pair #N, /abort."
+                    "Supported commands: status, positions, pnl, exit #N, exit pair #N, "
+                    "momentum status, momentum pnl, exit momentum, exit momentum #N, /abort."
                 )
+
+            if momentum_trader:
+                entry = momentum_trader.run_entry_if_due(now)
+                if entry.get("status") == "completed":
+                    logger.info(
+                        "NIFTY first-hour momentum entry completed: opened=%d errors=%d",
+                        len(entry.get("opened", [])),
+                        len(entry.get("errors", [])),
+                    )
+                exits = momentum_trader.check_trailing_stops(now)
+                for result in exits:
+                    if result.get("ok"):
+                        pos = result["position"]
+                        self._telegram.send_telegram(
+                            f"NIFTY first-hour trailing exit: "
+                            f"{pos.get('direction')} {pos.get('tradingsymbol')} | "
+                            f"P&L Rs {float(result.get('realized_pnl') or 0):+,.2f}"
+                        )
+                    else:
+                        self._telegram.send_telegram(
+                            f"NIFTY first-hour trailing exit failed: {result.get('error')}"
+                        )
+                eod_results = momentum_trader.close_for_eod_if_due(now)
+                if eod_results:
+                    self._telegram.send_telegram(
+                        self._format_momentum_exit_results(
+                            "NIFTY first-hour EOD exit",
+                            eod_results,
+                        )
+                    )
 
             expiry_results = pair_trader.close_expired_positions()
             for result in expiry_results:
@@ -395,6 +519,61 @@ class BlitzTrader:
             if match:
                 return int(match.group(1))
         return None
+
+    @staticmethod
+    def _is_momentum_status_text(text: str, command: str = "") -> bool:
+        normalized = (text or "").lower().strip()
+        if command in {"/momentum", "/momentum_pnl", "/momentum_positions"}:
+            return True
+        return "momentum" in normalized and any(
+            word in normalized
+            for word in ("status", "position", "positions", "pnl", "p&l", "profit", "loss")
+        )
+
+    @staticmethod
+    def _is_momentum_exit_all_text(text: str, command: str = "") -> bool:
+        normalized = (text or "").lower().strip()
+        if command in {"/exit_momentum", "/exit_momentum_all"}:
+            return True
+        return (
+            "momentum" in normalized
+            and any(word in normalized for word in ("exit", "close", "square off"))
+            and not BlitzTrader._extract_momentum_exit_serial(normalized)
+        )
+
+    @staticmethod
+    def _extract_momentum_exit_serial(text: str) -> int | None:
+        """Parse deterministic NIFTY first-hour momentum leg exit commands."""
+        import re as _re
+
+        normalized = (text or "").lower().strip()
+        for pattern in (
+            r"\b(?:exit|close|square\s+off)\s+momentum\s+(?:leg\s+|position\s+|serial\s+)?#?(\d+)\b",
+            r"\bmomentum\s+(?:exit|close|square\s+off)\s+(?:leg\s+|position\s+|serial\s+)?#?(\d+)\b",
+        ):
+            match = _re.search(pattern, normalized)
+            if match:
+                return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _format_momentum_exit_results(prefix: str, results: list[dict]) -> str:
+        if not results:
+            return f"{prefix}: no open momentum legs."
+        ok = [result for result in results if result.get("ok")]
+        failed = [result for result in results if not result.get("ok")]
+        pnl = sum(float(result.get("realized_pnl") or 0) for result in ok)
+        lines = [
+            f"{prefix}: closed {len(ok)}/{len(results)} leg(s).",
+            f"Realized P&L Rs {pnl:+,.2f}",
+        ]
+        if failed:
+            lines.append("Failed legs still need attention:")
+            for result in failed[:6]:
+                pos = result.get("position") or {}
+                label = pos.get("tradingsymbol") or pos.get("symbol") or "unknown"
+                lines.append(f"- {label}: {result.get('error', 'unknown error')}")
+        return "\n".join(lines)
 
     # ──────────────────────────────────────────────────────────
     #   INITIALIZATION

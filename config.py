@@ -75,6 +75,7 @@ STATE_FILE = RUNTIME_STORAGE_DIR / "live_state.json"
 CANDIDATE_AUDIT_DIR = RUNTIME_STORAGE_DIR / "candidate_signals"
 PAIR_CREDIT_STATE_FILE = RUNTIME_STORAGE_DIR / "pair_credit_positions.json"
 PAIR_CREDIT_LEDGER_FILE = RUNTIME_STORAGE_DIR / "pair_credit_ledger.jsonl"
+NIFTY_FIRST_HOUR_MOMENTUM_STATE_FILE = RUNTIME_STORAGE_DIR / "nifty_first_hour_momentum_positions.json"
 
 # Ensure directories exist
 JOURNALS_DIR.mkdir(parents=True, exist_ok=True)
@@ -208,6 +209,40 @@ PAIR_CREDIT_IV_HV_MIN_RATIO = float(_optional_env("PAIR_CREDIT_IV_HV_MIN_RATIO",
 PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER = _optional_int_env("PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER", 2)
 PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS", 5)
 PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS", 30)
+
+# ──────────────────────────────────────────────────────────────
+#   NIFTY FIRST-HOUR MOMENTUM PORTFOLIO A
+# ──────────────────────────────────────────────────────────────
+
+NIFTY_FIRST_HOUR_MOMENTUM_ENABLED = (
+    _optional_env("NIFTY_FIRST_HOUR_MOMENTUM_ENABLED", "true").lower()
+    in {"1", "true", "yes", "on"}
+)
+NIFTY_FIRST_HOUR_MOMENTUM_CAPITAL = float(
+    _optional_env("NIFTY_FIRST_HOUR_MOMENTUM_CAPITAL", "100000")
+)
+NIFTY_FIRST_HOUR_MOMENTUM_LEVERAGE = float(
+    _optional_env("NIFTY_FIRST_HOUR_MOMENTUM_LEVERAGE", "3")
+)
+NIFTY_FIRST_HOUR_MOMENTUM_SIZE = _optional_int_env(
+    "NIFTY_FIRST_HOUR_MOMENTUM_SIZE", 4
+)
+NIFTY_FIRST_HOUR_MOMENTUM_TRAILING_STOP_PCT = float(
+    _optional_env("NIFTY_FIRST_HOUR_MOMENTUM_TRAILING_STOP_PCT", "0.01")
+)
+NIFTY_FIRST_HOUR_MOMENTUM_ENTRY_TIME = _optional_env(
+    "NIFTY_FIRST_HOUR_MOMENTUM_ENTRY_TIME", "10:16"
+)
+NIFTY_FIRST_HOUR_MOMENTUM_EOD_EXIT_TIME = _optional_env(
+    "NIFTY_FIRST_HOUR_MOMENTUM_EOD_EXIT_TIME", "15:15"
+)
+NIFTY_FIRST_HOUR_MOMENTUM_PRODUCT_TYPE = _optional_env(
+    "NIFTY_FIRST_HOUR_MOMENTUM_PRODUCT_TYPE", "I"
+)
+NIFTY_FIRST_HOUR_MOMENTUM_LIVE_ORDERS = (
+    _optional_env("NIFTY_FIRST_HOUR_MOMENTUM_LIVE_ORDERS", "false").lower()
+    in {"1", "true", "yes", "on"}
+)
 
 # ──────────────────────────────────────────────────────────────
 #   OPTION SPREAD TRADING PARAMETERS
