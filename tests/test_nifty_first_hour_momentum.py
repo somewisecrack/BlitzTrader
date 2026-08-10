@@ -53,6 +53,38 @@ class NoRankingTrader(NiftyFirstHourMomentumTrader):
         return []
 
 
+class AllocationCaptureTrader(NiftyFirstHourMomentumTrader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.requested_notionals = []
+
+    def _rank_first_hour(self, now):
+        return [
+            {
+                "symbol": f"S{index}",
+                "tradingsymbol": f"S{index}-EQ",
+                "token": str(index),
+                "first_hour_return": float(index),
+            }
+            for index in range(8)
+        ]
+
+    def _open_leg(self, item, direction, notional):
+        self.requested_notionals.append((item["symbol"], direction, notional))
+        return {
+            "ok": True,
+            "position": {
+                "position_id": item["symbol"],
+                "status": "OPEN",
+                "direction": direction,
+                "tradingsymbol": item["tradingsymbol"],
+                "quantity": 1,
+                "entry_price": 1.0,
+                "trailing_stop": 1.0,
+            },
+        }
+
+
 def test_momentum_exit_parser_requires_momentum_keyword():
     assert BlitzTrader._extract_momentum_exit_serial("exit momentum #2") == 2
     assert BlitzTrader._extract_momentum_exit_serial("momentum exit leg 3") == 3
@@ -162,6 +194,31 @@ def test_momentum_entry_throttles_insufficient_data_retries(tmp_path):
     assert trader.run_entry_if_due(first)["reason"] == "insufficient ranked symbols"
     assert trader.run_entry_if_due(second) == {"status": "skipped", "reason": "waiting for retry"}
     assert trader.rank_calls == 1
+
+
+def test_momentum_uses_125k_target_gross_per_ticker_at_5x(tmp_path):
+    cfg = NiftyFirstHourMomentumConfig(
+        state_file=tmp_path / "momentum.json",
+        capital=200000,
+        leverage=5,
+        basket_size=4,
+    )
+    trader = AllocationCaptureTrader(cfg, shoonya_client=DummyClient())
+    now = IST.localize(datetime(2026, 8, 10, 10, 16))
+
+    result = trader.run_entry_if_due(now)
+
+    assert len(result["opened"]) == 8
+    assert trader.requested_notionals == [
+        ("S7", "LONG", 125000.0),
+        ("S6", "LONG", 125000.0),
+        ("S5", "LONG", 125000.0),
+        ("S4", "LONG", 125000.0),
+        ("S0", "SHORT", 125000.0),
+        ("S1", "SHORT", 125000.0),
+        ("S2", "SHORT", 125000.0),
+        ("S3", "SHORT", 125000.0),
+    ]
 
 
 def test_first_candle_sorts_shoonya_times():
