@@ -226,6 +226,61 @@ class BlitzTraderAgent:
                 "⚠️ Error processing your request. Please try again."
             )
 
+    @staticmethod
+    def _is_portfolio_query(text: str, command: str = "") -> bool:
+        """Identify deterministic portfolio requests that must not go to Gemini."""
+        normalized = (text or "").lower()
+        return command == "/status" or any(
+            word in normalized
+            for word in ("status", "position", "positions", "pnl", "p&l", "profit", "loss")
+        )
+
+    def _answer_portfolio_query(self) -> None:
+        """Read current virtual portfolio marks directly, without Gemini inference."""
+        from broker.shoonya_client import ShoonyaClient
+        from config import (
+            NIFTY_FIRST_HOUR_MOMENTUM_ENABLED,
+            SHOONYA_API_KEY,
+            SHOONYA_AUTH_CODE,
+            SHOONYA_IMEI,
+            SHOONYA_PASSWORD,
+            SHOONYA_SECRET_CODE,
+            SHOONYA_TOTP_SECRET,
+            SHOONYA_USER_ID,
+            SHOONYA_VENDOR_CODE,
+        )
+        from tools.nifty_first_hour_momentum import make_nifty_first_hour_momentum_trader_from_config
+        from tools.pair_credit_trader import make_pair_credit_trader_from_config
+
+        client = ShoonyaClient()
+        ok, message = client.login(
+            SHOONYA_USER_ID,
+            SHOONYA_PASSWORD,
+            SHOONYA_TOTP_SECRET,
+            SHOONYA_API_KEY,
+            SHOONYA_VENDOR_CODE,
+            SHOONYA_IMEI,
+            SHOONYA_SECRET_CODE,
+            SHOONYA_AUTH_CODE,
+        )
+        if not ok:
+            self._telegram.send_telegram(
+                f"Portfolio marks unavailable: Shoonya login failed ({message})."
+            )
+            return
+
+        pair_trader = make_pair_credit_trader_from_config(shoonya_client=client)
+        sections = ["PAIR-CREDIT PORTFOLIO\n" + pair_trader.status_message()]
+        if NIFTY_FIRST_HOUR_MOMENTUM_ENABLED:
+            momentum_trader = make_nifty_first_hour_momentum_trader_from_config(
+                shoonya_client=client,
+            )
+            sections.append(
+                "NIFTY FIRST-HOUR MOMENTUM PORTFOLIO\n"
+                + momentum_trader.status_message()
+            )
+        self._telegram.send_telegram("\n\n====================\n\n".join(sections))
+
     def run(self):
         self._setup_signal_handlers()
         setup_logging()
@@ -271,6 +326,11 @@ class BlitzTraderAgent:
                                 f"⚠️ Command {command!r} is only active during live trading hours. "
                                 "The trading service is not currently running."
                             )
+                            continue
+
+                        if self._is_portfolio_query(text, command):
+                            logger.info("Deterministic portfolio query: %r", text[:80])
+                            self._answer_portfolio_query()
                             continue
 
                         logger.info("Q&A message: %r", text[:80])

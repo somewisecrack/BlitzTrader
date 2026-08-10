@@ -449,9 +449,12 @@ class BlitzTrader:
                 if command == "/status" or any(
                     word in text for word in ("status", "position", "positions", "pnl", "p&l", "profit", "loss")
                 ):
-                    self._telegram.send_telegram(pair_trader.status_message())
-                    if momentum_trader:
-                        self._telegram.send_telegram(momentum_trader.status_message())
+                    self._telegram.send_telegram(
+                        self._replacement_portfolio_status_message(
+                            pair_trader,
+                            momentum_trader,
+                        )
+                    )
                     continue
 
                 self._telegram.send_telegram(
@@ -503,6 +506,14 @@ class BlitzTrader:
                         f"Expiry exit pending: {pos.get('pair', '?')} | {result.get('error')}"
                     )
             time.sleep(TELEGRAM_POLL_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _replacement_portfolio_status_message(pair_trader, momentum_trader=None) -> str:
+        """Return one explicitly labelled report for the replacement portfolios."""
+        sections = ["PAIR-CREDIT PORTFOLIO\n" + pair_trader.status_message()]
+        if momentum_trader:
+            sections.append("NIFTY FIRST-HOUR MOMENTUM PORTFOLIO\n" + momentum_trader.status_message())
+        return "\n\n====================\n\n".join(sections)
 
     @staticmethod
     def _extract_pair_credit_exit_serial(text: str) -> int | None:
