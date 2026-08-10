@@ -11,6 +11,7 @@ live_state.json
 telegram_position_index.json
 pair_credit_positions.json
 pair_credit_ledger.jsonl
+nifty_first_hour_momentum_positions.json
 
 # Generated wiki outputs
 wiki/backtest_results/
