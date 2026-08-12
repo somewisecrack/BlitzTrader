@@ -98,6 +98,61 @@ def test_scan_uses_nifty50_one_year_daily(tmp_path):
     assert adapter.scan_calls == [("nifty_50", "1y", "1d", 50)]
 
 
+def test_vrp_feature_off_preserves_credit_builder_and_never_fetches_metrics(tmp_path):
+    adapter = FakeAdapter({"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 10_000)})
+    trader = _trader(tmp_path, adapter, vrp_structure_selection_enabled=False)
+    trader._vrp_provider.metrics = lambda ticker: (_ for _ in ()).throw(AssertionError("must not fetch metrics"))
+    result = trader.run_opening_allocation()
+    assert len(result["opened"]) == 2
+    assert all(position["structure_type"] == "CREDIT_SPREAD" for position in result["opened"])
+
+
+def test_vrp_cheap_signal_uses_futures_plus_options_builder(tmp_path):
+    class FuturesOptionsAdapter(FakeAdapter):
+        def build_iv_expected_move_futures_options_structure(self, candidate, protection_iv_move):
+            structure = _structure(candidate["pair"], 10_000)
+            structure["legs"] = [
+                {"asset": "x", "symbol": "AAA", "instrument": "FUT", "side": "BUY", "lots": 1, "lot_size": 100, "expiry": "31-Dec-2099", "spot": 110, "price": 111, "is_index": False},
+                {"asset": "x", "symbol": "AAA", "instrument": "PE", "side": "BUY", "lots": 1, "lot_size": 100, "strike": 100, "expiry": "31-Dec-2099", "spot": 110, "price": 4, "is_index": False},
+            ]
+            structure["structure_type"] = "FUTURES_PLUS_OPTIONS"
+            return structure
+
+    adapter = FuturesOptionsAdapter({"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 10_000)})
+    trader = _trader(tmp_path, adapter, vrp_structure_selection_enabled=True, vrp_buy_threshold=-0.03)
+    from tools.pair_vrp_selector import PairVolatilityMetrics
+    trader._vrp_provider.metrics = lambda ticker: PairVolatilityMetrics(ticker, 0.15, 50, 0.20, -0.05)
+    result = trader.run_opening_allocation()
+    assert result["opened"]
+    assert all(position["structure_type"] == "FUTURES_PLUS_OPTIONS" for position in result["opened"])
+
+
+def test_futures_plus_options_mark_uses_future_and_option_quotes(tmp_path):
+    class MarkingAdapter(FakeAdapter):
+        def latest_future_price(self, leg):
+            return 115.0
+
+        def latest_option_price(self, leg):
+            return 6.0
+
+    adapter = MarkingAdapter({"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 10_000)})
+    trader = _trader(tmp_path, adapter)
+    position = trader._position_from(
+        {"pair": "AAA/BBB", "x": "AAA.NS", "y": "BBB.NS"},
+        {
+            "pair": "AAA/BBB", "structure_type": "FUTURES_PLUS_OPTIONS", "margin": {"estimated_margin": 10_000},
+            "legs": [
+                {"asset": "x", "symbol": "AAA", "instrument": "FUT", "side": "BUY", "lots": 1, "lot_size": 100, "expiry": "31-Dec-2099", "spot": 110, "price": 110, "is_index": False},
+                {"asset": "x", "symbol": "AAA", "instrument": "PE", "side": "BUY", "lots": 1, "lot_size": 100, "strike": 100, "expiry": "31-Dec-2099", "spot": 110, "price": 4, "is_index": False},
+            ],
+        },
+        10_000,
+    )
+    mark = trader.mark_position(position)
+    assert mark["data_ok"] is True
+    assert mark["unrealized_pnl"] == 700.0  # +500 future and +200 protective option.
+
+
 def test_allocates_only_affordable_margin_and_notifies(tmp_path):
     telegram = FakeTelegram()
     adapter = FakeAdapter({"AAA/BBB": _structure("AAA/BBB", 80_000), "CCC/DDD": _structure("CCC/DDD", 40_000)})

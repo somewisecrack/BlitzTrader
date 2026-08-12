@@ -210,6 +210,29 @@ PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER = _optional_int_env("PAIR_CREDIT_HV_LOOKBACK_
 PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS", 5)
 PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS", 30)
 
+# Experimental VRP/IVP structure selector.  It is deliberately disabled until
+# its thresholds have been backtested.  When disabled, pair-credit construction
+# follows the existing path exactly.
+PAIR_VRP_STRUCTURE_SELECTION_ENABLED = (
+    _optional_env("PAIR_VRP_STRUCTURE_SELECTION_ENABLED", "false").lower()
+    in {"1", "true", "yes", "on"}
+)
+PAIR_VRP_DEFAULT_STRUCTURE = _optional_env("PAIR_VRP_DEFAULT_STRUCTURE", "CREDIT_SPREAD")
+PAIR_VRP_SELL_THRESHOLD = float(_optional_env("PAIR_VRP_SELL_THRESHOLD", "0.03"))
+PAIR_VRP_BUY_THRESHOLD = float(_optional_env("PAIR_VRP_BUY_THRESHOLD", "-0.03"))
+PAIR_VRP_IVP_GUARD_ENABLED = (
+    _optional_env("PAIR_VRP_IVP_GUARD_ENABLED", "false").lower()
+    in {"1", "true", "yes", "on"}
+)
+PAIR_VRP_IVP_SELL_FLOOR = float(_optional_env("PAIR_VRP_IVP_SELL_FLOOR", "50"))
+PAIR_VRP_IVP_LOOKBACK_DAYS = _optional_int_env("PAIR_VRP_IVP_LOOKBACK_DAYS", 250)
+PAIR_VRP_MIN_VALID_OBSERVATIONS = _optional_int_env("PAIR_VRP_MIN_VALID_OBSERVATIONS", 60)
+PAIR_VRP_FETCH_CALENDAR_DAYS = _optional_int_env("PAIR_VRP_FETCH_CALENDAR_DAYS", 400)
+PAIR_VRP_MIN_DTE_CALENDAR_DAYS = _optional_int_env("PAIR_VRP_MIN_DTE_CALENDAR_DAYS", 7)
+PAIR_VRP_REALIZED_VOL_WINDOW = _optional_int_env("PAIR_VRP_REALIZED_VOL_WINDOW", 21)
+PAIR_VRP_RISK_FREE_RATE = float(_optional_env("PAIR_VRP_RISK_FREE_RATE", "0.065"))
+PAIR_VRP_CACHE_DIR = RUNTIME_STORAGE_DIR / "pair_vrp_cache"
+
 # ──────────────────────────────────────────────────────────────
 #   NIFTY FIRST-HOUR MOMENTUM PORTFOLIO A
 # ──────────────────────────────────────────────────────────────

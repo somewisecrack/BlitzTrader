@@ -21,6 +21,7 @@ from typing import Any
 import pytz
 
 from tools.blitz_schedule import is_pair_credit_expiry_close_time
+from tools.pair_vrp_selector import NsePairVolatilityProvider, StructureDecision, select_pair_structure
 
 logger = logging.getLogger("BlitzTrader.PairCredit")
 IST = pytz.timezone("Asia/Kolkata")
@@ -167,6 +168,7 @@ class OmniSpreadReadOnlyAdapter:
         self._loaded = False
         self._shoonya_client = shoonya_client
         self._option_token_cache: dict[str, dict[str, Any]] = {}
+        self._future_token_cache: dict[str, dict[str, Any]] = {}
         self._iv_cache: dict[tuple[str, str, float, str], float | None] = {}
         self._hv_cache: dict[tuple[str, date, int, int, int], dict[str, Any] | None] = {}
 
@@ -540,6 +542,88 @@ class OmniSpreadReadOnlyAdapter:
             "note": "Current structure only; prices and available strikes can change before execution.",
         }
 
+    def build_iv_expected_move_futures_options_structure(
+        self,
+        candidate: dict[str, Any],
+        protection_iv_move: float,
+    ) -> dict[str, Any]:
+        """Build the established long-future plus protective-option shape.
+
+        This is separate from the credit builder: it reuses its ATM-IV expected
+        move convention but never changes its sold/hedge strike selection.
+        """
+        self._ensure_loaded()
+        from pandas import Timestamp
+
+        as_of = datetime.now()
+        start = as_of - timedelta(days=14)
+        required_expiry = Timestamp(as_of.date())
+        assets = {
+            "x": self._fetch_credit_snapshot(candidate["x"], start, as_of, required_expiry, self._fetch_future, self._fetch_option),
+            "y": self._fetch_credit_snapshot(candidate["y"], start, as_of, required_expiry, self._fetch_future, self._fetch_option),
+        }
+        future_prices = {
+            key: self._current_future_snapshot_price(asset, start, as_of)
+            for key, asset in assets.items()
+        }
+        x_lots, y_lots = self._whole_lot_hedge(float(candidate["qty"]), assets["x"]["future_lot"], assets["y"]["future_lot"])
+        counts = {"x": x_lots, "y": y_lots}
+        short_spread = candidate["direction"] in {"SHORT_SPREAD", "long_x_short_y"}
+        signs = {"x": 1 if short_spread else -1, "y": -1 if short_spread else 1}
+        legs: list[dict[str, Any]] = []
+        selections: list[dict[str, Any]] = []
+        for key, asset in assets.items():
+            count = counts[key]
+            option_type = "PE" if signs[key] > 0 else "CE"
+            metrics = self._atm_iv_expected_move(asset)
+            target = float(asset["spot"]) + (-1.0 if option_type == "PE" else 1.0) * protection_iv_move * float(metrics["expected_move"])
+            typed = asset["option_snapshot"][(asset["option_snapshot"]["OPTION_TYPE"] == option_type) & asset["option_snapshot"]["STRIKE_PRICE"].notna()]
+            traded = [float(s) for s in typed["STRIKE_PRICE"].unique() if self._snapshot_traded(typed, float(s), option_type)]
+            direction = -1.0 if option_type == "PE" else 1.0
+            traded = [s for s in traded if direction * (s - float(asset["spot"])) > 0]
+            if not traded:
+                raise ValueError(f"No traded OTM protective {option_type} for {asset['symbol']}.")
+            strike = min(traded, key=lambda value: abs(value - target))
+            premium = self._snapshot_entry_price(typed, strike, option_type)
+            if premium is None:
+                raise ValueError(f"No valid protective option price for {asset['symbol']} {strike:g}{option_type}.")
+            common = {
+                "asset": key, "symbol": asset["symbol"], "lots": int(count), "lot_size": int(asset["future_lot"]),
+                "expiry": asset["expiry"].strftime("%d-%b-%Y"), "spot": round(float(asset["spot"]), 2), "is_index": asset["is_index"],
+            }
+            legs.append({**common, "instrument": "FUT", "side": "BUY" if signs[key] > 0 else "SELL", "price": future_prices[key]})
+            legs.append({**common, "instrument": option_type, "side": "BUY", "strike": strike, "price": premium})
+            selections.append({**metrics, "symbol": asset["symbol"], "option_type": option_type, "protection_target": target, "protection_strike": strike, "protection_price": premium})
+        actual_ratio = x_lots * assets["x"]["future_lot"] / (y_lots * assets["y"]["future_lot"])
+        return {
+            "pair": f"{self._nse_symbol(candidate['x'])}/{self._nse_symbol(candidate['y'])}", "qty": candidate["qty"], "direction": candidate["direction"],
+            "as_of": min(asset["as_of"] for asset in assets.values()).strftime("%d-%b-%Y"),
+            "x_lots": x_lots, "y_lots": y_lots, "actual_ratio": round(actual_ratio, 4), "legs": legs,
+            "margin": self._estimate_margin(legs), "leg_selection": "iv_expected_move", "structure_type": "FUTURES_PLUS_OPTIONS",
+            "protection_iv_move": protection_iv_move, "iv_leg_selection": selections,
+            "note": "Current structure only; prices and available strikes can change before execution.",
+        }
+
+    def _current_future_snapshot_price(self, asset: dict[str, Any], start: datetime, end: datetime) -> float:
+        """Read the actual same-contract future close; never substitute spot."""
+        raw = self._fetch_future(
+            symbol=asset["symbol"], instrument="FUTIDX" if asset["is_index"] else "FUTSTK",
+            from_date=start.strftime("%d-%m-%Y"), to_date=end.strftime("%d-%m-%Y"),
+        )
+        frame = self._clean(raw)
+        rows = frame[frame["expiry"] == asset["expiry"]]
+        if rows.empty:
+            raise ValueError(f"No current future snapshot was available for {asset['symbol']}.")
+        latest_day = rows["date"].max()
+        latest = rows[rows["date"] == latest_day]
+        prices = latest["CLOSING_PRICE"].dropna()
+        if prices.empty:
+            raise ValueError(f"No current future closing price was available for {asset['symbol']}.")
+        price = float(prices.iloc[0])
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError(f"Invalid current future closing price for {asset['symbol']}.")
+        return price
+
     @staticmethod
     def _strike_text(strike: Any) -> str:
         value = float(strike)
@@ -664,6 +748,50 @@ class OmniSpreadReadOnlyAdapter:
             )
             return None
         return price if math.isfinite(price) and price >= 0 else None
+
+    def _resolve_live_future(self, leg: dict[str, Any]) -> dict[str, Any] | None:
+        expiry = _parse_expiry(str(leg.get("expiry", "")))
+        symbol = str(leg.get("symbol", "")).upper()
+        if not expiry or not symbol:
+            return None
+        key = f"{symbol}:{expiry.isoformat()}"
+        if key in self._future_token_cache:
+            return self._future_token_cache[key]
+        client = self._ensure_shoonya_client()
+        if client is None:
+            return None
+        expected_expiry = expiry.strftime("%d-%b-%Y").upper()
+        for row in client.search_scrip("NFO", symbol) or []:
+            if str(row.get("instname", "")).upper() not in {"FUTSTK", "FUTIDX"}:
+                continue
+            if str(row.get("symname", "")).upper() != symbol or str(row.get("exd", "")).upper() != expected_expiry:
+                continue
+            token = str(row.get("token", "")).strip()
+            if token:
+                result = {"exchange": "NFO", "token": token, "tsym": row.get("tsym", "")}
+                self._future_token_cache[key] = result
+                return result
+        logger.warning("Pair-credit MTM: exact future not resolved for %s %s", symbol, expected_expiry)
+        return None
+
+    def latest_future_price(self, leg: dict[str, Any]) -> float | None:
+        resolved = self._resolve_live_future(leg)
+        client = self._ensure_shoonya_client()
+        if not resolved or client is None:
+            return None
+        quote = client.get_quotes(resolved["exchange"], resolved["token"]) or {}
+        if (
+            str(quote.get("tsym", "")).upper() != str(resolved["tsym"]).upper()
+            or str(quote.get("token", "")) != str(resolved["token"])
+            or str(quote.get("exch", "")).upper() != "NFO"
+        ):
+            logger.warning("Pair-credit MTM: future quote identity mismatch for %s", resolved["tsym"])
+            return None
+        try:
+            price = float(quote["lp"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return price if math.isfinite(price) and price > 0 else None
 
     @staticmethod
     def _is_valid_option_quote(
@@ -929,6 +1057,19 @@ class PairCreditConfig:
     hv_lookback_multiplier: int = 2
     hv_min_lookback_days: int = 5
     hv_max_lookback_days: int = 30
+    vrp_structure_selection_enabled: bool = False
+    vrp_default_structure: str = "CREDIT_SPREAD"
+    vrp_sell_threshold: float = 0.03
+    vrp_buy_threshold: float = -0.03
+    vrp_ivp_guard_enabled: bool = False
+    vrp_ivp_sell_floor: float = 50.0
+    vrp_ivp_lookback_days: int = 250
+    vrp_min_valid_observations: int = 60
+    vrp_fetch_calendar_days: int = 400
+    vrp_min_dte_days: int = 7
+    vrp_realized_window: int = 21
+    vrp_risk_free_rate: float = 0.065
+    vrp_cache_dir: Path | None = None
 
 
 class PairCreditTrader:
@@ -939,6 +1080,15 @@ class PairCreditTrader:
         self.telegram = telegram
         self.ledger = PairCreditLedger(config.state_file, config.ledger_file, config.capital)
         self.adapter = adapter or OmniSpreadReadOnlyAdapter(config.backend_path, shoonya_client=shoonya_client)
+        self._vrp_provider = NsePairVolatilityProvider(
+            config.vrp_cache_dir or config.state_file.parent / "pair_vrp_cache",
+            ivp_lookback_days=config.vrp_ivp_lookback_days,
+            min_valid_observations=config.vrp_min_valid_observations,
+            fetch_calendar_days=config.vrp_fetch_calendar_days,
+            min_dte_days=config.vrp_min_dte_days,
+            realized_window=config.vrp_realized_window,
+            risk_free_rate=config.vrp_risk_free_rate,
+        )
 
     def send(self, message: str) -> None:
         if self.telegram:
@@ -1004,7 +1154,12 @@ class PairCreditTrader:
                 continue
             symbols = self._candidate_symbols(candidate)
             try:
-                if self.config.leg_selection == "iv_expected_move":
+                decision = self._structure_decision(candidate)
+                if decision.structure_type == "FUTURES_PLUS_OPTIONS":
+                    structure = self.adapter.build_iv_expected_move_futures_options_structure(
+                        candidate, protection_iv_move=self.config.sell_iv_move,
+                    )
+                elif self.config.leg_selection == "iv_expected_move":
                     structure = self.adapter.build_iv_expected_move_credit_structure(
                         candidate,
                         sell_iv_move=self.config.sell_iv_move,
@@ -1017,8 +1172,10 @@ class PairCreditTrader:
                         sold_sd=self.config.sold_sd,
                         hedge_sd=self.config.hedge_sd,
                     )
+                structure["structure_type"] = decision.structure_type
+                structure["vrp_decision"] = decision.audit()
                 vol_check = {"ok": True, "preferred_structure": "CREDIT_SPREAD", "legs": []}
-                if self.config.vol_gate_enabled:
+                if self.config.vol_gate_enabled and decision.structure_type == "CREDIT_SPREAD":
                     vol_check = self.adapter.evaluate_credit_volatility(
                         structure,
                         min_ratio=self.config.iv_hv_min_ratio,
@@ -1090,6 +1247,22 @@ class PairCreditTrader:
             self.send("Opening scan complete: no new affordable NIFTY50 pair-credit entries.")
         return {"status": "completed", "opened": opened, "insufficient": insufficient, "rejected": rejected, "remaining": self.ledger.remaining_capital()}
 
+    def _structure_decision(self, candidate: dict[str, Any]) -> StructureDecision:
+        """Keep feature-off behavior exact: do not even invoke metrics then."""
+        if not self.config.vrp_structure_selection_enabled:
+            return select_pair_structure(
+                None, None, enabled=False, default_structure="CREDIT_SPREAD",
+                sell_threshold=self.config.vrp_sell_threshold, buy_threshold=self.config.vrp_buy_threshold,
+                ivp_guard_enabled=self.config.vrp_ivp_guard_enabled, ivp_sell_floor=self.config.vrp_ivp_sell_floor,
+            )
+        x = self._vrp_provider.metrics(str(candidate.get("x", "")))
+        y = self._vrp_provider.metrics(str(candidate.get("y", "")))
+        return select_pair_structure(
+            x, y, enabled=True, default_structure=self.config.vrp_default_structure,
+            sell_threshold=self.config.vrp_sell_threshold, buy_threshold=self.config.vrp_buy_threshold,
+            ivp_guard_enabled=self.config.vrp_ivp_guard_enabled, ivp_sell_floor=self.config.vrp_ivp_sell_floor,
+        )
+
     def _position_from(self, candidate: dict[str, Any], structure: dict[str, Any], margin: float) -> dict[str, Any]:
         position_id = f"PCR-{_now_ist().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
         legs = deepcopy(structure.get("legs") or [])
@@ -1098,7 +1271,8 @@ class PairCreditTrader:
             qty = int(leg.get("lots", 0) or 0) * int(leg.get("lot_size", 0) or 0)
             leg["quantity"] = qty
             price = float(leg.get("price", 0) or 0)
-            net_credit += price * qty * (1 if leg.get("side") == "SELL" else -1)
+            if leg.get("instrument") in {"CE", "PE"}:
+                net_credit += price * qty * (1 if leg.get("side") == "SELL" else -1)
         expiries = [_parse_expiry(str(leg.get("expiry", ""))) for leg in legs]
         expiries = [e for e in expiries if e]
         return {
@@ -1121,6 +1295,9 @@ class PairCreditTrader:
             "entry_margin": margin,
             "margin": structure.get("margin"),
             "entry_net_credit": round(net_credit, 2),
+            "structure_type": structure.get("structure_type", "CREDIT_SPREAD"),
+            "vrp_decision": structure.get("vrp_decision"),
+            "protection_iv_move": structure.get("protection_iv_move"),
             "leg_selection": structure.get("leg_selection"),
             "sell_iv_move": structure.get("sell_iv_move"),
             "hedge_max_iv_move": structure.get("hedge_max_iv_move"),
@@ -1138,7 +1315,11 @@ class PairCreditTrader:
         legs = []
         data_ok = True
         for leg in position.get("legs", []):
-            current = self.adapter.latest_option_price(leg)
+            current = (
+                self.adapter.latest_future_price(leg)
+                if str(leg.get("instrument", "")).upper() == "FUT"
+                else self.adapter.latest_option_price(leg)
+            )
             entry = float(leg.get("price", 0) or 0)
             qty = int(leg.get("quantity", 0) or 0)
             if current is None:
@@ -1240,13 +1421,13 @@ class PairCreditTrader:
         prob_profit = float(position.get("prob_profit") or 0)
         prob_text = f"{prob_profit:.1f}%" if prob_profit > 1 else f"{prob_profit:.1%}"
         return (
-            "PAIR CREDIT ENTRY [VIRTUAL]\n"
+            f"PAIR {position.get('structure_type', 'CREDIT_SPREAD')} ENTRY [VIRTUAL]\n"
             f"{position['position_id']} | {position['pair']} | {position['direction']}\n"
             f"Prob profit: {prob_text} | "
             f"z: {float(position.get('z_score') or 0):+.2f} | "
             f"hurst: {float(position.get('hurst') or 0):.2f}\n"
             f"Margin: Rs {float(position.get('entry_margin', 0)):,.2f} | "
-            f"Net credit: Rs {float(position.get('entry_net_credit', 0)):,.2f} | "
+            f"Net option cashflow: Rs {float(position.get('entry_net_credit', 0)):,.2f} | "
             f"Unallocated left: Rs {remaining:,.2f}\n"
             + PairCreditTrader._format_volatility_line(position)
             + "\n".join(leg_lines)
@@ -1291,6 +1472,19 @@ def make_pair_credit_trader_from_config(telegram=None, shoonya_client=None) -> P
         PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER,
         PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS,
         PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS,
+        PAIR_VRP_STRUCTURE_SELECTION_ENABLED,
+        PAIR_VRP_DEFAULT_STRUCTURE,
+        PAIR_VRP_SELL_THRESHOLD,
+        PAIR_VRP_BUY_THRESHOLD,
+        PAIR_VRP_IVP_GUARD_ENABLED,
+        PAIR_VRP_IVP_SELL_FLOOR,
+        PAIR_VRP_IVP_LOOKBACK_DAYS,
+        PAIR_VRP_MIN_VALID_OBSERVATIONS,
+        PAIR_VRP_FETCH_CALENDAR_DAYS,
+        PAIR_VRP_MIN_DTE_CALENDAR_DAYS,
+        PAIR_VRP_REALIZED_VOL_WINDOW,
+        PAIR_VRP_RISK_FREE_RATE,
+        PAIR_VRP_CACHE_DIR,
     )
 
     cfg = PairCreditConfig(
@@ -1313,5 +1507,18 @@ def make_pair_credit_trader_from_config(telegram=None, shoonya_client=None) -> P
         hv_lookback_multiplier=PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER,
         hv_min_lookback_days=PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS,
         hv_max_lookback_days=PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS,
+        vrp_structure_selection_enabled=PAIR_VRP_STRUCTURE_SELECTION_ENABLED,
+        vrp_default_structure=PAIR_VRP_DEFAULT_STRUCTURE,
+        vrp_sell_threshold=PAIR_VRP_SELL_THRESHOLD,
+        vrp_buy_threshold=PAIR_VRP_BUY_THRESHOLD,
+        vrp_ivp_guard_enabled=PAIR_VRP_IVP_GUARD_ENABLED,
+        vrp_ivp_sell_floor=PAIR_VRP_IVP_SELL_FLOOR,
+        vrp_ivp_lookback_days=PAIR_VRP_IVP_LOOKBACK_DAYS,
+        vrp_min_valid_observations=PAIR_VRP_MIN_VALID_OBSERVATIONS,
+        vrp_fetch_calendar_days=PAIR_VRP_FETCH_CALENDAR_DAYS,
+        vrp_min_dte_days=PAIR_VRP_MIN_DTE_CALENDAR_DAYS,
+        vrp_realized_window=PAIR_VRP_REALIZED_VOL_WINDOW,
+        vrp_risk_free_rate=PAIR_VRP_RISK_FREE_RATE,
+        vrp_cache_dir=PAIR_VRP_CACHE_DIR,
     )
     return PairCreditTrader(cfg, telegram=telegram, shoonya_client=shoonya_client)
