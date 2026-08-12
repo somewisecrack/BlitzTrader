@@ -257,7 +257,16 @@ class FakeShoonya:
 
     def get_quotes(self, exchange, token):
         self.quotes.append((exchange, token))
-        return {"lp": "1.25"}
+        return {
+            "exch": "NFO",
+            "token": "37010",
+            "tsym": "ITC28JUL26C287.5",
+            "lp": "1.25",
+            "l": "1.00",
+            "h": "2.00",
+            "ti": "0.05",
+            "sptprc": "290.00",
+        }
 
 
 def test_latest_option_price_uses_exact_shoonya_contract_and_ltp(tmp_path):
@@ -284,6 +293,39 @@ def test_latest_option_price_returns_none_when_exact_contract_not_resolved(tmp_p
         "expiry": "28-Jul-2026",
         "strike": 287.5,
     })
+    assert price is None
+
+
+def test_latest_option_price_rejects_underlying_value_as_put_premium(tmp_path):
+    adapter = OmniSpreadReadOnlyAdapter(tmp_path)
+    adapter._shoonya_client = FakeShoonya()
+    adapter._shoonya_client.search_scrip = lambda exchange, query: [{
+        "exch": "NFO",
+        "token": "100534",
+        "tsym": "HDFCLIFE25AUG26P500",
+        "optt": "PE",
+        "instname": "OPTSTK",
+        "symname": "HDFCLIFE",
+        "exd": "25-AUG-2026",
+    }]
+    adapter._shoonya_client.get_quotes = lambda exchange, token: {
+        "exch": "NFO",
+        "token": "100534",
+        "tsym": "HDFCLIFE25AUG26P500",
+        "lp": "533.30",
+        "l": "0.45",
+        "h": "0.70",
+        "ti": "0.05",
+        "sptprc": "533.30",
+    }
+
+    price = adapter.latest_option_price({
+        "symbol": "HDFCLIFE",
+        "instrument": "PE",
+        "expiry": "25-Aug-2026",
+        "strike": 500,
+    })
+
     assert price is None
 
 

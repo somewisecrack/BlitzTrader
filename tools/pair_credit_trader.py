@@ -651,6 +651,8 @@ class OmniSpreadReadOnlyAdapter:
         if client is None:
             return None
         quote = client.get_quotes(resolved["exchange"], resolved["token"]) or {}
+        if not self._is_valid_option_quote(leg, resolved, quote):
+            return None
         try:
             price = float(quote.get("lp"))
         except (TypeError, ValueError):
@@ -662,6 +664,59 @@ class OmniSpreadReadOnlyAdapter:
             )
             return None
         return price if math.isfinite(price) and price >= 0 else None
+
+    @staticmethod
+    def _is_valid_option_quote(
+        leg: dict[str, Any],
+        resolved: dict[str, Any],
+        quote: dict[str, Any],
+    ) -> bool:
+        """Accept only an internally coherent quote for the exact option contract.
+
+        A broker response can occasionally contain an underlying value in ``lp``.
+        MTM and virtual exits must fail closed in that case rather than booking an
+        impossible option premium.
+        """
+        expected_tsym = str(resolved.get("tsym", "")).upper()
+        expected_token = str(resolved.get("token", ""))
+        if (
+            str(quote.get("tsym", "")).upper() != expected_tsym
+            or str(quote.get("token", "")) != expected_token
+            or str(quote.get("exch", "")).upper() != str(resolved.get("exchange", "")).upper()
+        ):
+            logger.warning(
+                "Pair-credit MTM: quote identity mismatch for %s token=%s quote=%s",
+                expected_tsym,
+                expected_token,
+                quote,
+            )
+            return False
+
+        try:
+            price = float(quote["lp"])
+            day_low = float(quote["l"])
+            day_high = float(quote["h"])
+            tick_size = float(quote["ti"])
+            strike = float(leg["strike"])
+            underlying = float(quote["sptprc"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("Pair-credit MTM: incomplete option quote for %s: %s", expected_tsym, quote)
+            return False
+
+        values = (price, day_low, day_high, tick_size, strike, underlying)
+        if not all(math.isfinite(value) for value in values) or tick_size <= 0 or strike <= 0 or underlying <= 0:
+            logger.warning("Pair-credit MTM: non-finite or invalid option quote for %s: %s", expected_tsym, quote)
+            return False
+        if price < day_low - tick_size or price > day_high + tick_size:
+            logger.warning("Pair-credit MTM: lp outside daily range for %s: %s", expected_tsym, quote)
+            return False
+
+        option_type = str(leg.get("instrument", "")).upper()
+        upper_bound = strike if option_type == "PE" else underlying if option_type == "CE" else None
+        if upper_bound is None or price > upper_bound + tick_size:
+            logger.warning("Pair-credit MTM: economically impossible premium for %s: %s", expected_tsym, quote)
+            return False
+        return True
 
     @staticmethod
     def _trading_days_to_expiry(expiry: date, today: date | None = None) -> int:
