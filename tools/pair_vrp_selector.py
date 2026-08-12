@@ -190,10 +190,11 @@ class NsePairVolatilityProvider:
         frame = self._normalise_option(raw)
         if frame.empty:
             return []
-        monthly = (
-            frame[["expiry"]].drop_duplicates().sort_values("expiry")
-            .groupby([frame["expiry"].dt.year, frame["expiry"].dt.month])["expiry"].max().tolist()
-        )
+        latest_by_month: dict[tuple[int, int], Any] = {}
+        for expiry in sorted(frame["expiry"].drop_duplicates()):
+            key = (expiry.year, expiry.month)
+            latest_by_month[key] = expiry
+        monthly = sorted(latest_by_month.values())
         observations: list[dict[str, float | str]] = []
         for day, rows in frame.groupby(frame["date"].dt.normalize()):
             eligible = [expiry for expiry in monthly if (expiry.normalize() - day).days >= self.min_dte_days]
@@ -255,7 +256,6 @@ class NsePairVolatilityProvider:
         close_col = self._column(frame, "CLOSING_PRICE")
         values = pd.DataFrame({"date": pd.to_datetime(frame[date_col], errors="coerce"), "close": pd.to_numeric(frame[close_col], errors="coerce")}).dropna()
         values = values.sort_values("date").drop_duplicates("date", keep="last")
-        returns = pd.Series(values["close"].to_numpy()).pct_change().dropna()
         # log returns retain the reference convention and a full window is required.
         returns = pd.Series([math.log(values["close"].iloc[i] / values["close"].iloc[i - 1]) for i in range(1, len(values)) if values["close"].iloc[i - 1] > 0])
         if len(returns) < self.realized_window:
