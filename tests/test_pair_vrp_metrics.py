@@ -18,7 +18,7 @@ def _provider(option_frame, future_frame):
         realized_window=2,
         risk_free_rate=0.065,
         fetch_option=lambda **kwargs: option_frame,
-        fetch_future=lambda **kwargs: future_frame,
+        fetch_underlying=lambda **kwargs: future_frame,
         now=lambda: datetime(2026, 7, 1),
     )
 

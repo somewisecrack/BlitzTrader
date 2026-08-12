@@ -92,7 +92,7 @@ class NsePairVolatilityProvider:
         realized_window: int,
         risk_free_rate: float,
         fetch_option: Callable[..., pd.DataFrame] | None = None,
-        fetch_future: Callable[..., pd.DataFrame] | None = None,
+        fetch_underlying: Callable[..., pd.DataFrame] | None = None,
         now: Callable[[], datetime] = datetime.now,
     ):
         self.cache_dir = Path(cache_dir)
@@ -103,7 +103,7 @@ class NsePairVolatilityProvider:
         self.realized_window = realized_window
         self.risk_free_rate = risk_free_rate
         self._fetch_option = fetch_option
-        self._fetch_future = fetch_future
+        self._fetch_underlying = fetch_underlying
         self._now = now
 
     @staticmethod
@@ -124,11 +124,11 @@ class NsePairVolatilityProvider:
         from nselib import derivatives
         return derivatives.option_price_volume_data
 
-    def _future_fetcher(self) -> Callable[..., pd.DataFrame]:
-        if self._fetch_future:
-            return self._fetch_future
-        from nselib import derivatives
-        return derivatives.future_price_volume_data
+    def _underlying_fetcher(self) -> Callable[..., pd.DataFrame]:
+        if self._fetch_underlying:
+            return self._fetch_underlying
+        from nselib import capital_market
+        return capital_market.price_volume_data
 
     @staticmethod
     def _bs_price(option_type: str, spot: float, strike: float, years: float, rate: float, sigma: float) -> float:
@@ -246,14 +246,14 @@ class NsePairVolatilityProvider:
     def _realized_vol(self, ticker: str) -> float | None:
         import pandas as pd
         now = self._now()
-        raw = self._future_fetcher()(
-            symbol=self._symbol(ticker), instrument="FUTSTK",
+        raw = self._underlying_fetcher()(
+            symbol=self._symbol(ticker),
             from_date=(now - timedelta(days=self.fetch_calendar_days)).strftime("%d-%m-%Y"),
             to_date=now.strftime("%d-%m-%Y"),
         )
         frame = raw.copy()
-        date_col = self._column(frame, "date", "TIMESTAMP")
-        close_col = self._column(frame, "CLOSING_PRICE")
+        date_col = self._column(frame, "date", "TIMESTAMP", "CH_TIMESTAMP")
+        close_col = self._column(frame, "CLOSING_PRICE", "CH_CLOSING_PRICE")
         values = pd.DataFrame({"date": pd.to_datetime(frame[date_col], errors="coerce"), "close": pd.to_numeric(frame[close_col], errors="coerce")}).dropna()
         values = values.sort_values("date").drop_duplicates("date", keep="last")
         # log returns retain the reference convention and a full window is required.
