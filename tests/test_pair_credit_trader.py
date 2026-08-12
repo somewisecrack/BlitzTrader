@@ -107,9 +107,10 @@ def test_vrp_feature_off_preserves_credit_builder_and_never_fetches_metrics(tmp_
     assert all(position["structure_type"] == "CREDIT_SPREAD" for position in result["opened"])
 
 
-def test_vrp_cheap_signal_uses_futures_plus_options_builder(tmp_path):
+def test_vrp_cheap_signal_uses_per_leg_futures_plus_options_builder(tmp_path):
     class FuturesOptionsAdapter(FakeAdapter):
-        def build_iv_expected_move_futures_options_structure(self, candidate, protection_iv_move):
+        def build_iv_expected_move_per_leg_structure(self, candidate, leg_structures, sell_iv_move, hedge_max_iv_move):
+            assert leg_structures == {"x": "FUTURES_PLUS_OPTIONS", "y": "FUTURES_PLUS_OPTIONS"}
             structure = _structure(candidate["pair"], 10_000)
             structure["legs"] = [
                 {"asset": "x", "symbol": "AAA", "instrument": "FUT", "side": "BUY", "lots": 1, "lot_size": 100, "expiry": "31-Dec-2099", "spot": 110, "price": 111, "is_index": False},
@@ -119,12 +120,32 @@ def test_vrp_cheap_signal_uses_futures_plus_options_builder(tmp_path):
             return structure
 
     adapter = FuturesOptionsAdapter({"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 10_000)})
-    trader = _trader(tmp_path, adapter, vrp_structure_selection_enabled=True, vrp_buy_threshold=-0.03)
+    trader = _trader(tmp_path, adapter, vrp_structure_selection_enabled=True, vrp_sell_threshold=0.02)
     from tools.pair_vrp_selector import PairVolatilityMetrics
-    trader._vrp_provider.metrics = lambda ticker: PairVolatilityMetrics(ticker, 0.15, 50, 0.20, -0.05)
+    trader._vrp_provider.metrics = lambda ticker: PairVolatilityMetrics(ticker, 0.15, 50, 0.20, 0.01)
     result = trader.run_opening_allocation()
     assert result["opened"]
     assert all(position["structure_type"] == "FUTURES_PLUS_OPTIONS" for position in result["opened"])
+
+
+def test_vrp_mixed_signal_builds_hybrid_with_each_leg_selected_independently(tmp_path):
+    class HybridAdapter(FakeAdapter):
+        def build_iv_expected_move_per_leg_structure(self, candidate, leg_structures, sell_iv_move, hedge_max_iv_move):
+            assert leg_structures == {"x": "CREDIT_SPREAD", "y": "FUTURES_PLUS_OPTIONS"}
+            structure = _structure(candidate["pair"], 10_000)
+            structure["structure_type"] = "HYBRID"
+            structure["leg_structure_types"] = dict(leg_structures)
+            return structure
+
+    adapter = HybridAdapter({"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 10_000)})
+    trader = _trader(tmp_path, adapter, vrp_structure_selection_enabled=True, vrp_sell_threshold=0.02)
+    from tools.pair_vrp_selector import PairVolatilityMetrics
+    trader._vrp_provider.metrics = lambda ticker: PairVolatilityMetrics(
+        ticker, 0.25, 50, 0.20, 0.03 if ticker.startswith("AAA") else 0.01,
+    )
+    result = trader.run_opening_allocation()
+    assert result["opened"]
+    assert all(position["structure_type"] == "HYBRID" for position in result["opened"])
 
 
 def test_futures_plus_options_mark_uses_future_and_option_quotes(tmp_path):

@@ -1,4 +1,4 @@
-from tools.pair_vrp_selector import PairVolatilityMetrics, select_pair_structure
+from tools.pair_vrp_selector import PairVolatilityMetrics, select_pair_leg_structures, select_pair_structure
 
 
 def _metric(vrp, ivp=60.0):
@@ -65,3 +65,31 @@ def test_decision_is_pure_and_audit_is_serializable():
     decision = _select(x, y)
     assert x.vrp == 0.08 and y.vrp == 0.05
     assert decision.audit()["x"]["vrp"] == 0.08
+
+
+def test_per_leg_rule_selects_credit_only_at_or_above_two_vol_points():
+    decision = select_pair_leg_structures(
+        _metric(0.02), _metric(0.019), enabled=True,
+        credit_threshold=0.02, default_structure="CREDIT_SPREAD",
+    )
+    assert decision.structure_type == "HYBRID"
+    assert decision.leg_structures == {"x": "CREDIT_SPREAD", "y": "FUTURES_PLUS_OPTIONS"}
+
+
+def test_per_leg_rule_treats_negative_and_low_positive_vrp_as_futures_options():
+    decision = select_pair_leg_structures(
+        _metric(-0.08), _metric(0.0), enabled=True,
+        credit_threshold=0.02, default_structure="CREDIT_SPREAD",
+    )
+    assert decision.structure_type == "FUTURES_PLUS_OPTIONS"
+    assert decision.leg_structures == {"x": "FUTURES_PLUS_OPTIONS", "y": "FUTURES_PLUS_OPTIONS"}
+
+
+def test_per_leg_unavailable_metric_uses_default_not_a_fabricated_cheap_signal():
+    unavailable = PairVolatilityMetrics("BBB.NS", None, None, None, None)
+    decision = select_pair_leg_structures(
+        _metric(0.01), unavailable, enabled=True,
+        credit_threshold=0.02, default_structure="CREDIT_SPREAD",
+    )
+    assert decision.leg_structures == {"x": "FUTURES_PLUS_OPTIONS", "y": "CREDIT_SPREAD"}
+    assert "metrics unavailable" in decision.reason

@@ -35,6 +35,7 @@ class StructureDecision:
     enabled: bool
     x: PairVolatilityMetrics | None = None
     y: PairVolatilityMetrics | None = None
+    leg_structures: dict[str, str] | None = None
 
     def audit(self) -> dict[str, Any]:
         return {
@@ -43,7 +44,48 @@ class StructureDecision:
             "enabled": self.enabled,
             "x": asdict(self.x) if self.x else None,
             "y": asdict(self.y) if self.y else None,
+            "leg_structures": self.leg_structures,
         }
+
+
+def select_pair_leg_structures(
+    x: PairVolatilityMetrics | None,
+    y: PairVolatilityMetrics | None,
+    *,
+    enabled: bool,
+    credit_threshold: float,
+    default_structure: str,
+) -> StructureDecision:
+    """Pure per-leg rule used by the pair implementation.
+
+    A leg with a VRP at or above the threshold sells premium as a credit
+    spread.  A leg below the threshold uses the future plus protective option.
+    Missing VRP is never treated as cheap volatility: it uses the configured
+    conservative default and is recorded explicitly.
+    """
+    if not enabled:
+        return StructureDecision(
+            default_structure, "feature disabled", False, x, y,
+            {"x": default_structure, "y": default_structure},
+        )
+
+    selections: dict[str, str] = {}
+    unavailable: list[str] = []
+    for key, metric in (("x", x), ("y", y)):
+        if metric is None or metric.vrp is None:
+            selections[key] = default_structure
+            unavailable.append(key)
+        elif metric.vrp >= credit_threshold:
+            selections[key] = "CREDIT_SPREAD"
+        else:
+            selections[key] = "FUTURES_PLUS_OPTIONS"
+
+    structure_type = selections["x"] if selections["x"] == selections["y"] else "HYBRID"
+    if unavailable:
+        reason = "metrics unavailable for " + ", ".join(unavailable) + "; used default for unavailable leg(s)"
+    else:
+        reason = f"per-leg VRP rule: CREDIT_SPREAD at or above {credit_threshold * 100:.1f} vol points"
+    return StructureDecision(structure_type, reason, True, x, y, selections)
 
 
 def select_pair_structure(

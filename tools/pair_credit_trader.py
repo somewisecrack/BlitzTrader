@@ -21,7 +21,7 @@ from typing import Any
 import pytz
 
 from tools.blitz_schedule import is_pair_credit_expiry_close_time
-from tools.pair_vrp_selector import NsePairVolatilityProvider, StructureDecision, select_pair_structure
+from tools.pair_vrp_selector import NsePairVolatilityProvider, StructureDecision, select_pair_leg_structures
 
 logger = logging.getLogger("BlitzTrader.PairCredit")
 IST = pytz.timezone("Asia/Kolkata")
@@ -604,6 +604,74 @@ class OmniSpreadReadOnlyAdapter:
             "note": "Current structure only; prices and available strikes can change before execution.",
         }
 
+    def build_iv_expected_move_per_leg_structure(
+        self,
+        candidate: dict[str, Any],
+        leg_structures: dict[str, str],
+        sell_iv_move: float,
+        hedge_max_iv_move: float,
+    ) -> dict[str, Any]:
+        """Build a pair whose two legs may use different approved structures."""
+        self._ensure_loaded()
+        from pandas import Timestamp
+
+        if set(leg_structures) != {"x", "y"} or not set(leg_structures.values()) <= {"CREDIT_SPREAD", "FUTURES_PLUS_OPTIONS"}:
+            raise ValueError("Per-leg structure selection must specify x and y approved structures.")
+        as_of = datetime.now()
+        start = as_of - timedelta(days=14)
+        required_expiry = Timestamp(as_of.date())
+        assets = {
+            "x": self._fetch_credit_snapshot(candidate["x"], start, as_of, required_expiry, self._fetch_future, self._fetch_option),
+            "y": self._fetch_credit_snapshot(candidate["y"], start, as_of, required_expiry, self._fetch_future, self._fetch_option),
+        }
+        x_lots, y_lots = self._whole_lot_hedge(float(candidate["qty"]), assets["x"]["future_lot"], assets["y"]["future_lot"])
+        counts = {"x": x_lots, "y": y_lots}
+        short_spread = candidate["direction"] in {"SHORT_SPREAD", "long_x_short_y"}
+        signs = {"x": 1 if short_spread else -1, "y": -1 if short_spread else 1}
+        legs: list[dict[str, Any]] = []
+        selections: list[dict[str, Any]] = []
+        for key, asset in assets.items():
+            option_type = "PE" if signs[key] > 0 else "CE"
+            if leg_structures[key] == "CREDIT_SPREAD":
+                selected, metrics = self._select_iv_credit_leg(
+                    key, asset, option_type, counts[key], sell_iv_move, hedge_max_iv_move,
+                )
+                legs.extend(selected)
+                selections.append({"structure_type": "CREDIT_SPREAD", **metrics})
+                continue
+
+            future_price = self._current_future_snapshot_price(asset, start, as_of)
+            metrics = self._atm_iv_expected_move(asset)
+            direction = -1.0 if option_type == "PE" else 1.0
+            target = float(asset["spot"]) + direction * sell_iv_move * float(metrics["expected_move"])
+            typed = asset["option_snapshot"][(asset["option_snapshot"]["OPTION_TYPE"] == option_type) & asset["option_snapshot"]["STRIKE_PRICE"].notna()]
+            strikes = [float(value) for value in typed["STRIKE_PRICE"].unique() if self._snapshot_traded(typed, float(value), option_type)]
+            strikes = [strike for strike in strikes if direction * (strike - float(asset["spot"])) > 0]
+            if not strikes:
+                raise ValueError(f"No traded OTM protective {option_type} for {asset['symbol']}.")
+            strike = min(strikes, key=lambda value: abs(value - target))
+            premium = self._snapshot_entry_price(typed, strike, option_type)
+            if premium is None:
+                raise ValueError(f"No valid protective option price for {asset['symbol']} {strike:g}{option_type}.")
+            common = {
+                "asset": key, "symbol": asset["symbol"], "lots": int(counts[key]), "lot_size": int(asset["future_lot"]),
+                "expiry": asset["expiry"].strftime("%d-%b-%Y"), "spot": round(float(asset["spot"]), 2), "is_index": asset["is_index"],
+            }
+            legs.extend([
+                {**common, "instrument": "FUT", "side": "BUY" if signs[key] > 0 else "SELL", "price": future_price},
+                {**common, "instrument": option_type, "side": "BUY", "strike": strike, "price": premium},
+            ])
+            selections.append({"structure_type": "FUTURES_PLUS_OPTIONS", **metrics, "symbol": asset["symbol"], "option_type": option_type, "protection_target": target, "protection_strike": strike, "protection_price": premium})
+        actual_ratio = x_lots * assets["x"]["future_lot"] / (y_lots * assets["y"]["future_lot"])
+        return {
+            "pair": f"{self._nse_symbol(candidate['x'])}/{self._nse_symbol(candidate['y'])}", "qty": candidate["qty"], "direction": candidate["direction"],
+            "as_of": min(asset["as_of"] for asset in assets.values()).strftime("%d-%b-%Y"),
+            "x_lots": x_lots, "y_lots": y_lots, "actual_ratio": round(actual_ratio, 4), "legs": legs,
+            "margin": self._estimate_margin(legs), "leg_selection": "iv_expected_move", "structure_type": "HYBRID",
+            "leg_structure_types": dict(leg_structures), "sell_iv_move": sell_iv_move, "hedge_max_iv_move": hedge_max_iv_move,
+            "iv_leg_selection": selections, "note": "Current structure only; prices and available strikes can change before execution.",
+        }
+
     def _current_future_snapshot_price(self, asset: dict[str, Any], start: datetime, end: datetime) -> float:
         """Read the actual same-contract future close; never substitute spot."""
         raw = self._fetch_future(
@@ -1155,9 +1223,12 @@ class PairCreditTrader:
             symbols = self._candidate_symbols(candidate)
             try:
                 decision = self._structure_decision(candidate)
-                if decision.structure_type == "FUTURES_PLUS_OPTIONS":
-                    structure = self.adapter.build_iv_expected_move_futures_options_structure(
-                        candidate, protection_iv_move=self.config.sell_iv_move,
+                if self.config.vrp_structure_selection_enabled:
+                    structure = self.adapter.build_iv_expected_move_per_leg_structure(
+                        candidate,
+                        leg_structures=decision.leg_structures or {"x": "CREDIT_SPREAD", "y": "CREDIT_SPREAD"},
+                        sell_iv_move=self.config.sell_iv_move,
+                        hedge_max_iv_move=self.config.hedge_max_iv_move,
                     )
                 elif self.config.leg_selection == "iv_expected_move":
                     structure = self.adapter.build_iv_expected_move_credit_structure(
@@ -1173,6 +1244,7 @@ class PairCreditTrader:
                         hedge_sd=self.config.hedge_sd,
                     )
                 structure["structure_type"] = decision.structure_type
+                structure["leg_structure_types"] = decision.leg_structures
                 structure["vrp_decision"] = decision.audit()
                 vol_check = {"ok": True, "preferred_structure": "CREDIT_SPREAD", "legs": []}
                 if self.config.vol_gate_enabled and decision.structure_type == "CREDIT_SPREAD":
@@ -1250,17 +1322,15 @@ class PairCreditTrader:
     def _structure_decision(self, candidate: dict[str, Any]) -> StructureDecision:
         """Keep feature-off behavior exact: do not even invoke metrics then."""
         if not self.config.vrp_structure_selection_enabled:
-            return select_pair_structure(
+            return select_pair_leg_structures(
                 None, None, enabled=False, default_structure="CREDIT_SPREAD",
-                sell_threshold=self.config.vrp_sell_threshold, buy_threshold=self.config.vrp_buy_threshold,
-                ivp_guard_enabled=self.config.vrp_ivp_guard_enabled, ivp_sell_floor=self.config.vrp_ivp_sell_floor,
+                credit_threshold=self.config.vrp_sell_threshold,
             )
         x = self._vrp_provider.metrics(str(candidate.get("x", "")))
         y = self._vrp_provider.metrics(str(candidate.get("y", "")))
-        return select_pair_structure(
+        return select_pair_leg_structures(
             x, y, enabled=True, default_structure=self.config.vrp_default_structure,
-            sell_threshold=self.config.vrp_sell_threshold, buy_threshold=self.config.vrp_buy_threshold,
-            ivp_guard_enabled=self.config.vrp_ivp_guard_enabled, ivp_sell_floor=self.config.vrp_ivp_sell_floor,
+            credit_threshold=self.config.vrp_sell_threshold,
         )
 
     def _position_from(self, candidate: dict[str, Any], structure: dict[str, Any], margin: float) -> dict[str, Any]:
@@ -1296,6 +1366,7 @@ class PairCreditTrader:
             "margin": structure.get("margin"),
             "entry_net_credit": round(net_credit, 2),
             "structure_type": structure.get("structure_type", "CREDIT_SPREAD"),
+            "leg_structure_types": structure.get("leg_structure_types"),
             "vrp_decision": structure.get("vrp_decision"),
             "protection_iv_move": structure.get("protection_iv_move"),
             "leg_selection": structure.get("leg_selection"),

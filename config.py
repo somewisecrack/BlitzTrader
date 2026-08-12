@@ -210,15 +210,16 @@ PAIR_CREDIT_HV_LOOKBACK_MULTIPLIER = _optional_int_env("PAIR_CREDIT_HV_LOOKBACK_
 PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MIN_LOOKBACK_DAYS", 5)
 PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS = _optional_int_env("PAIR_CREDIT_HV_MAX_LOOKBACK_DAYS", 30)
 
-# Experimental VRP/IVP structure selector.  It is deliberately disabled until
-# its thresholds have been backtested.  When disabled, pair-credit construction
-# follows the existing path exactly.
+# Per-leg VRP structure selector.  It is virtual-only; every selection is
+# audited with the underlying IV/RV metrics.
 PAIR_VRP_STRUCTURE_SELECTION_ENABLED = (
-    _optional_env("PAIR_VRP_STRUCTURE_SELECTION_ENABLED", "false").lower()
+    _optional_env("PAIR_VRP_STRUCTURE_SELECTION_ENABLED", "true").lower()
     in {"1", "true", "yes", "on"}
 )
 PAIR_VRP_DEFAULT_STRUCTURE = _optional_env("PAIR_VRP_DEFAULT_STRUCTURE", "CREDIT_SPREAD")
-PAIR_VRP_SELL_THRESHOLD = float(_optional_env("PAIR_VRP_SELL_THRESHOLD", "0.03"))
+PAIR_VRP_SELL_THRESHOLD = float(_optional_env("PAIR_VRP_SELL_THRESHOLD", "0.02"))
+# Retained only for .env compatibility with the earlier whole-pair experiment;
+# the active selector is now per-leg and does not use a buy threshold.
 PAIR_VRP_BUY_THRESHOLD = float(_optional_env("PAIR_VRP_BUY_THRESHOLD", "-0.03"))
 PAIR_VRP_IVP_GUARD_ENABLED = (
     _optional_env("PAIR_VRP_IVP_GUARD_ENABLED", "false").lower()
