@@ -7,8 +7,8 @@ import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# Tuesday and Thursday are reserved for GammaBlast weekly-expiry sessions.
-GAMMABLAST_ONLY_WEEKDAYS = {1, 3}
+# GammaBlast reserves Tuesdays only. Thursday is a normal BlitzTrader session.
+GAMMABLAST_ONLY_WEEKDAYS = {1}
 
 
 def is_gammablast_only_day(day: date) -> bool:

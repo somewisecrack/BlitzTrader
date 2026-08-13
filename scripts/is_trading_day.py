@@ -1,8 +1,8 @@
 """
 Systemd ExecCondition helper for BlitzTrader.
 
-Exit 0 on eligible Monday, Wednesday, and Friday NSE trading days. Exit 1 on
-Tuesday/Thursday GammaBlast sessions, weekends, and known NSE holidays so
+Exit 0 on eligible NSE trading days. Exit 1 on Tuesday GammaBlast sessions,
+weekends, and known NSE holidays so
 systemd skips ExecStart without marking the service as failed.
 """
 from __future__ import annotations

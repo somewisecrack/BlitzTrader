@@ -4,7 +4,7 @@ Requires=blitztrader-wiki-loop.service
 ConditionPathExists=/opt/blitztrader/ENABLE_WIKI_LOOP
 
 [Timer]
-OnCalendar=Mon,Wed,Fri *-*-* 15:30:00 Asia/Kolkata
+OnCalendar=Mon,Tue,Wed,Thu,Fri *-*-* 15:30:00 Asia/Kolkata
 Persistent=false
 
 [Install]

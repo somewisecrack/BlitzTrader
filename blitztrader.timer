@@ -1,8 +1,8 @@
 [Unit]
-Description=Start BlitzTrader at 8:20 AM IST on non-GammaBlast trading days
+Description=Start BlitzTrader at 8:20 AM IST on trading days except Tuesday GammaBlast
 
 [Timer]
-OnCalendar=Mon,Wed,Fri *-*-* 08:20:00 Asia/Kolkata
+OnCalendar=Mon,Tue,Wed,Thu,Fri *-*-* 08:20:00 Asia/Kolkata
 Persistent=false
 Unit=blitztrader.service
 

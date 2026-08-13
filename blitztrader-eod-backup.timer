@@ -3,7 +3,7 @@ Description=BlitzTrader EOD Backup Timer
 Requires=blitztrader-eod-backup.service
 
 [Timer]
-OnCalendar=Mon,Wed,Fri *-*-* 16:00:00 Asia/Kolkata
+OnCalendar=Mon,Tue,Wed,Thu,Fri *-*-* 16:00:00 Asia/Kolkata
 Persistent=false
 
 [Install]
