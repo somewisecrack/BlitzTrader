@@ -239,7 +239,7 @@ PAIR_VRP_CACHE_DIR = RUNTIME_STORAGE_DIR / "pair_vrp_cache"
 # ──────────────────────────────────────────────────────────────
 
 NIFTY_FIRST_HOUR_MOMENTUM_ENABLED = (
-    _optional_env("NIFTY_FIRST_HOUR_MOMENTUM_ENABLED", "true").lower()
+    _optional_env("NIFTY_FIRST_HOUR_MOMENTUM_ENABLED", "false").lower()
     in {"1", "true", "yes", "on"}
 )
 NIFTY_FIRST_HOUR_MOMENTUM_CAPITAL = float(
