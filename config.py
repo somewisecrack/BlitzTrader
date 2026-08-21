@@ -320,6 +320,9 @@ LIVE_ORDER_EXECUTION = _optional_env("LIVE_ORDER_EXECUTION", "false").lower() ==
 # ──────────────────────────────────────────────────────────────
 
 MIN_FREE_DISK_MB = 2048   # abort if less than 2 GB free
+DISK_CLEANUP_TRIGGER_MB = _optional_int_env("DISK_CLEANUP_TRIGGER_MB", 3072)
+DISK_CLEANUP_JOURNAL_MAX_MB = _optional_int_env("DISK_CLEANUP_JOURNAL_MAX_MB", 128)
+DISK_CLEANUP_TMP_MAX_AGE_DAYS = _optional_int_env("DISK_CLEANUP_TMP_MAX_AGE_DAYS", 7)
 MAX_RISK_PCT = OPTION_SPREAD_MAX_RISK_PCT
 MAX_DAILY_LOSS_PCT = 0.05  # 5% daily loss limit
 MAX_DAILY_LOSS_AMOUNT = VIRTUAL_CAPITAL * MAX_DAILY_LOSS_PCT  # ₹50,000

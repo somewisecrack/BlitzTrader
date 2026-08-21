@@ -12,6 +12,8 @@ Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/opt/blitztrader/.env
 
 ExecCondition=/opt/blitztrader/venv/bin/python scripts/is_trading_day.py
+# Runs as root (the '+' prefix) but only trims system caches and stale /tmp data.
+ExecStartPre=+/opt/blitztrader/venv/bin/python scripts/disk_cleanup.py
 ExecStart=/opt/blitztrader/venv/bin/python main.py
 
 # Graceful shutdown
