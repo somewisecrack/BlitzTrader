@@ -278,6 +278,53 @@ def test_same_day_expiry_closes_after_market_close(tmp_path, monkeypatch):
     assert expiring == []
 
 
+def test_expired_position_uses_intrinsic_settlement_when_option_quote_is_unavailable(tmp_path, monkeypatch):
+    class ExpirySettlementAdapter(FakeAdapter):
+        def latest_option_price(self, leg):
+            return None
+
+        def expiry_settlement_price(self, leg, expiry):
+            assert expiry == date(2026, 7, 27)
+            return {"SELL": 0.0, "BUY": 0.0}[leg["side"]]
+
+    structure = _structure("AAA/BBB", 10_000)
+    for leg in structure["legs"]:
+        leg["expiry"] = "27-Jul-2026"
+    trader = _trader(tmp_path, ExpirySettlementAdapter({"AAA/BBB": structure, "CCC/DDD": _structure("CCC/DDD", 10_000)}))
+    trader.run_opening_allocation()
+
+    ist = pytz.timezone("Asia/Kolkata")
+    monkeypatch.setattr(pair_credit_trader, "_now_ist", lambda: ist.localize(datetime(2026, 7, 28, 9, 20)))
+
+    results = trader.close_expired_positions()
+    assert len(results) == 1
+    assert results[0]["ok"] is True
+    assert results[0]["position"]["close_reason"] == "automatic expiry settlement"
+    assert results[0]["realized_pnl"] == 1100.0
+    assert [p["pair"] for p in trader.ledger.open_positions()] == ["CCC/DDD"]
+
+
+def test_unavailable_expiry_settlement_notifies_only_once_per_day(tmp_path, monkeypatch):
+    class MissingSettlementAdapter(FakeAdapter):
+        def latest_option_price(self, leg):
+            return None
+
+        def expiry_settlement_price(self, leg, expiry):
+            return None
+
+    structure = _structure("AAA/BBB", 10_000)
+    for leg in structure["legs"]:
+        leg["expiry"] = "27-Jul-2026"
+    trader = _trader(tmp_path, MissingSettlementAdapter({"AAA/BBB": structure, "CCC/DDD": _structure("CCC/DDD", 10_000)}))
+    trader.run_opening_allocation()
+
+    ist = pytz.timezone("Asia/Kolkata")
+    monkeypatch.setattr(pair_credit_trader, "_now_ist", lambda: ist.localize(datetime(2026, 7, 28, 9, 20)))
+
+    assert len(trader.close_expired_positions()) == 1
+    assert trader.close_expired_positions() == []
+
+
 
 def test_open_message_formats_percentage_when_probability_is_already_percent():
     position = {

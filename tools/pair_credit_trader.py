@@ -817,6 +817,45 @@ class OmniSpreadReadOnlyAdapter:
             return None
         return price if math.isfinite(price) and price >= 0 else None
 
+    def expiry_settlement_price(self, leg: dict[str, Any], expiry: date) -> float | None:
+        """Return an expired option's intrinsic value from its expiry-day close.
+
+        This is deliberately not a live-quote fallback.  It is available only
+        after expiry, when the exact option contract is no longer tradeable and
+        its settlement value is intrinsic value.  Missing source data fails
+        closed so a position is never booked at an invented price.
+        """
+        option_type = str(leg.get("instrument", "")).upper()
+        symbol = str(leg.get("symbol", "")).upper().strip()
+        try:
+            strike = float(leg["strike"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if option_type not in {"CE", "PE"} or not symbol or not math.isfinite(strike):
+            return None
+
+        try:
+            import yfinance as yf
+
+            history = yf.Ticker(f"{symbol}.NS").history(
+                start=expiry.isoformat(),
+                end=(expiry + timedelta(days=1)).isoformat(),
+                auto_adjust=False,
+            )
+            if history.empty or "Close" not in history:
+                logger.warning("Expiry settlement close unavailable for %s on %s", symbol, expiry)
+                return None
+            close = float(history["Close"].iloc[-1])
+        except Exception:
+            logger.exception("Expiry settlement close lookup failed for %s on %s", symbol, expiry)
+            return None
+
+        if not math.isfinite(close) or close <= 0:
+            logger.warning("Invalid expiry settlement close for %s on %s: %s", symbol, expiry, close)
+            return None
+        intrinsic = max(strike - close, 0.0) if option_type == "PE" else max(close - strike, 0.0)
+        return round(intrinsic, 8)
+
     def _resolve_live_future(self, leg: dict[str, Any]) -> dict[str, Any] | None:
         expiry = _parse_expiry(str(leg.get("expiry", "")))
         symbol = str(leg.get("symbol", "")).upper()
@@ -1430,11 +1469,47 @@ class PairCreditTrader:
                 continue
             mark = self.mark_position(position)
             if not mark["data_ok"]:
-                results.append({"ok": False, "position": position, "error": "expiry prices unavailable"})
-                continue
+                settlement_legs = []
+                settlement_pnl = 0.0
+                settlement_ok = True
+                for leg in position.get("legs", []):
+                    price = self.adapter.expiry_settlement_price(leg, expiry)
+                    if price is None:
+                        settlement_ok = False
+                        break
+                    entry = float(leg.get("price", 0) or 0)
+                    quantity = int(leg.get("quantity", 0) or 0)
+                    sign = -1 if leg.get("side") == "SELL" else 1
+                    pnl = sign * (price - entry) * quantity
+                    settlement_pnl += pnl
+                    settlement_legs.append({
+                        **leg,
+                        "current_price": price,
+                        "pnl": round(pnl, 2),
+                        "valuation": "expiry_intrinsic_settlement",
+                    })
+                if not settlement_ok:
+                    key = f"expiry_pending:{position.get('position_id')}:{today.isoformat()}"
+                    sent = self.ledger.state.setdefault("notifications_sent", {})
+                    if sent.get(key):
+                        continue
+                    sent[key] = now.isoformat()
+                    self.ledger.save()
+                    results.append({"ok": False, "position": position, "error": "expiry settlement unavailable"})
+                    continue
+                mark = {
+                    "data_ok": True,
+                    "unrealized_pnl": round(settlement_pnl, 2),
+                    "legs": settlement_legs,
+                }
             closed = self.ledger.close_position(
                 position["position_id"],
-                {"closed_at": _now_ist().isoformat(), "close_reason": "automatic expiry exit", "exit_legs": mark["legs"], "realized_pnl": mark["unrealized_pnl"]},
+                {
+                    "closed_at": _now_ist().isoformat(),
+                    "close_reason": "automatic expiry settlement",
+                    "exit_legs": mark["legs"],
+                    "realized_pnl": mark["unrealized_pnl"],
+                },
             )
             results.append({"ok": True, "position": closed, "realized_pnl": mark["unrealized_pnl"]})
         return results
