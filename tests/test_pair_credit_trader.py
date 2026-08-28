@@ -452,6 +452,38 @@ def test_latest_option_price_rejects_underlying_value_as_put_premium(tmp_path):
     assert price is None
 
 
+def test_latest_option_price_accepts_exact_preopen_quote_without_day_range(tmp_path):
+    adapter = OmniSpreadReadOnlyAdapter(tmp_path)
+    adapter._shoonya_client = FakeShoonya()
+    adapter._shoonya_client.get_quotes = lambda exchange, token: {
+        "exch": "NFO", "token": "37010", "tsym": "ITC28JUL26C287.5",
+        "lp": "1.25", "ti": "0.05", "sptprc": "290.00",
+    }
+
+    assert adapter.latest_option_price({
+        "symbol": "ITC", "instrument": "CE", "expiry": "28-Jul-2026", "strike": 287.5,
+    }) == 1.25
+
+
+def test_latest_option_price_retries_exact_token_after_wrong_exchange_quote(tmp_path):
+    adapter = OmniSpreadReadOnlyAdapter(tmp_path)
+    adapter._shoonya_client = FakeShoonya()
+    wrong = {
+        "exch": "NSE", "token": "123", "tsym": "ITC-EQ", "lp": "290.00",
+        "ti": "0.05", "sptprc": "290.00",
+    }
+    valid = {
+        "exch": "NFO", "token": "37010", "tsym": "ITC28JUL26C287.5",
+        "lp": "1.25", "ti": "0.05", "sptprc": "290.00",
+    }
+    quotes = iter([wrong, valid])
+    adapter._shoonya_client.get_quotes = lambda exchange, token: next(quotes)
+
+    assert adapter.latest_option_price({
+        "symbol": "ITC", "instrument": "CE", "expiry": "28-Jul-2026", "strike": 287.5,
+    }) == 1.25
+
+
 
 def test_rejects_credit_candidate_when_iv_hv_below_threshold(tmp_path):
     structures = {

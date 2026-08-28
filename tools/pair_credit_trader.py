@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import sys
+import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
@@ -802,20 +803,25 @@ class OmniSpreadReadOnlyAdapter:
         client = self._ensure_shoonya_client()
         if client is None:
             return None
-        quote = client.get_quotes(resolved["exchange"], resolved["token"]) or {}
-        if not self._is_valid_option_quote(leg, resolved, quote):
-            return None
-        try:
-            price = float(quote.get("lp"))
-        except (TypeError, ValueError):
-            logger.warning(
-                "Pair-credit MTM: quote missing lp for %s token=%s quote=%s",
-                resolved["tsym"],
-                resolved["token"],
-                quote,
-            )
-            return None
-        return price if math.isfinite(price) and price >= 0 else None
+        # Shoonya can intermittently return an NSE equity quote for an NFO
+        # token. Re-query the same exact token; never substitute another price.
+        for attempt in range(2):
+            quote = client.get_quotes(resolved["exchange"], resolved["token"]) or {}
+            if self._is_valid_option_quote(leg, resolved, quote):
+                try:
+                    price = float(quote.get("lp"))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Pair-credit MTM: quote missing lp for %s token=%s quote=%s",
+                        resolved["tsym"],
+                        resolved["token"],
+                        quote,
+                    )
+                    return None
+                return price if math.isfinite(price) and price >= 0 else None
+            if attempt == 0:
+                time.sleep(0.05)
+        return None
 
     def expiry_settlement_price(self, leg: dict[str, Any], expiry: date) -> float | None:
         """Return an expired option's intrinsic value from its expiry-day close.
@@ -929,8 +935,6 @@ class OmniSpreadReadOnlyAdapter:
 
         try:
             price = float(quote["lp"])
-            day_low = float(quote["l"])
-            day_high = float(quote["h"])
             tick_size = float(quote["ti"])
             strike = float(leg["strike"])
             underlying = float(quote["sptprc"])
@@ -938,13 +942,24 @@ class OmniSpreadReadOnlyAdapter:
             logger.warning("Pair-credit MTM: incomplete option quote for %s: %s", expected_tsym, quote)
             return False
 
-        values = (price, day_low, day_high, tick_size, strike, underlying)
+        values = (price, tick_size, strike, underlying)
         if not all(math.isfinite(value) for value in values) or tick_size <= 0 or strike <= 0 or underlying <= 0:
             logger.warning("Pair-credit MTM: non-finite or invalid option quote for %s: %s", expected_tsym, quote)
             return False
-        if price < day_low - tick_size or price > day_high + tick_size:
-            logger.warning("Pair-credit MTM: lp outside daily range for %s: %s", expected_tsym, quote)
-            return False
+
+        # Market-open responses contain no intraday high/low. They are still
+        # valid exact-contract quotes. Validate the range only when Shoonya
+        # actually supplies both fields.
+        if "l" in quote or "h" in quote:
+            try:
+                day_low = float(quote["l"])
+                day_high = float(quote["h"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Pair-credit MTM: malformed daily range for %s: %s", expected_tsym, quote)
+                return False
+            if not all(math.isfinite(value) for value in (day_low, day_high)) or price < day_low - tick_size or price > day_high + tick_size:
+                logger.warning("Pair-credit MTM: lp outside daily range for %s: %s", expected_tsym, quote)
+                return False
 
         option_type = str(leg.get("instrument", "")).upper()
         upper_bound = strike if option_type == "PE" else underlying if option_type == "CE" else None
