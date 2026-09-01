@@ -100,11 +100,7 @@ from tools.memory_reader import MemoryReader
 from tools.goal_manager import GoalManager
 from tools.registry import ToolRegistry
 from tools.market_calendar import get_market_holiday_name, is_nse_trading_day
-from tools.blitz_schedule import (
-    gammablast_only_reason,
-    is_gammablast_only_day,
-    is_pair_credit_opening_scan_time,
-)
+from tools.blitz_schedule import is_pair_credit_opening_scan_time
 from agent_loop import AgentLoop
 from tools.futures_filter_loader import load_active_filters, apply_promoted_filters
 from tools.gemini_gatekeeper import GeminiGatekeeper
@@ -182,9 +178,6 @@ class BlitzTrader:
             return
 
         today = datetime.now(IST).date()
-        if is_gammablast_only_day(today):
-            logger.info("BlitzTrader disabled today: %s", gammablast_only_reason(today))
-            return
         if not is_nse_trading_day(today):
             holiday_name = get_market_holiday_name(today)
             reason = holiday_name or "weekend"
@@ -225,9 +218,6 @@ class BlitzTrader:
         logger.info("=== PAIR CREDIT REPLACEMENT MODE ===")
         now = datetime.now(IST)
         today = now.date()
-        if is_gammablast_only_day(today):
-            logger.info("Pair-credit mode disabled today: %s", gammablast_only_reason(today))
-            return
         if not is_nse_trading_day(today):
             holiday_name = get_market_holiday_name(today)
             logger.info("NSE market closed today (%s): %s", today.isoformat(), holiday_name or "weekend")

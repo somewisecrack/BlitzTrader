@@ -10,8 +10,8 @@ def test_monday_is_allowed():
     assert main(["is_trading_day.py", "--date", "2026-06-22"]) == 0
 
 
-def test_tuesday_is_reserved_for_gammablast():
-    assert main(["is_trading_day.py", "--date", "2026-06-23"]) == 1
+def test_tuesday_is_allowed():
+    assert main(["is_trading_day.py", "--date", "2026-06-23"]) == 0
 
 
 def test_wednesday_is_allowed():

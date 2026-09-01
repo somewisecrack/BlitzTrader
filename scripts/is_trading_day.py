@@ -1,8 +1,7 @@
 """
 Systemd ExecCondition helper for BlitzTrader.
 
-Exit 0 on eligible NSE trading days. Exit 1 on Tuesday GammaBlast sessions,
-weekends, and known NSE holidays so
+Exit 0 on eligible NSE trading days. Exit 1 on weekends and known NSE holidays so
 systemd skips ExecStart without marking the service as failed.
 """
 from __future__ import annotations
@@ -15,7 +14,6 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.blitz_schedule import gammablast_only_reason, is_gammablast_only_day  # noqa: E402
 from tools.market_calendar import get_market_holiday_name, is_nse_trading_day  # noqa: E402
 
 
@@ -31,10 +29,6 @@ def main(argv: list[str] | None = None) -> int:
     if not is_nse_trading_day(day):
         reason = get_market_holiday_name(day) or "weekend"
         print(f"NSE market closed: {day.isoformat()} ({reason})")
-        return 1
-
-    if is_gammablast_only_day(day):
-        print(f"BlitzTrader disabled: {gammablast_only_reason(day)}")
         return 1
 
     print(f"BlitzTrader trading day: {day.isoformat()}")
