@@ -1533,16 +1533,30 @@ class PairCreditTrader:
         open_positions = self.ledger.open_positions()
         remaining = self.ledger.remaining_capital()
         allocated = self.ledger.allocated_margin()
+        closed_positions = self.ledger.state.get("closed_positions", [])
+        today_key = _date_key()
+        realized_today = sum(
+            float(position.get("realized_pnl", 0) or 0)
+            for position in closed_positions
+            if str(position.get("closed_at", "")).startswith(today_key)
+        )
+        realized_total = sum(
+            float(position.get("realized_pnl", 0) or 0)
+            for position in closed_positions
+        )
         lines = [
             "Pair-credit virtual portfolio",
             f"Capital: Rs {self.config.capital:,.2f}",
             f"Allocated margin: Rs {allocated:,.2f}",
             f"Unallocated: Rs {remaining:,.2f}",
+            f"Realized P&L today: Rs {realized_today:+,.2f}",
+            f"Cumulative realized P&L: Rs {realized_total:+,.2f}",
             "",
             "Open Positions:",
         ]
         if not open_positions:
             lines.append("- None")
+            lines.append("\nTotal unrealized P&L: Rs +0.00")
             return "\n".join(lines)
         total_pnl = 0.0
         total_ok = True

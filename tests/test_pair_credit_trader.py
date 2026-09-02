@@ -236,6 +236,33 @@ def test_manual_exit_records_pnl_and_blocks_same_day_reallocation_until_next_sca
     assert second["status"] == "skipped"
 
 
+def test_status_message_reports_today_and_cumulative_realized_pnl(tmp_path, monkeypatch):
+    adapter = FakeAdapter({"AAA/BBB": _structure("AAA/BBB", 10_000), "CCC/DDD": _structure("CCC/DDD", 10_000)})
+    trader = _trader(tmp_path, adapter)
+    trader.run_opening_allocation()
+
+    ist = pytz.timezone("Asia/Kolkata")
+    monkeypatch.setattr(
+        pair_credit_trader,
+        "_now_ist",
+        lambda: ist.localize(datetime(2026, 9, 2, 10, 0)),
+    )
+    trader.ledger.close_position(
+        trader.ledger.open_positions()[0]["position_id"],
+        {"closed_at": "2026-09-02T10:00:00+05:30", "realized_pnl": 600.0},
+    )
+    trader.ledger.state["closed_positions"].append(
+        {"closed_at": "2026-09-01T10:00:00+05:30", "realized_pnl": -125.0}
+    )
+    trader.ledger.save()
+
+    message = trader.status_message()
+
+    assert "Realized P&L today: Rs +600.00" in message
+    assert "Cumulative realized P&L: Rs +475.00" in message
+    assert "Total unrealized P&L:" in message
+
+
 def test_same_day_expiry_does_not_close_before_market_close(tmp_path, monkeypatch):
     structure = _structure("AAA/BBB", 10_000)
     for leg in structure["legs"]:
