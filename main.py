@@ -86,7 +86,7 @@ from config import (
     SENSEX_SPOT_EXCHANGE,
     setup_logging,
 )
-from broker.shoonya_client import ShoonyaClient, assert_client_identity
+from broker.shoonya_client import ShoonyaClient, assert_client_identity, is_non_retryable_login_error
 from broker.live_feed import LiveFeedManager
 from tools.state_manager import StateManager
 from tools.virtual_ledger import VirtualLedger
@@ -261,6 +261,12 @@ class BlitzTrader:
                 if success:
                     break
                 logger.warning("Shoonya login attempt %d/%d failed: %s", attempt, max_retries, msg)
+                if is_non_retryable_login_error(msg):
+                    self._telegram.send_telegram(
+                        "BlitzTrader: Shoonya login aborted because the broker rejected the credentials "
+                        f"or blocked the account: {msg}. No further login attempts will be sent."
+                    )
+                    return
                 if attempt % 5 == 0:
                     self._telegram.send_telegram(
                         f"Shoonya still offline/login failing (attempt {attempt}). Retrying."
@@ -618,6 +624,13 @@ class BlitzTrader:
             )
             if success:
                 break
+
+            if is_non_retryable_login_error(msg):
+                self._telegram.send_telegram(
+                    "BlitzTrader: Shoonya login aborted because the broker rejected the credentials "
+                    f"or blocked the account: {msg}. No further login attempts will be sent."
+                )
+                raise RuntimeError(f"Non-retryable Shoonya login failure: {msg}")
 
             now_ist = datetime.now(IST).strftime("%H:%M:%S")
             logger.warning(

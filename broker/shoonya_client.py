@@ -31,10 +31,26 @@ NFO_EXCHANGE = "NFO"
 CLIENT_APP = "BlitzTrader"
 SUPPORTS_BLITZ_LOGIN_AUTH_CODE = True
 
-# Internal web-app API secret (decoded from Shoonya OAuth portal JS)
-# Xa = new Uint8Array([83,50,97,114,110,46,27,93]) → each char = byte + index
+# Shoonya OAuth web-app API secret (decoded from the portal's published client JS).
+# This is the single QuickAuth protocol used by the OAuth flow below; do not add
+# alternate credential payloads as fallbacks.
+# Xa = new Uint8Array([83,50,97,114,110,46,27,93]) -> each char = byte + index
 _K = [83, 50, 97, 114, 110, 46, 27, 93]
-_INTERNAL_SECRET = "".join(chr(b + i) for i, b in enumerate(_K))  # "S3cur3!d"
+_SHOONYA_WEB_APP_SECRET = "".join(chr(b + i) for i, b in enumerate(_K))
+
+
+def is_non_retryable_login_error(message: str | None) -> bool:
+    """Return True only for credential/account failures retries cannot fix."""
+    normalized = str(message or "").lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "user blocked",
+            "invalid vendor code",
+            "invalid password",
+            "invalid user",
+        )
+    )
 
 
 @dataclass
@@ -199,74 +215,49 @@ class ShoonyaClient:
 
                 pwd = hashlib.sha256(password.encode()).hexdigest()
                 totp = pyotp.TOTP(totp_secret).now()
-                payloads = [
-                    {
-                        # Official Shoonya/Noren API login payload.
-                        "source": "API",
-                        "apkversion": "1.0.0",
-                        "uid": user_id,
-                        "pwd": pwd,
-                        "factor2": totp,
-                        "vc": vendor_code,
-                        "appkey": hashlib.sha256(
-                            f"{user_id}|{api_key}".encode("utf-8")
-                        ).hexdigest(),
-                        "imei": imei,
-                    },
-                    {
-                        # Legacy web QuickAuth fallback retained only for
-                        # Shoonya environments that still reject Prism API keys.
-                        "apkversion": "W2_20250926",
-                        "uid": user_id,
-                        "pwd": pwd,
-                        "factor2": totp,
-                        "appkey": hashlib.sha256(
-                            (user_id + "|" + _INTERNAL_SECRET).encode()
-                        ).hexdigest(),
-                        "imei": imei,
-                        "addldivinf": "BlitzTrader/1.0",
-                        "source": "API",
-                        "vc": "NOREN_API",
-                        "app_key": vendor_code,
-                    },
-                ]
+                payload = {
+                    "apkversion": "W2_20250926",
+                    "uid": user_id,
+                    "pwd": pwd,
+                    "factor2": totp,
+                    "appkey": hashlib.sha256(
+                        (user_id + "|" + _SHOONYA_WEB_APP_SECRET).encode()
+                    ).hexdigest(),
+                    "imei": imei,
+                    "addldivinf": "BlitzTrader/1.0",
+                    "source": "API",
+                    "vc": "NOREN_API",
+                    "app_key": vendor_code,
+                }
+                resp = self._session.post(
+                    f"{BASE_URL}/QuickAuth",
+                    data="jData=" + json.dumps(payload),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=30,
+                )
 
-                resp = None
-                result = None
-                for idx, payload in enumerate(payloads, start=1):
-                    resp = self._session.post(
-                        f"{BASE_URL}/QuickAuth",
-                        data="jData=" + json.dumps(payload),
-                        headers={"Content-Type": "application/x-www-form-urlencoded"},
-                        timeout=30,
-                    )
+                if resp.status_code >= 500:
+                    last_err = f"HTTP {resp.status_code} from QuickAuth"
+                    logger.warning("QuickAuth attempt %s failed: %s", attempt, last_err)
+                    time.sleep(attempt)
+                    continue
 
-                    if resp.status_code >= 500:
-                        last_err = f"HTTP {resp.status_code} from QuickAuth payload {idx}"
-                        logger.warning("QuickAuth attempt %s failed: %s", attempt, last_err)
-                        continue
+                try:
+                    result = json.loads(resp.text)
+                except Exception:
+                    body = (resp.text or "").strip().replace("\n", " ")
+                    last_err = f"Non-JSON QuickAuth response HTTP {resp.status_code}: {body[:160]}"
+                    logger.warning("QuickAuth attempt %s failed: %s", attempt, last_err)
+                    time.sleep(attempt)
+                    continue
 
-                    try:
-                        result = json.loads(resp.text)
-                    except Exception:
-                        body = (resp.text or "").strip().replace("\n", " ")
-                        last_err = (
-                            f"Non-JSON QuickAuth response HTTP {resp.status_code} "
-                            f"payload {idx}: {body[:160]}"
-                        )
-                        logger.warning("QuickAuth attempt %s failed: %s", attempt, last_err)
-                        continue
+                if result.get("stat") == "Ok":
+                    return result.get("susertoken"), None
 
-                    if result.get("stat") == "Ok":
-                        return result.get("susertoken"), None
-
-                    last_err = result.get("emsg", "unknown error")
-                    logger.warning(
-                        "QuickAuth attempt %s payload %s rejected: %s",
-                        attempt,
-                        idx,
-                        last_err,
-                    )
+                last_err = result.get("emsg", "unknown error")
+                logger.warning("QuickAuth attempt %s rejected: %s", attempt, last_err)
+                if is_non_retryable_login_error(last_err):
+                    return None, last_err
 
                 time.sleep(attempt)
                 continue
